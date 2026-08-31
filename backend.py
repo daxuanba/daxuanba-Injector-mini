@@ -2386,51 +2386,47 @@ class DxbBackend:
     async def find_appid_by_name(self, game_name: str) -> List[Dict]:
         try:
             self.log.info(f"正在尝试搜索游戏: {game_name}")
-            
-            
-            # 发送请求
-            r = await self.client.get(url, params={'term': game_name}, headers=headers, timeout=20)
-            
-            if r.status_code == 403:
-                self.log.warning("API请求被拦截 (403 Forbidden)，可能是API鉴权失败或WAF拦截。")
-                return []
-            
-            r.raise_for_status()
-            
-            resp_json = r.json()
-            
-            # 解析 API 返回结构: {"status": "ok", "data": [{"appid":..., "name":...}, ...]}
-            raw_data = []
-            if isinstance(resp_json, dict):
-                # 检查状态或直接获取data
-                if resp_json.get("status") == "ok" or "data" in resp_json:
-                    raw_data = resp_json.get("data", [])
-            
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            url = "https://store.steampowered.com/api/storesearch"
+            try:
+                r = await self.client.get(url, params={'term': game_name, 'l': 'schinese', 'cc': 'CN'}, headers=headers, timeout=20)
+                r.raise_for_status()
+                resp_json = r.json()
+                raw_data = resp_json.get('items', []) if isinstance(resp_json, dict) else []
+            except Exception as e1:
+                self.log.warning(f"Steam 官方搜索失败，尝试备用源: {e1}")
+                return await self._find_appid_fallback(game_name, headers)
             games_list = []
-            if isinstance(raw_data, list):
-                for item in raw_data:
-                    appid = item.get('appid')
-                    name = item.get('name')
-                    image = item.get('image')
-                    
-                    if appid and name:
-                        # 兼容 Web GUI 前端，将 image 映射为 header_image
-                        games_list.append({
-                            'appid': str(appid),
-                            'name': name,
-                            'header_image': image
-                        })
-
+            for item in raw_data:
+                appid = item.get('id') or item.get('appid')
+                name = item.get('name')
+                image = item.get('tiny_image') or item.get('header_image') or item.get('image')
+                if appid and name:
+                    games_list.append({'appid': str(appid), 'name': name, 'header_image': image})
             if games_list:
                 self.log.info(f"成功找到 {len(games_list)} 个结果")
                 return games_list
-            else:
-                self.log.warning("未找到相关游戏。")
-                
+            self.log.warning("未找到相关游戏。")
         except Exception as e:
             self.log.error(f"搜索游戏 '{game_name}' 失败: {self.stack_error(e)}")
-            
         return []
+
+    async def _find_appid_fallback(self, game_name: str, headers: Dict) -> List[Dict]:
+        try:
+            api = "https://steamapi.xiaoheihe.cn/v1/search?query=" + quote(game_name)
+            r = await self.client.get(api, headers=headers, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            out = []
+            items = data.get('data', {}).get('items') or data.get('items') or []
+            for it in items:
+                appid = it.get('appid') or it.get('id')
+                name = it.get('name') or it.get('title')
+                if appid and name:
+                    out.append({'appid': str(appid), 'name': name, 'header_image': it.get('img') or it.get('image') or ''})
+            return out
+        except Exception:
+            return []
 
     async def cleanup_temp_files(self):
         try:
