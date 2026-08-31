@@ -6,7 +6,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Theme Toggle Logic ---
     if (themeToggleBtn) {
         const body = document.body;
-        const themeKey = 'cai-install-theme-preference';
+        const root = document.documentElement;
+        const themeKey = 'dxb-theme-preference';
         const icon = themeToggleBtn.querySelector('.material-icons');
 
         const updateIcon = (theme) => {
@@ -22,8 +23,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const applyTheme = (theme) => {
             if (theme === 'dark') {
                 body.classList.add('dark-theme');
+                root.classList.add('dxb-dark');
+                root.classList.remove('dxb-light');
             } else {
                 body.classList.remove('dark-theme');
+                root.classList.add('dxb-light');
+                root.classList.remove('dxb-dark');
             }
             updateIcon(theme);
         };
@@ -34,7 +39,13 @@ document.addEventListener('DOMContentLoaded', () => {
         themeToggleBtn.addEventListener('click', () => {
             const isDark = body.classList.toggle('dark-theme');
             const newTheme = isDark ? 'dark' : 'light';
-            
+            if (newTheme === 'dark') {
+                root.classList.add('dxb-dark');
+                root.classList.remove('dxb-light');
+            } else {
+                root.classList.add('dxb-light');
+                root.classList.remove('dxb-dark');
+            }
             localStorage.setItem(themeKey, newTheme);
             updateIcon(newTheme);
         });
@@ -46,7 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (confirm('您确定要关闭应用吗？这将同时关闭网页和后台程序。')) {
                 // Inform the user
                 document.body.innerHTML = `
-                    <div style="display:flex; flex-direction:column; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; background-color:#1c1b1f; color:#e6e1e5;">
+                    <div class="dxb-shutdown">
                         <h1>正在关闭应用...</h1>
                         <p>您可以安全地关闭此浏览器标签页。</p>
                     </div>`;

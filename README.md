@@ -1,5 +1,7 @@
 # 大轩巴入库器网页版
 
+> 本目录为美化后的「大轩巴入库器网页版」（黑黄 DaXuanBa 主题、纯文字品牌、深色/浅色双模式）。对应的纯净原版见同级目录 `Cai-install-Web-GUI-114.514-原版`。
+
 本软件及cai install全系已完全停更，详细信息：
 
 Cai install Official全系列于2026年6月停更
@@ -115,6 +117,21 @@ Cai install全系（cai install xp,cai install GUI,cai install web ui,cai instal
     python app.py
     ```
     *(启动时会弹出一个小窗口提示选择端口，默认 `5000`，点击启动后浏览器会自动打开 Web 界面。)*
+
+### 方式三：QT6 桌面窗口（大轩巴桌面壳，推荐）
+
+不想用浏览器？用 `dxb_desktop.py` 直接开一个 QT6 窗口加载网页，内部已内嵌本地服务器：
+
+1. 安装依赖：
+    ```bash
+    pip install Flask Flask-SocketIO httpx aiofiles colorlog vdf ujson
+    pip install PySide6
+    ```
+2. 启动：
+    - 直接双击 `run_dxb_desktop.bat`（会自动装 PySide6 后运行），或
+    - 命令行运行 `python dxb_desktop.py`
+3. 窗口自动加载网页，顶栏为「大轩巴」纯文字标，页面右上角按钮可切换深色 / 浅色模式。
+    - 优先使用 PySide6，其次 PyQt6；若两者都未安装，会自动回退到系统默认浏览器打开网页。
 
 ---
 

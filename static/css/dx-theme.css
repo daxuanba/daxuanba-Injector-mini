@@ -1,18 +1,29 @@
 /* ============================================================
-   大轩巴入库器网页版 · DaXuanBa Theme
-   黑底 (#0b0b0b) + 品牌黄 (#f1c40f) · 简洁无 emoji
+   大轩巴入库器网页版 · DaXuanBa Theme v2
+   双模式：深色（黑 #0b0b0b + 黄 #f1c40f） / 浅色（白 + 黄 #f1c40f）
+   品牌只用文字，无图形图标 · 无 emoji
    本文件最后加载，统一压住全站 MD3 紫色变量
    ============================================================ */
 
-/* ---------- 浅色（大轩巴白） ---------- */
+/* ---------------- 公共 ---------------- */
 :root {
   --dx-yellow: #f1c40f;
   --dx-yellow-dark: #d4a017;
+  --dx-yellow-soft: rgba(241, 196, 15, 0.14);
   --dx-black: #0b0b0b;
+}
+
+/* ---------------- 浅色（大轩巴白，清爽，默认变量层） ---------------- */
+:root {
+  --dx-wordmark-fg: #111111;
+  --dx-appbar-bg: #ffffff;
+  --dx-appbar-line: rgba(241, 196, 15, 0.55);
+  --dx-card-border: #e8e8e8;
+  --dx-hairline: rgba(0, 0, 0, 0.08);
 
   --md-sys-color-primary: #f1c40f;
   --md-sys-color-on-primary: #111111;
-  --md-sys-color-primary-container: #fff7df;
+  --md-sys-color-primary-container: #fff6d8;
   --md-sys-color-on-primary-container: #6b5200;
 
   --md-sys-color-secondary: #5a5a5a;
@@ -30,38 +41,43 @@
   --md-sys-color-error-container: #fbe4e1;
   --md-sys-color-on-error-container: #5c110a;
 
-  --md-sys-color-surface: #ffffff;
+  --md-sys-color-surface: #f7f7f7;
   --md-sys-color-on-surface: #141414;
   --md-sys-color-surface-variant: #e6e6e6;
   --md-sys-color-on-surface-variant: #5a5a5a;
 
   --md-sys-color-surface-container-lowest: #ffffff;
-  --md-sys-color-surface-container-low: #f6f6f6;
-  --md-sys-color-surface-container: #efefef;
-  --md-sys-color-surface-container-high: #e8e8e8;
-  --md-sys-color-surface-container-highest: #e2e2e2;
+  --md-sys-color-surface-container-low: #fbfbfb;
+  --md-sys-color-surface-container: #ffffff;
+  --md-sys-color-surface-container-high: #f2f2f2;
+  --md-sys-color-surface-container-highest: #e9e9e9;
 
-  --md-sys-color-outline: #cfcfcf;
-  --md-sys-color-outline-variant: #e2e2e2;
+  --md-sys-color-outline: #d4d4d4;
+  --md-sys-color-outline-variant: #e6e6e6;
 
   --md-sys-color-success: #1e9e4a;
   --md-sys-color-on-success: #ffffff;
   --md-sys-color-success-container: #d8f5e1;
   --md-sys-color-on-success-container: #07361a;
 
-  --md-sys-color-warning: #e08a00;
+  --md-sys-color-warning: #d98b00;
   --md-sys-color-on-warning: #111111;
   --md-sys-color-warning-container: #ffe9c2;
   --md-sys-color-on-warning-container: #3d2600;
 
-  --md-sys-elevation-shadow-5: 0px 4px 4px 0px rgba(0, 0, 0, 0.3), 0px 8px 12px 6px rgba(0, 0, 0, 0.15);
+  --md-sys-elevation-shadow-5: 0px 4px 4px 0px rgba(0, 0, 0, 0.08), 0px 8px 12px 6px rgba(0, 0, 0, 0.05);
 }
 
-/* ---------- 深色（大轩巴黑，默认） ---------- */
+/* ---------------- 深色（大轩巴黑，默认） ----------------
+   :root.dxb-dark 由 <head> 内联脚本提前设置，避免刷新白闪；
+   body.dark-theme 由 theme-toggle.js 运行时同步。 */
+:root.dxb-dark,
 body.dark-theme {
-  --dx-yellow: #f1c40f;
-  --dx-yellow-dark: #d4a017;
-  --dx-black: #0b0b0b;
+  --dx-wordmark-fg: #f1c40f;
+  --dx-appbar-bg: #0b0b0b;
+  --dx-appbar-line: rgba(241, 196, 15, 0.35);
+  --dx-card-border: #2a2a2a;
+  --dx-hairline: rgba(241, 196, 15, 0.10);
 
   --md-sys-color-primary: #f1c40f;
   --md-sys-color-on-primary: #111111;
@@ -111,21 +127,34 @@ body.dark-theme {
 }
 
 /* ============================================================
-   细节打磨：顶栏、强调、滚动条、聚焦、图标
+   品牌文字标（无图形图标）
    ============================================================ */
-
-/* 顶栏纯黑 + 底部黄色细线，强化品牌 */
-.app-bar {
-  background-color: var(--dx-black) !important;
-  border-bottom: 1px solid color-mix(in srgb, var(--dx-yellow) 35%, transparent);
+.dxb-wordmark {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--dx-wordmark-fg) !important;
+  white-space: nowrap;
+  user-select: none;
+  transition: color 0.25s ease;
+}
+.dxb-wordmark .dxb-accent {
+  color: var(--dx-yellow);
+}
+/* 副标题/次级文字标（小号） */
+.dxb-wordmark-sm {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: var(--dx-wordmark-fg) !important;
+  white-space: nowrap;
 }
 
-/* 大轩巴字标 logo */
-.app-logo {
-  height: 30px;
-  width: auto;
-  display: block;
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--dx-yellow) 40%, transparent));
+/* 顶栏：跟随模式（浅色白 / 深色黑），底部黄色细线 */
+.app-bar {
+  background-color: var(--dx-appbar-bg) !important;
+  border-bottom: 1px solid var(--dx-appbar-line);
+  box-shadow: 0 1px 0 var(--dx-hairline);
 }
 
 .app-title {
@@ -134,9 +163,13 @@ body.dark-theme {
 
 .app-version {
   color: var(--dx-yellow) !important;
-  background-color: color-mix(in srgb, var(--dx-yellow) 14%, transparent) !important;
+  background-color: var(--dx-yellow-soft) !important;
   font-weight: 600;
 }
+
+/* ============================================================
+   控件与细节
+   ============================================================ */
 
 /* 主按钮 = 品牌黄；文字黑，hover 加深 */
 .btn-primary {
@@ -146,17 +179,17 @@ body.dark-theme {
 }
 .btn-primary:hover:not(:disabled) {
   background-color: var(--dx-yellow-dark) !important;
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--dx-yellow) 45%, transparent) !important;
+  box-shadow: 0 4px 14px rgba(241, 196, 15, 0.4) !important;
 }
 
-/* 次要按钮：低调灰底，hover 出黄边 */
+/* 次要按钮：低调底，hover 出黄边 */
 .btn-secondary {
   background-color: var(--md-sys-color-surface-container-high) !important;
   color: var(--md-sys-color-on-surface) !important;
 }
 .btn-secondary:hover:not(:disabled) {
   background-color: var(--md-sys-color-surface-container-highest) !important;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dx-yellow) 50%, transparent) !important;
+  box-shadow: inset 0 0 0 1px rgba(241, 196, 15, 0.5) !important;
 }
 
 /* 文字按钮用黄 */
@@ -164,7 +197,7 @@ body.dark-theme {
   color: var(--dx-yellow) !important;
 }
 .btn-text:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--dx-yellow) 12%, transparent) !important;
+  background-color: var(--dx-yellow-soft) !important;
 }
 
 /* 卡片头部图标 / 强调元素统一为黄 */
@@ -174,10 +207,17 @@ body.dark-theme {
   color: var(--dx-yellow);
 }
 
+/* 卡片：细边框，去紫调 */
+.card,
+.settings-card,
+.info-card {
+  border: 1px solid var(--dx-card-border) !important;
+}
+
 /* 输入框聚焦黄边 */
 .text-field:focus {
   border-color: var(--dx-yellow) !important;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dx-yellow) 18%, transparent);
+  box-shadow: 0 0 0 3px rgba(241, 196, 15, 0.2);
 }
 
 /* 单选 / 复选选中 = 黄 */
@@ -204,10 +244,10 @@ body.dark-theme .checkbox-item input[type="checkbox"]:checked + .checkbox-button
 .game-search-results::-webkit-scrollbar-thumb,
 .form-scroll-content::-webkit-scrollbar-thumb,
 .progress-container::-webkit-scrollbar-thumb {
-  background-color: color-mix(in srgb, var(--dx-yellow) 55%, #555);
+  background-color: rgba(241, 196, 15, 0.55);
 }
 
-/* 主题切换 / 背景 FAB 配色 */
+/* 悬浮按钮配色 */
 #themeToggleBtn {
   background-color: var(--dx-yellow) !important;
   color: #111111 !important;
@@ -221,34 +261,72 @@ body.dark-theme .checkbox-item input[type="checkbox"]:checked + .checkbox-button
   color: var(--md-sys-color-on-error-container) !important;
 }
 
-/* 关于页项目 logo：透明容器，由 SVG 自带黄底 */
+/* ============================================================
+   关于页
+   ============================================================ */
+
+/* 项目标识：纯文字块，无图形 */
 .project-logo {
   background-color: transparent !important;
   box-shadow: none !important;
+  width: auto !important;
+  height: auto !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
 }
-.project-logo .material-icons {
-  color: #111111 !important;
+.project-logo .dxb-wordmark {
+  font-size: 26px;
 }
 .project-logo img {
-  width: 56px;
-  height: 56px;
+  display: none !important;
 }
 
-/* 关于页技术栈卡片去掉紫渐变，改黑黄 */
+/* 技术栈卡片去紫渐变 */
 .tech-info {
   border: 1px solid var(--md-sys-color-outline-variant);
 }
 body.dark-theme .tech-item strong {
   color: var(--dx-yellow);
 }
+.tech-item strong {
+  color: #8a6d00;
+}
 
-/* 关机等内联提示也跟随品牌（兜底） */
+/* 去掉任何残留紫色渐变 */
+.project-header,
+.project-info-card {
+  background: var(--md-sys-color-surface-container) !important;
+}
+
+/* 深色模式兜底背景 */
+:root.dxb-dark body,
 body.dark-theme {
   background-color: var(--dx-black);
 }
 
-/* 去掉任何残留紫色渐变（about 原 gradient） */
-.project-header,
-.project-info-card {
-  background: var(--md-sys-color-surface-container) !important;
+/* 关机提示页跟随主题 */
+.dxb-shutdown {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  font-family: 'Roboto', -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  background-color: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
+  gap: 8px;
+}
+.dxb-shutdown h1 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.dxb-shutdown p {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 14px;
+}
+
+/* 主题切换按钮：文字化提示（隐藏图标字体依赖） */
+#themeToggleBtn .material-icons {
+  font-size: 22px;
 }
