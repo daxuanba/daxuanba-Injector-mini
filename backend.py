@@ -47,11 +47,17 @@ DEFAULT_CONFIG = {
     "background_brightness": 80, 
     "show_console_on_startup": False,
     "force_unlocker_type": "auto",
+    "auto_install_unlocker": True,
+    "unlocker_preference": "greenluma",
+    "greenluma_repo": "WinterSamza/GreenLuma_2025",
+    "steamtools_repo": "SteamTools/STAupdater",
     "Custom_Repos": {
         "github": [],
         "zip": []
     },
     "QA1": "温馨提示: Github_Personal_Token(个人访问令牌)可在Github设置的最底下开发者选项中找到, 详情请看教程。",
+    "QA6": "auto_install_unlocker: 未检测到解锁工具时自动下载并安装，默认开。unlocker_preference 填 'greenluma' 或 'steamtools'。",
+    "QA7": "greenluma_repo / steamtools_repo: 自动安装所用的 GitHub 仓库（owner/repo），请填写发布 Release 的仓库。",
     "QA2": "Force_Unlocker: 强制指定解锁工具, 填入 'steamtools' 或 'greenluma'。留空则自动检测。",
     "QA3": "Custom_Repos: 自定义清单库配置。github数组用于添加GitHub仓库，zip数组用于添加ZIP清单库。",
     "QA4": "GitHub仓库格式: {\"name\": \"显示名称\", \"repo\": \"用户名/仓库名\"}",
@@ -310,8 +316,16 @@ class DxbBackend:
                 self.log.info("自动检测到解锁工具: GreenLuma")
                 self.unlocker_type = "greenluma"
             else:
-                self.log.warning("未能自动检测到解锁工具。将默认使用标准模式（可能需要手动配置）。")
-                self.unlocker_type = "none"
+                self.log.warning("未能自动检测到解锁工具。")
+                if self.config.get("auto_install_unlocker", True):
+                    installed = await self.ensure_unlocker_installed()
+                    if installed:
+                        self.unlocker_type = installed
+                        self.log.info(f"已自动安装解锁工具: {installed}")
+                    else:
+                        self.unlocker_type = "none"
+                else:
+                    self.unlocker_type = "none"
 
         try:
             (self.steam_path / 'config' / 'stplug-in').mkdir(parents=True, exist_ok=True)
@@ -323,6 +337,82 @@ class DxbBackend:
             self.log.error(f"创建Steam子目录时失败: {e}")
 
         return self.unlocker_type
+
+    async def ensure_unlocker_installed(self) -> str | None:
+        pref = self.config.get("unlocker_preference", "greenluma")
+        repo = self.config.get(f"{pref}_repo", "")
+        if not repo:
+            self.log.warning("未配置解锁器仓库，跳过自动安装。")
+            return None
+        self.log.info(f"未检测到解锁工具，正在自动下载并安装 {pref}（仓库 {repo}）...")
+        asset = await self._fetch_latest_release_asset(repo, ['.zip', '.7z'])
+        if not asset:
+            self.log.error("获取最新发布资产失败，自动安装中止。")
+            return None
+        download_url, asset_name = asset
+        zpath = self.temp_path / asset_name
+        try:
+            data = await self._download_bytes(download_url)
+            if not data:
+                return None
+            self.temp_path.mkdir(parents=True, exist_ok=True)
+            zpath.write_bytes(data)
+            import zipfile, shutil
+            ext_dir = self.temp_path / 'unlocker_extract'
+            with zipfile.ZipFile(zpath) as zf:
+                zf.extractall(ext_dir)
+            if pref == 'greenluma':
+                copied = False
+                for dll in ext_dir.rglob('GreenLuma_2025_*.dll'):
+                    shutil.copy2(dll, self.steam_path / dll.name)
+                    copied = True
+                if copied:
+                    self.log.info("GreenLuma DLL 已安装到 Steam 目录。")
+                    return 'greenluma'
+                self.log.warning("发布包中未找到 GreenLuma DLL。")
+                return None
+            else:
+                dst = self.steam_path / 'stplug-in'
+                dst.mkdir(parents=True, exist_ok=True)
+                for item in ext_dir.rglob('*'):
+                    if item.is_file():
+                        shutil.copy2(item, dst / item.name)
+                self.log.info("SteamTools 文件已释放到 Steam/stplug-in，请运行其安装器完成注册。")
+                return 'steamtools'
+        except Exception as e:
+            self.log.error(f"自动安装解锁工具失败: {self.stack_error(e)}")
+            return None
+        finally:
+            import shutil
+            shutil.rmtree(self.temp_path / 'unlocker_extract', ignore_errors=True)
+            if zpath.exists():
+                zpath.unlink()
+
+    async def _fetch_latest_release_asset(self, repo: str, exts: list) -> Tuple[str, str] | None:
+        api = f"https://api.github.com/repos/{repo}/releases/latest"
+        try:
+            github_token = self.config.get("Github_Personal_Token", "").strip()
+            headers = {'Authorization': f'Bearer {github_token}'} if github_token else {}
+            headers['User-Agent'] = 'DaXuanBa-Injector'
+            r = await self.client.get(api, headers=headers, timeout=20)
+            r.raise_for_status()
+            rel = r.json()
+            for a in rel.get('assets', []):
+                if any(str(a['name']).lower().endswith(e) for e in exts):
+                    return a['browser_download_url'], a['name']
+            self.log.warning(f"发布 {rel.get('tag_name')} 中无匹配资产: {exts}")
+        except Exception as e:
+            self.log.error(f"查询 {repo} 发布失败: {self.stack_error(e)}")
+        return None
+
+    async def _download_bytes(self, url: str) -> bytes | None:
+        try:
+            r = await self.client.get(url, timeout=120, follow_redirects=True)
+            r.raise_for_status()
+            return r.content
+        except Exception as e:
+            self.log.error(f"下载失败: {self.stack_error(e)}")
+            return None
 
     def stack_error(self, exception: Exception) -> str:
         return ''.join(traceback.format_exception(type(exception), exception, exception.__traceback__))

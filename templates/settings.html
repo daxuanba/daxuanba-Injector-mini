@@ -45,6 +45,7 @@
             <button type="button" class="tab-btn active" data-cat="github">GitHub</button>
             <button type="button" class="tab-btn" data-cat="steam">Steam</button>
             <button type="button" class="tab-btn" data-cat="repos">清单库</button>
+            <button type="button" class="tab-btn" data-cat="unlocker">解锁器</button>
             <button type="button" class="tab-btn" data-cat="app">应用</button>
         </nav>
         <div class="card" data-category="github">
@@ -111,6 +112,43 @@
                     <h3>ZIP 清单库</h3>
                     <div id="zipReposList" class="repos-list">
                         <!-- 动态生成 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" data-category="unlocker">
+            <div class="card-header"><h2>解锁器自动安装</h2></div>
+            <div class="card-content">
+                <div class="setting-item">
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="autoInstallUnlocker" class="checkbox-input">
+                        <span class="checkbox-button"></span>
+                        <div class="checkbox-content">
+                            <span class="checkbox-label">未检测到时自动下载安装</span>
+                            <span class="checkbox-description">无解锁工具时静默下载安装，不弹下载提示</span>
+                        </div>
+                    </label>
+                </div>
+                <div class="setting-item">
+                    <div class="input-group">
+                        <label class="input-label">优先安装的解锁器</label>
+                        <div class="radio-group" style="margin-top: 8px;">
+                            <label class="radio-item"><input type="radio" name="unlockerPref" value="greenluma" checked><span class="radio-button"></span><span class="radio-label">GreenLuma</span></label>
+                            <label class="radio-item"><input type="radio" name="unlockerPref" value="steamtools"><span class="radio-button"></span><span class="radio-label">SteamTools</span></label>
+                        </div>
+                    </div>
+                </div>
+                <div class="setting-item">
+                    <div class="input-group">
+                        <label for="greenlumaRepo" class="input-label">GreenLuma 仓库 (owner/repo)</label>
+                        <input type="text" id="greenlumaRepo" class="text-field" placeholder="WinterSamza/GreenLuma_2025">
+                    </div>
+                </div>
+                <div class="setting-item">
+                    <div class="input-group">
+                        <label for="steamtoolsRepo" class="input-label">SteamTools 仓库 (owner/repo)</label>
+                        <input type="text" id="steamtoolsRepo" class="text-field" placeholder="SteamTools/STAupdater">
                     </div>
                 </div>
             </div>

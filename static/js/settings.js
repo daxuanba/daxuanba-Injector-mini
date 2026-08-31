@@ -17,6 +17,10 @@ class SettingsManager {
             toggleConsoleBtn: document.getElementById('toggleConsoleBtn'),
             showConsoleOnStartup: document.getElementById('showConsoleOnStartup'),
             forceUnlockerRadios: document.querySelectorAll('input[name="forceUnlocker"]'),
+            autoInstallUnlocker: document.getElementById('autoInstallUnlocker'),
+            unlockerPrefRadios: document.querySelectorAll('input[name="unlockerPref"]'),
+            greenlumaRepo: document.getElementById('greenlumaRepo'),
+            steamtoolsRepo: document.getElementById('steamtoolsRepo'),
             // NEW: 自定义清单库相关元素
             checkUpdatesBtn: document.getElementById('checkUpdatesBtn'),
             addGithubRepoBtn: document.getElementById('addGithubRepoBtn'),
@@ -411,6 +415,15 @@ class SettingsManager {
                     radio.checked = radio.value === forceUnlockerValue;
                 });
 
+                // 加载解锁器自动安装设置
+                this.elements.autoInstallUnlocker.checked = data.config.auto_install_unlocker !== false;
+                const prefValue = data.config.unlocker_preference || 'greenluma';
+                this.elements.unlockerPrefRadios.forEach(radio => {
+                    radio.checked = radio.value === prefValue;
+                });
+                this.elements.greenlumaRepo.value = data.config.greenluma_repo || '';
+                this.elements.steamtoolsRepo.value = data.config.steamtools_repo || '';
+
                 // NEW: 加载自定义清单库配置
                 this.customRepos = data.config.custom_repos || { github: [], zip: [] };
                 this.renderReposList();
@@ -436,6 +449,10 @@ class SettingsManager {
             logging_files: this.elements.loggingFiles.checked,
             show_console_on_startup: this.elements.showConsoleOnStartup.checked,
             force_unlocker_type: forceUnlockerValue,
+            auto_install_unlocker: this.elements.autoInstallUnlocker.checked,
+            unlocker_preference: (document.querySelector('input[name="unlockerPref"]:checked') || {}).value || 'greenluma',
+            greenluma_repo: this.elements.greenlumaRepo.value.trim(),
+            steamtools_repo: this.elements.steamtoolsRepo.value.trim(),
             // NEW: 保存自定义清单库配置
             custom_repos: this.customRepos,
         };

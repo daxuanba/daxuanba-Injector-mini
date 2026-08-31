@@ -521,6 +521,11 @@ def get_detailed_config():
             "background_brightness": config.get("background_brightness", 100),
             "show_console_on_startup": config.get("show_console_on_startup", False),
             "force_unlocker_type": config.get("force_unlocker_type", "auto"),
+            # 解锁器自动安装
+            "auto_install_unlocker": config.get("auto_install_unlocker", True),
+            "unlocker_preference": config.get("unlocker_preference", "greenluma"),
+            "greenluma_repo": config.get("greenluma_repo", "WinterSamza/GreenLuma_2025"),
+            "steamtools_repo": config.get("steamtools_repo", "SteamTools/STAupdater"),
             # NEW: 添加自定义清单库配置
             "custom_repos": config.get("Custom_Repos", {"github": [], "zip": []}),
         }})
@@ -547,8 +552,9 @@ def update_config():  # 改为同步函数
         # 更新所有可能的键
         updatable_keys = [
             "github_token", "steam_path", "debug_mode", "logging_files",
-            "background_image_path", "background_blur", "background_saturation", 
-            "background_brightness", "show_console_on_startup", "force_unlocker_type"
+            "background_image_path", "background_blur", "background_saturation",
+            "background_brightness", "show_console_on_startup", "force_unlocker_type",
+            "auto_install_unlocker", "unlocker_preference", "greenluma_repo", "steamtools_repo"
         ]
         key_map = {
             "github_token": "Github_Personal_Token",
