@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""大轩巴入库器网页版 · QT6 桌面壳
+"""大轩巴入库器mini · QT6 桌面壳
 =================================
 把内嵌 Flask 本地服务器装进一个 QT6 窗口，直接加载网页。
 - 优先 PySide6，其次 PyQt6（都需 WebEngine 组件）
@@ -204,7 +204,7 @@ def shutdown_server(url):
 HAVE_QT = None
 try:
     from PySide6.QtWidgets import QApplication, QMainWindow, QToolBar, QLabel
-    from PySide6.QtGui import QAction
+    from PySide6.QtGui import QAction, QIcon
     from PySide6.QtCore import QUrl
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWebEngineCore import QWebEnginePage
@@ -215,7 +215,7 @@ except ImportError as e:
     traceback.print_exc()
     try:
         from PyQt6.QtWidgets import QApplication, QMainWindow, QToolBar, QLabel
-        from PyQt6.QtGui import QAction
+        from PyQt6.QtGui import QAction, QIcon
         from PyQt6.QtCore import QUrl
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         from PyQt6.QtWebEngineCore import QWebEnginePage
@@ -226,7 +226,7 @@ except ImportError as e:
 
 # 无 QT 环境时给占位，保证模块仍能 import（此时走浏览器回退分支，不会实例化窗口）
 if HAVE_QT is None:
-    QMainWindow = QWebEngineView = QToolBar = QLabel = QAction = QUrl = QWebEnginePage = object
+    QMainWindow = QWebEngineView = QToolBar = QLabel = QAction = QIcon = QUrl = QWebEnginePage = object
 
 
 class DxbWebPage(QWebEnginePage):
@@ -239,7 +239,8 @@ class DxbWindow(QMainWindow):
     def __init__(self, url):
         super().__init__()
         self.base_url = url
-        self.setWindowTitle('大轩巴入库器网页版')
+        self.setWindowTitle('大轩巴入库器mini')
+        self.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
         self.resize(1240, 820)
         self.setStyleSheet(
             'QMainWindow{background:#0b0b0b;}'
@@ -310,6 +311,7 @@ def main():
     wait_server_ready(url)
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
     win = DxbWindow(url)
     win.show()
     app.exec()

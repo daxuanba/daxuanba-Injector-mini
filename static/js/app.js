@@ -147,7 +147,7 @@ class DxbWebApp {
             workshopBtn.innerHTML = '<span class="material-icons">build_circle</span>游戏入库';
             workshopBtn.title = '切换到游戏入库模式';
             cardIcon.textContent = 'extension';
-            cardTitle.textContent = '创意工坊入库';
+            cardTitle.textContent = '创意工坊资源下载';
             modeIndicator.style.display = 'block';
             gameModeOptions.style.display = 'none';
             workshopModeOptions.style.display = 'block';
@@ -157,8 +157,8 @@ class DxbWebApp {
             appIdInput.placeholder = '例如: 创意工坊链接或物品ID';
         } else {
             // 切换到游戏模式
-            workshopBtn.innerHTML = '<span class="material-icons">extension</span>创意工坊';
-            workshopBtn.title = '切换到创意工坊模式';
+            workshopBtn.innerHTML = '<span class="material-icons">extension</span>创意工坊资源下载';
+            workshopBtn.title = '切换到创意工坊资源下载';
             cardIcon.textContent = 'build_circle';
             cardTitle.textContent = '游戏入库';
             modeIndicator.style.display = 'none';
@@ -241,37 +241,7 @@ class DxbWebApp {
             
             const data = await response.json();
             if (data.success) {
-                const sources = data.sources;
-                const entries = Object.entries(sources);
-                const VISIBLE = 6;
-                let html = '';
-                entries.forEach(([name, value], idx) => {
-                    const hidden = idx >= VISIBLE ? ' style="display:none;"' : '';
-                    html += `<label class="radio-item"${hidden}>
-                        <input type="radio" name="toolType" value="${value}" ${idx === 0 ? 'checked' : ''}>
-                        <span class="radio-button"></span>
-                        <span class="radio-label">${name}</span>
-                    </label>`;
-                });
-                if (entries.length > VISIBLE) {
-                    html += `<button type="button" class="btn btn-text more-sources-btn" id="moreSourcesBtn"><span class="material-icons">expand_more</span> 更多清单源</button>`;
-                }
-                this.elements.toolTypeGroup.innerHTML = html;
-                const moreBtn = document.getElementById('moreSourcesBtn');
-                if (moreBtn) {
-                    moreBtn.addEventListener('click', () => {
-                        const items = this.elements.toolTypeGroup.querySelectorAll('.radio-item');
-                        const anyHidden = Array.from(items).some(el => el.style.display === 'none');
-                        items.forEach(el => { el.style.display = ''; });
-                        if (anyHidden) {
-                            moreBtn.innerHTML = '<span class="material-icons">expand_less</span> 收起';
-                        } else {
-                            items.forEach((el, i) => { if (i >= VISIBLE) el.style.display = 'none'; });
-                            moreBtn.innerHTML = '<span class="material-icons">expand_more</span> 更多清单源';
-                        }
-                    });
-                }
-                
+                this.renderSourceList(data.sources);
                 // 如果有自定义仓库，显示提示信息
                 const customCount = (data.custom_github_count || 0) + (data.custom_zip_count || 0);
                 if (customCount > 0) {
@@ -302,18 +272,40 @@ class DxbWebApp {
                 "GitHub (Fairyvmos/bruh-hub)": "Fairyvmos/bruh-hub",
                 "GitHub (Cracko298/ManifestHub)": "Cracko298/ManifestHub",
             };
-            
-            let html = '';
-            Object.entries(fallbackSources).forEach(([name, value], index) => {
-                html += `<label class="radio-item">
-                    <input type="radio" name="toolType" value="${value}" ${index === 0 ? 'checked' : ''}>
-                    <span class="radio-button"></span>
-                    <span class="radio-label">${name}</span>
-                </label>`;
-            });
-            
-            this.elements.toolTypeGroup.innerHTML = html;
+            this.renderSourceList(fallbackSources);
             this.showSnackbar('加载自定义清单源失败，使用默认源', 'warning');
+        }
+    }
+
+    renderSourceList(sources) {
+        const entries = Object.entries(sources);
+        const VISIBLE = 6;
+        let html = '';
+        entries.forEach(([name, value], idx) => {
+            const hidden = idx >= VISIBLE ? ' style="display:none;"' : '';
+            html += `<label class="radio-item"${hidden}>
+                <input type="radio" name="toolType" value="${value}" ${idx === 0 ? 'checked' : ''}>
+                <span class="radio-button"></span>
+                <span class="radio-label">${name}</span>
+            </label>`;
+        });
+        if (entries.length > VISIBLE) {
+            html += `<button type="button" class="btn btn-text more-sources-btn" id="moreSourcesBtn"><span class="material-icons">expand_more</span> 更多清单源</button>`;
+        }
+        this.elements.toolTypeGroup.innerHTML = html;
+        const moreBtn = document.getElementById('moreSourcesBtn');
+        if (moreBtn) {
+            moreBtn.addEventListener('click', () => {
+                const items = this.elements.toolTypeGroup.querySelectorAll('.radio-item');
+                const anyHidden = Array.from(items).some(el => el.style.display === 'none');
+                items.forEach(el => { el.style.display = ''; });
+                if (anyHidden) {
+                    moreBtn.innerHTML = '<span class="material-icons">expand_less</span> 收起';
+                } else {
+                    items.forEach((el, i) => { if (i >= VISIBLE) el.style.display = 'none'; });
+                    moreBtn.innerHTML = '<span class="material-icons">expand_more</span> 更多清单源';
+                }
+            });
         }
     }
 
@@ -394,20 +386,20 @@ class DxbWebApp {
         }
     }
 
-    // 处理创意工坊任务
+    // 处理创意工坊资源下载任务
     async startWorkshopTask(formData) {
-        const copyToConfig = formData.get('workshopCopyToConfig') === 'on';
+        const downloadResources = formData.get('workshopDownloadResources') === 'on';
         const copyToDepot = formData.get('workshopCopyToDepot') === 'on';
 
-        if (!copyToConfig && !copyToDepot) {
-            this.showSnackbar('请至少选择一个目标目录。', 'error');
+        if (!downloadResources && !copyToDepot) {
+            this.showSnackbar('请至少选择一个操作。', 'error');
             return;
         }
 
         this.taskStatus = 'running';
         this.setFormDisabled(true);
         this.elements.progressContainer.innerHTML = '';
-        this.addLogEntry('info', `--- 开始处理创意工坊物品: '${this.currentAppId}' ---`);
+        this.addLogEntry('info', `--- 开始下载创意工坊资源: '${this.currentAppId}' ---`);
 
         try {
             const response = await fetch('/api/workshop/start_task', {
@@ -415,13 +407,13 @@ class DxbWebApp {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     workshop_input: this.currentAppId,
-                    copy_to_config: copyToConfig,
+                    download_resources: downloadResources,
                     copy_to_depot: copyToDepot,
                 }),
             });
             const data = await response.json();
             if (data.success) {
-                this.showSnackbar('创意工坊任务已开始。', 'info');
+                this.showSnackbar('创意工坊资源下载已开始。', 'info');
                 this.startStatusPolling();
             } else { 
                 throw new Error(data.message); 
@@ -429,8 +421,8 @@ class DxbWebApp {
         } catch (error) {
             this.taskStatus = 'idle';
             this.setFormDisabled(false);
-            this.showSnackbar(`启动创意工坊任务失败: ${error.message}`, 'error');
-            this.addLogEntry('error', `启动创意工坊任务失败: ${error.message}`);
+            this.showSnackbar(`启动创意工坊资源下载失败: ${error.message}`, 'error');
+            this.addLogEntry('error', `启动创意工坊资源下载失败: ${error.message}`);
         }
     }
 

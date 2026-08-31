@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""大轩巴入库器网页版 · 打包脚本
+"""大轩巴入库器mini · 打包脚本
 ================================
 用 PyInstaller 把 dxb_desktop.py（内嵌 Flask 服务器 + QT6 WebEngine 窗口）
 打包成单个 exe。
@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
-NAME = '大轩巴入库器网页版'
+NAME = '大轩巴入库器mini'
 
 sep = os.pathsep
 
@@ -80,6 +80,7 @@ def main():
         '--onefile',
         '--windowed',
         f'--name={NAME}',
+        f'--icon={BASE / "assets" / "icon.ico"}',
         f'--distpath={BASE / "dist"}',
         f'--workpath={BASE / "build"}',
         f'--specpath={BASE}',

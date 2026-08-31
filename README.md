@@ -1,4 +1,4 @@
-# 大轩巴入库器网页版 (DaXuanBa Injector Mini)
+# 大轩巴入库器mini (DaXuanBa Injector Mini)
 
 大轩巴自研的 Steam 清单下载与一键入库工具。基于 Flask 提供现代化 Web 图形界面，可一键下载 Steam 游戏清单（Manifest）及密钥（DepotKey），并自动配置到 **SteamTools** 或 **GreenLuma**，实现便捷入库。
 

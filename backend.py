@@ -115,7 +115,7 @@ class DxbBackend:
             await self.client.aclose()
 
     def _init_log(self, level=logging.INFO) -> logging.Logger:
-        logger = logging.getLogger(' 大轩巴入库器网页版')
+        logger = logging.getLogger(' 大轩巴入库器mini')
         logger.setLevel(level)
         if not logger.handlers:
             stream_handler = colorlog.StreamHandler()
@@ -291,7 +291,8 @@ class DxbBackend:
         if not self.config: self.config = await self.load_config()
         if self.config is None: return None
         self._configure_logger()
-        
+        self._pending_unlocker_install = False
+
         self.steam_path = self.get_steam_path()
         if not self.steam_path or not self.steam_path.exists():
             self.log.error('无法确定有效的Steam路径。请在设置中手动指定。')
@@ -318,14 +319,10 @@ class DxbBackend:
             else:
                 self.log.warning("未能自动检测到解锁工具。")
                 if self.config.get("auto_install_unlocker", True):
-                    installed = await self.ensure_unlocker_installed()
-                    if installed:
-                        self.unlocker_type = installed
-                        self.log.info(f"已自动安装解锁工具: {installed}")
-                    else:
-                        self.unlocker_type = "none"
-                else:
-                    self.unlocker_type = "none"
+                    # 不阻塞初始化流程，标记后台安装，页面先出来
+                    self._pending_unlocker_install = True
+                    self.log.info("将在后台自动下载并安装解锁工具...")
+                self.unlocker_type = "none"
 
         try:
             (self.steam_path / 'config' / 'stplug-in').mkdir(parents=True, exist_ok=True)
@@ -1049,16 +1046,20 @@ class DxbBackend:
                     consumer_app_id = details.get('consumer_app_id')
                     hcontent_file = details.get('hcontent_file')
                     title = details.get('title', '未知标题')
-                    
+                    file_url = details.get('file_url') or None
+                    file_name = details.get('filename', 'resource.bin')
+
                     if not consumer_app_id or not hcontent_file:
                         self.log.error(f"创意工坊物品 '{title}' 缺少必要的信息 (App ID 或 Manifest ID)。")
                         return None
-                    
+
                     self.log.info(f"成功获取创意工坊物品信息:")
                     self.log.info(f"  标题: {title}")
                     self.log.info(f"  所属游戏 AppID: {consumer_app_id}")
                     self.log.info(f"  清单 ManifestID: {hcontent_file}")
-                    return str(consumer_app_id), str(hcontent_file), title
+                    if file_url:
+                        self.log.info(f"  资源直链: {file_url}")
+                    return str(consumer_app_id), str(hcontent_file), title, file_url, file_name
                     
                 except httpx.RequestError as e:
                     if attempt < max_retries - 1:
@@ -1209,59 +1210,83 @@ class DxbBackend:
         self.log.error(f"下载清单 {output_filename} 失败：所有重试都失败了")
         return None
 
-    async def process_workshop_item(self, workshop_input: str, copy_to_config: bool = True, copy_to_depot: bool = True) -> bool:
-        """Process workshop item and copy manifest to specified directories"""
+    async def process_workshop_item(self, workshop_input: str, download_resources: bool = True, copy_to_depot: bool = False) -> bool:
+        """处理创意工坊物品：优先下载资源文件，可选同时写入 depotcache 清单。"""
         workshop_id = self.extract_workshop_id(workshop_input)
         if not workshop_id:
             self.log.error(f"无法从输入中提取有效的创意工坊ID: {workshop_input}")
             return False
-            
+
         # Get depot and manifest info
         details = await self.get_workshop_depot_info(workshop_id)
         if not details:
-            return False # 错误已在 get_workshop_depot_info 中记录
-        
-        consumer_app_id, hcontent_file, title = details
-        
-        # Download manifest using new method
-        manifest_content = await self.download_workshop_manifest(consumer_app_id, hcontent_file)
-        if not manifest_content:
-            return False
-        
-        # Generate filename
-        output_filename = f"{consumer_app_id}_{hcontent_file}.manifest"
-        
-        try:
-            # Copy to specified directories
-            success_count = 0
-            
-            if copy_to_config:
-                config_depot_path = self.steam_path / 'config' / 'depotcache'
-                config_depot_path.mkdir(parents=True, exist_ok=True)
-                config_file_path = config_depot_path / output_filename
-                async with aiofiles.open(config_file_path, 'wb') as f:
-                    await f.write(manifest_content)
-                self.log.info(f"清单文件已保存到: {config_file_path}")
-                success_count += 1
-            
-            if copy_to_depot:
-                depot_cache_path = self.steam_path / 'depotcache'
-                depot_cache_path.mkdir(parents=True, exist_ok=True)
-                depot_file_path = depot_cache_path / output_filename
-                async with aiofiles.open(depot_file_path, 'wb') as f:
-                    await f.write(manifest_content)
-                self.log.info(f"清单文件已保存到: {depot_file_path}")
-                success_count += 1
-            
-            if success_count > 0:
-                self.log.info(f"创意工坊清单 {output_filename} 处理完成。标题: {title}")
-                return True
+            return False  # 错误已在 get_workshop_depot_info 中记录
+
+        consumer_app_id, hcontent_file, title, file_url, file_name = details
+        success_count = 0
+
+        # 1. 下载创意工坊资源文件（如果用户选择且官方提供直链）
+        if download_resources:
+            if file_url:
+                downloaded = await self._download_workshop_resource(file_url, consumer_app_id, workshop_id, file_name)
+                if downloaded:
+                    success_count += 1
             else:
-                self.log.error("未指定任何目标目录。")
+                self.log.warning("该创意工坊物品未提供官方资源直链，将跳过资源下载。可勾选“写入 depotcache 清单”让 Steam 客户端下载。")
+
+        # 2. 下载 manifest 到 depotcache
+        if copy_to_depot:
+            manifest_content = await self.download_workshop_manifest(consumer_app_id, hcontent_file)
+            if manifest_content:
+                try:
+                    output_filename = f"{consumer_app_id}_{hcontent_file}.manifest"
+                    depot_cache_path = self.steam_path / 'depotcache'
+                    depot_cache_path.mkdir(parents=True, exist_ok=True)
+                    depot_file_path = depot_cache_path / output_filename
+                    async with aiofiles.open(depot_file_path, 'wb') as f:
+                        await f.write(manifest_content)
+                    self.log.info(f"清单文件已保存到: {depot_file_path}")
+                    success_count += 1
+                except Exception as e:
+                    self.log.error(f"保存创意工坊清单文件时出错: {self.stack_error(e)}")
+
+        if success_count > 0:
+            self.log.info(f"创意工坊物品处理完成。标题: {title}")
+            return True
+        else:
+            self.log.error("未成功执行任何操作。")
+            return False
+
+    async def _download_workshop_resource(self, url: str, appid: str, workshop_id: str, file_name: str) -> bool:
+        """下载创意工坊资源文件到 Steam/workshop/downloads/{appid}/{workshop_id}/"""
+        try:
+            self.log.info(f"正在下载创意工坊资源: {file_name}")
+            r = await self.client.get(url, timeout=180)
+            r.raise_for_status()
+            data = r.content
+            if not data:
+                self.log.error("资源文件为空")
                 return False
-                
+
+            out_dir = self.steam_path / 'workshop' / 'downloads' / appid / workshop_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / file_name
+            async with aiofiles.open(out_path, 'wb') as f:
+                await f.write(data)
+            self.log.info(f"资源文件已保存到: {out_path} ({len(data)} 字节)")
+
+            # 如果是 zip 则自动解压
+            if file_name.lower().endswith('.zip'):
+                try:
+                    import zipfile
+                    with zipfile.ZipFile(out_path, 'r') as z:
+                        z.extractall(out_dir)
+                    self.log.info(f"已自动解压资源到: {out_dir}")
+                except Exception as e:
+                    self.log.warning(f"自动解压资源失败: {e}")
+            return True
         except Exception as e:
-            self.log.error(f"保存创意工坊清单文件时出错: {self.stack_error(e)}")
+            self.log.error(f"下载创意工坊资源失败: {self.stack_error(e)}")
             return False
 
     async def _get_buqiuren_session_token(self) -> str | None:
@@ -2214,8 +2239,24 @@ class DxbBackend:
         try:
             self.temp_path.mkdir(exist_ok=True, parents=True)
             self.log.info(f'正从 {source_name} 下载 AppID {app_id} 的清单...')
-            response = await self.client.get(download_url, timeout=60)
-            response.raise_for_status()
+
+            # 对已知不稳定源增加重试
+            max_retries = 3 if 'cysaw' in source_name.lower() else 2
+            last_error = None
+            response = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response = await self.client.get(download_url, timeout=60)
+                    response.raise_for_status()
+                    break
+                except Exception as e:
+                    last_error = e
+                    self.log.warning(f"{source_name} 下载尝试 {attempt}/{max_retries} 失败: {e}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(2 ** attempt)
+            if response is None:
+                raise last_error or Exception("下载失败")
+
             async with aiofiles.open(zip_path, 'wb') as f: await f.write(response.content)
             self.log.info('正在解压...')
             with zipfile.ZipFile(zip_path, 'r') as zip_ref: zip_ref.extractall(extract_path)
@@ -2474,31 +2515,110 @@ class DxbBackend:
         return user_input if user_input.isdigit() else None
 
     async def find_appid_by_name(self, game_name: str) -> List[Dict]:
+        """搜索游戏名称 -> AppID，支持直接输入 AppID、多区域 Steam 搜索、SteamDB、小黑盒备用。"""
         try:
             self.log.info(f"正在尝试搜索游戏: {game_name}")
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            url = "https://store.steampowered.com/api/storesearch"
-            try:
-                r = await self.client.get(url, params={'term': game_name, 'l': 'schinese', 'cc': 'CN'}, headers=headers, timeout=20)
-                r.raise_for_status()
-                resp_json = r.json()
-                raw_data = resp_json.get('items', []) if isinstance(resp_json, dict) else []
-            except Exception as e1:
-                self.log.warning(f"Steam 官方搜索失败，尝试备用源: {e1}")
-                return await self._find_appid_fallback(game_name, headers)
-            games_list = []
-            for item in raw_data:
-                appid = item.get('id') or item.get('appid')
-                name = item.get('name')
-                image = item.get('tiny_image') or item.get('header_image') or item.get('image')
-                if appid and name:
-                    games_list.append({'appid': str(appid), 'name': name, 'header_image': image})
-            if games_list:
-                self.log.info(f"成功找到 {len(games_list)} 个结果")
-                return games_list
+
+            # 1. 如果输入是纯数字，直接当作 AppID 返回详情
+            if game_name.isdigit():
+                appid = game_name
+                detail = await self._fetch_store_appdetails(appid, headers)
+                if detail:
+                    self.log.info(f"直接命中 AppID: {appid}")
+                    return [detail]
+
+            # 2. Steam 官方搜索：多区域/多语言尝试
+            steam_regions = [
+                {'l': 'schinese', 'cc': 'CN'},
+                {'l': 'english', 'cc': 'US'},
+                {'l': 'tchinese', 'cc': 'TW'},
+            ]
+            for region in steam_regions:
+                try:
+                    r = await self.client.get(
+                        "https://store.steampowered.com/api/storesearch",
+                        params={'term': game_name, **region},
+                        headers=headers, timeout=20
+                    )
+                    r.raise_for_status()
+                    resp_json = r.json()
+                    raw_data = resp_json.get('items', []) if isinstance(resp_json, dict) else []
+                    games_list = []
+                    for item in raw_data:
+                        appid = item.get('id') or item.get('appid')
+                        name = item.get('name')
+                        image = item.get('tiny_image') or item.get('header_image') or item.get('image')
+                        if appid and name:
+                            games_list.append({'appid': str(appid), 'name': name, 'header_image': image})
+                    if games_list:
+                        self.log.info(f"成功找到 {len(games_list)} 个结果")
+                        return games_list
+                except Exception as e:
+                    self.log.debug(f"Steam 搜索 ({region}) 失败: {e}")
+                    continue
+
+            # 3. SteamDB 搜索备用
+            self.log.info("Steam 官方搜索无结果，尝试 SteamDB 搜索...")
+            steamdb_results = await self._search_steamdb(game_name, headers)
+            if steamdb_results:
+                return steamdb_results
+
+            # 4. 小黑盒备用
+            self.log.info("尝试小黑盒备用搜索...")
+            fallback = await self._find_appid_fallback(game_name, headers)
+            if fallback:
+                return fallback
+
             self.log.warning("未找到相关游戏。")
         except Exception as e:
             self.log.error(f"搜索游戏 '{game_name}' 失败: {self.stack_error(e)}")
+        return []
+
+    async def _fetch_store_appdetails(self, appid: str, headers: Dict) -> Dict | None:
+        """通过 Steam Store appdetails 获取单个 AppID 信息"""
+        try:
+            r = await self.client.get(
+                "https://store.steampowered.com/api/appdetails",
+                params={'appids': appid, 'l': 'schinese', 'cc': 'CN'},
+                headers=headers, timeout=20
+            )
+            r.raise_for_status()
+            data = r.json()
+            app_data = data.get(appid, {})
+            if app_data.get('success') and app_data.get('data'):
+                d = app_data['data']
+                return {
+                    'appid': appid,
+                    'name': d.get('name', '未知游戏'),
+                    'header_image': d.get('header_image', '')
+                }
+        except Exception as e:
+            self.log.debug(f"appdetails 查询失败: {e}")
+        return None
+
+    async def _search_steamdb(self, game_name: str, headers: Dict) -> List[Dict]:
+        """通过 SteamDB 搜索页面抓取结果"""
+        try:
+            r = await self.client.get(
+                "https://steamdb.info/api/ExtensionSearch/",
+                params={'q': game_name},
+                headers={**headers, 'Accept': 'application/json'},
+                timeout=20
+            )
+            if r.status_code == 200:
+                data = r.json()
+                out = []
+                for item in data.get('data', []):
+                    appid = item.get('appid')
+                    name = item.get('name')
+                    if appid and name:
+                        out.append({'appid': str(appid), 'name': name, 'header_image': ''})
+                if out:
+                    self.log.info(f"SteamDB 搜索找到 {len(out)} 个结果")
+                    return out
+        except Exception as e:
+            self.log.debug(f"SteamDB 搜索失败: {e}")
         return []
 
     async def _find_appid_fallback(self, game_name: str, headers: Dict) -> List[Dict]:

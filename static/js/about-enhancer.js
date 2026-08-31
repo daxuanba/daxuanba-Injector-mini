@@ -50,14 +50,14 @@ class AboutPageEnhancer {
                     logo.style.transform = '';
                     logo.style.transition = '';
                 }, 600);
-                this.showTooltip(logo, '大轩巴入库器网页版 - 让 Steam 入库变得简单！');
+                this.showTooltip(logo, '大轩巴入库器mini - 让 Steam 入库变得简单！');
             });
         });
     }
 
     showEasterEgg() {
         const messages = [
-            '你发现了隐藏彩蛋！', '感谢你使用大轩巴入库器网页版！',
+            '你发现了隐藏彩蛋！', '感谢你使用大轩巴入库器mini！',
             '别忘了给项目点个 Star 哦！', '祝你游戏愉快！',
             '开源让世界更美好！', '一键入库，畅享游戏！'
         ];

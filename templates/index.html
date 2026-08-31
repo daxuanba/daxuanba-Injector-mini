@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-    <title>大轩巴入库器网页版</title>
+    <title>大轩巴入库器mini</title>
     <link rel="icon" href="{{ url_for('static', filename='dxb-word.svg') }}" type="image/svg+xml"/>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet"/>
@@ -30,9 +30,9 @@
         <div class="app-bar-content">
             <a href="/" style="color: inherit; text-decoration: none; display: flex; align-items: center; gap: 12px;">
                 <span class="dxb-wordmark">大轩巴</span>
-                <h1 class="app-title">入库器网页版</h1>
+                <h1 class="app-title">入库器mini</h1>
             </a>
-            <div class="app-version">网页版 v2.5</div>
+            <div class="app-version">mini v2.5</div>
             
             <!-- Spacer to push buttons to the right -->
             <div style="flex-grow: 1;"></div>
@@ -94,9 +94,9 @@
                 <span class="material-icons" id="unlockCardIcon">build_circle</span>
                 <h2 id="unlockCardTitle">游戏入库</h2>
                 <div class="card-actions">
-                    <button class="btn btn-text" id="workshopModeBtn" title="切换到创意工坊模式">
+                    <button class="btn btn-text" id="workshopModeBtn" title="切换到创意工坊资源下载">
                         <span class="material-icons">extension</span>
-                        创意工坊
+                        创意工坊资源下载
                     </button>
                 </div>
             </div>
@@ -107,7 +107,7 @@
                         <div class="input-group" id="modeIndicator" style="display: none;">
                             <div class="status-item info">
                                 <span class="material-icons status-icon">extension</span>
-                                <span class="status-text">创意工坊模式：输入创意工坊物品链接或ID</span>
+                                <span class="status-text">创意工坊资源下载：输入创意工坊物品链接或ID，从 Steam 官方获取并下载资源</span>
                             </div>
                         </div>
                         
@@ -159,25 +159,25 @@
                             </div>
                         </div>
                         
-                        <!-- 创意工坊模式的选项 -->
+                        <!-- 创意工坊资源下载选项 -->
                         <div id="workshopModeOptions" style="display: none;">
                             <div class="input-group">
                                 <label class="checkbox-item">
-                                    <input id="workshopCopyToConfig" name="workshopCopyToConfig" type="checkbox" checked/>
+                                    <input id="workshopDownloadResources" name="workshopDownloadResources" type="checkbox" checked/>
                                     <span class="checkbox-button"></span>
                                     <div class="checkbox-content">
-                                        <span class="checkbox-label">复制到 config/depotcache</span>
-                                        <span class="checkbox-description">将清单文件同时复制到 Steam/config/depotcache 目录。</span>
+                                        <span class="checkbox-label">下载创意工坊资源文件</span>
+                                        <span class="checkbox-description">通过 Steam 官方接口获取文件直链并下载到本地（部分物品可能无直链）。</span>
                                     </div>
                                 </label>
                             </div>
                             <div class="input-group">
                                 <label class="checkbox-item">
-                                    <input id="workshopCopyToDepot" name="workshopCopyToDepot" type="checkbox" checked/>
+                                    <input id="workshopCopyToDepot" name="workshopCopyToDepot" type="checkbox"/>
                                     <span class="checkbox-button"></span>
                                     <div class="checkbox-content">
-                                        <span class="checkbox-label">复制到 depotcache</span>
-                                        <span class="checkbox-description">将清单文件复制到 Steam/depotcache 目录。</span>
+                                        <span class="checkbox-label">同时写入 depotcache 清单</span>
+                                        <span class="checkbox-description">将 manifest 清单复制到 Steam/depotcache 目录，供 Steam 客户端识别。</span>
                                     </div>
                                 </label>
                             </div>
@@ -232,7 +232,7 @@
     <!-- 页脚 -->
     <footer class="app-footer">
         <div class="copyright">
-            <p>© 2026 大轩巴入库器网页版</p>
+            <p>© 2026 大轩巴入库器mini</p>
         </div>
     </footer>
 </div>

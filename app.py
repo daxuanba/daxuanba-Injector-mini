@@ -36,7 +36,7 @@ if sys.platform == 'win32':
                     sys.stdout = open('CONOUT$', 'w')
                     sys.stderr = open('CONOUT$', 'w')
                     print("--- 控制台已附加 ---")
-                    print("大轩巴入库器网页版 的日志将在这里显示。")
+                    print("大轩巴入库器mini 的日志将在这里显示。")
                     self.is_visible = True
                 else: print("错误: 无法分配新的控制台。")
         def _hide_console(self):
@@ -146,6 +146,29 @@ def manager_page():
 
 
 # --- Core API Routes ---
+def background_install_unlocker():
+    """后台线程：自动下载安装解锁工具，不阻塞页面初始化。"""
+    async def _run():
+        async with DxbBackend() as backend:
+            patch_log_for_socketio(backend.log)
+            backend.config = await backend.load_config()
+            if not backend.config:
+                return
+            backend.steam_path = backend.get_steam_path()
+            if not backend.steam_path or not backend.steam_path.exists():
+                backend.log.error("后台安装解锁工具失败：无法确定 Steam 路径。")
+                return
+            installed = await backend.ensure_unlocker_installed()
+            if installed:
+                backend.log.info(f"后台自动安装解锁工具完成: {installed}")
+            else:
+                backend.log.warning("后台自动安装解锁工具失败，请前往设置页手动安装。")
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        print(f"后台安装解锁工具异常: {e}")
+
+
 @app.route('/api/initialize', methods=['POST'])
 def initialize_app():  # 改为同步函数
     try:
@@ -155,16 +178,21 @@ def initialize_app():  # 改为同步函数
                 unlocker_type = await backend.initialize()
                 if backend.config is None:
                     return {"success": False, "message": "加载配置失败，请检查日志。"}
+                pending = getattr(backend, '_pending_unlocker_install', False)
                 return {
                     "success": True,
                     "unlocker_type": unlocker_type,
+                    "pending_unlocker_install": pending,
                     "steam_path": str(backend.steam_path) if backend.steam_path else "Not Found",
                     "has_token": bool(backend.config.get("Github_Personal_Token", "").strip())
                 }
-        
+
         result = asyncio.run(_init())
+        # 如果标记了后台安装，启动后台线程，不阻塞初始化响应
+        if result.get("pending_unlocker_install"):
+            threading.Thread(target=background_install_unlocker, daemon=True).start()
         return jsonify(result)
-        
+
     except Exception as e:
         dummy_backend = DxbBackend()
         message = f"后端初始化失败: {str(e)}"
@@ -326,25 +354,25 @@ async def _run_unlock_task(app_id, tool_type, use_st_auto_update, add_all_dlc, p
             raise Exception(f"处理 AppID {app_id_extracted} 失败，请检查日志。")
 
 # Workshop task runner
-async def _run_workshop_task(workshop_input, copy_to_config, copy_to_depot):
+async def _run_workshop_task(workshop_input, download_resources, copy_to_depot):
     async with DxbBackend() as backend:
         patch_log_for_socketio(backend.log)
         TASK_STATE["status"] = "running"
         TASK_STATE["progress"] = []
         TASK_STATE["result"] = None
-        
+
         unlocker_type = await backend.initialize()
         if not unlocker_type:
             raise Exception("后端初始化失败，请检查配置或Steam路径。")
-        
-        backend.log.info(f"--- 开始处理创意工坊物品: {workshop_input} ---")
-        
-        success = await backend.process_workshop_item(workshop_input, copy_to_config, copy_to_depot)
-        
+
+        backend.log.info(f"--- 开始下载创意工坊资源: {workshop_input} ---")
+
+        success = await backend.process_workshop_item(workshop_input, download_resources=download_resources, copy_to_depot=copy_to_depot)
+
         if success:
-            TASK_STATE["result"] = {"success": True, "message": f"成功处理创意工坊物品。重启 Steam 后生效。"}
+            TASK_STATE["result"] = {"success": True, "message": f"成功处理创意工坊资源。重启 Steam 后生效。"}
         else:
-            raise Exception(f"处理创意工坊物品失败，请检查日志。")
+            raise Exception(f"处理创意工坊资源失败，请检查日志。")
 
 @app.route('/api/start_task', methods=['POST'])
 def start_task():
@@ -386,23 +414,23 @@ def start_task():
 def start_workshop_task():
     if TASK_STATE["status"] == "running":
         return jsonify({"success": False, "message": "一个任务正在运行中。"})
-    
+
     data = request.get_json()
     workshop_input = data.get('workshop_input', '').strip()
-    copy_to_config = data.get('copy_to_config', True)
-    copy_to_depot = data.get('copy_to_depot', True)
-    
+    download_resources = data.get('download_resources', True)
+    copy_to_depot = data.get('copy_to_depot', False)
+
     if not workshop_input:
         return jsonify({"success": False, "message": "请输入创意工坊物品链接或ID。"})
-    
-    if not copy_to_config and not copy_to_depot:
-        return jsonify({"success": False, "message": "请至少选择一个目标目录。"})
-    
+
+    if not download_resources and not copy_to_depot:
+        return jsonify({"success": False, "message": "请至少选择一个操作。"})
+
     def task_wrapper():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(_run_workshop_task(workshop_input, copy_to_config, copy_to_depot))
+            loop.run_until_complete(_run_workshop_task(workshop_input, download_resources, copy_to_depot))
             TASK_STATE["status"] = "completed"
         except Exception as e:
             TASK_STATE["status"] = "error"
@@ -416,10 +444,10 @@ def start_workshop_task():
                 TASK_STATE["status"] = "error"
                 TASK_STATE["result"] = {"success": False, "message": "任务意外终止。"}
             loop.close()
-    
+
     thread = threading.Thread(target=task_wrapper, daemon=True)
     thread.start()
-    return jsonify({"success": True, "message": "创意工坊任务已开始。"})
+    return jsonify({"success": True, "message": "创意工坊资源下载已开始。"})
 
 @app.route('/api/task_status')
 def get_task_status():
@@ -663,7 +691,7 @@ def toggle_console():
     return jsonify({"success": True, "message": message, "isVisible": not was_visible})
 
 @socketio.on('connect')
-def handle_connect(): emit('response', {"message": "已连接到大轩巴入库器网页版服务器"})
+def handle_connect(): emit('response', {"message": "已连接到大轩巴入库器mini服务器"})
 
 @app.route('/api/shutdown', methods=['POST'])
 def shutdown():
@@ -677,7 +705,7 @@ def shutdown():
 if __name__ == '__main__':
     if sys.platform == 'win32':
         try:
-            os.system('title ' + '大轩巴入库器网页版')
+            os.system('title ' + '大轩巴入库器mini')
         except:
             pass 
     
@@ -693,7 +721,7 @@ if __name__ == '__main__':
     def open_browser():
         print("服务器已启动，正在尝试自动打开浏览器...")
         webbrowser.open_new(url)
-    print("正在启动大轩巴入库器网页版...")
+    print("正在启动大轩巴入库器mini...")
     print(f"服务器将在 {url} 上运行")
     threading.Timer(1.5, open_browser).start()
     socketio.run(app, host='127.0.0.1', port=port, debug=False, allow_unsafe_werkzeug=True)

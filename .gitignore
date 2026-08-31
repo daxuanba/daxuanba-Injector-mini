@@ -11,3 +11,4 @@ temp/
 _wheels/
 *.exe
 *.dll
+*.spec

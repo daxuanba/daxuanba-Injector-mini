@@ -426,7 +426,7 @@ class FileManagerApp {
     }
     hideSnackbar() { this.elements.snackbar.classList.remove('show'); }
     async shutdown() {
-        if (!confirm('确定要关闭大轩巴入库器网页版吗？')) return;
+        if (!confirm('确定要关闭大轩巴入库器mini吗？')) return;
         try {
             const response = await fetch('/api/shutdown', { method: 'POST' });
             const data = await response.json();
