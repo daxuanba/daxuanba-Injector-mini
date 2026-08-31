@@ -417,3 +417,37 @@ body.dark-theme .status-indicator.warning {
     transform: translateY(-1px);
     transition: all 0.2s ease;
 }
+
+/* **** 顶部分类导航 **** */
+.settings-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.tab-btn {
+    padding: 10px 22px;
+    border: 1px solid var(--md-sys-color-outline-variant);
+    background-color: var(--md-sys-color-surface-variant);
+    color: var(--md-sys-color-on-surface);
+    border-radius: var(--md-sys-shape-corner-full);
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+    background-color: color-mix(in srgb, var(--md-sys-color-primary) 12%, transparent);
+}
+
+.tab-btn.active {
+    background-color: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
+    border-color: var(--md-sys-color-primary);
+}
+
+.settings-category-hidden {
+    display: none !important;
+}

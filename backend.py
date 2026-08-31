@@ -24,7 +24,7 @@ from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
 CURRENT_VERSION = "2.5"  # 当前版本号
-GITHUB_REPO = "daxuanba/DaXuanBa-rukuqi-web" 
+GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -88,7 +88,7 @@ class STConverter:
         metadata = {'original_xorkey': xorkey, 'size': size, 'xorkeyverify': xorkeyverify}
         return lua_content, metadata
 
-class CaiBackend:
+class DxbBackend:
     def __init__(self):
         self.project_root = Path.cwd()
         self.client: httpx.AsyncClient | None = None
@@ -134,7 +134,7 @@ class CaiBackend:
         if self.config.get("logging_files", True):
             logs_dir = self.project_root / 'logs'
             logs_dir.mkdir(exist_ok=True)
-            log_file_path = logs_dir / f'cai-install-gui-{time.strftime("%Y-%m-%d")}.log'
+            log_file_path = logs_dir / f'dxb-injector-{time.strftime("%Y-%m-%d")}.log'
             file_handler = logging.FileHandler(log_file_path, 'a', encoding='utf-8')
             file_handler.setLevel(level)
             file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')

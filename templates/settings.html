@@ -41,7 +41,13 @@
     </header>
 
     <main class="main-content settings-main">
-        <div class="card">
+        <nav class="settings-tabs">
+            <button type="button" class="tab-btn active" data-cat="github">GitHub</button>
+            <button type="button" class="tab-btn" data-cat="steam">Steam</button>
+            <button type="button" class="tab-btn" data-cat="repos">清单库</button>
+            <button type="button" class="tab-btn" data-cat="app">应用</button>
+        </nav>
+        <div class="card" data-category="github">
             <div class="card-header"><h2>GitHub 配置</h2></div>
             <div class="card-content">
                 <div class="input-group">
@@ -57,7 +63,7 @@
             </div>
         </div>
 
-        <div class="card">
+        <div class="card" data-category="steam">
             <div class="card-header"><h2>Steam 配置</h2></div>
             <div class="card-content">
                 <div class="input-group">
@@ -73,7 +79,7 @@
         </div>
 
         <!-- 自定义清单库配置 -->
-        <div class="card">
+        <div class="card" data-category="repos">
             <div class="card-header">
                 <h2>自定义清单库</h2>
                 <div class="card-actions">
@@ -110,7 +116,7 @@
             </div>
         </div>
 
-        <div class="card">
+        <div class="card" data-category="app">
             <div class="card-header"><h2>应用程序配置</h2></div>
             <div class="card-content">
                 <div class="settings-section">
@@ -171,7 +177,7 @@
             </div>
         </div>
 
-        <div class="card">
+        <div class="card" data-category="app">
             <div class="card-content">
                 <div class="action-buttons">
                     <button type="button" id="saveConfig" class="btn btn-primary">

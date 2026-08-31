@@ -81,6 +81,20 @@ class SettingsManager {
         this.elements.updateModal.addEventListener('click', (e) => {
             if (e.target === this.elements.updateModal) this.hideUpdateModal();
         });
+
+        // 顶部分类导航：点击切换显示的配置分类
+        this.setupCategoryTabs();
+    }
+
+    setupCategoryTabs() {
+        const tabs = document.querySelectorAll('.tab-btn');
+        const cards = document.querySelectorAll('.card[data-category]');
+        const showCat = (cat) => {
+            tabs.forEach(t => t.classList.toggle('active', t.dataset.cat === cat));
+            cards.forEach(c => c.classList.toggle('settings-category-hidden', c.dataset.category !== cat));
+        };
+        tabs.forEach(t => t.addEventListener('click', () => showCat(t.dataset.cat)));
+        showCat('github');
     }
 
     async toggleConsole() {

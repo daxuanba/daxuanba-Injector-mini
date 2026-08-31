@@ -57,14 +57,14 @@ project_root = Path.cwd()
 sys.path.insert(0, str(project_root))
 
 try:
-    from backend import CaiBackend, DEFAULT_CONFIG
+    from backend import DxbBackend, DEFAULT_CONFIG
 except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'cai-install-gui-secret-key-v2'
+app.config['SECRET_KEY'] = 'dxb-injector-secret-key-v2'
 app.config['USER_DATA_FOLDER'] = project_root / 'userdata'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -150,7 +150,7 @@ def manager_page():
 def initialize_app():  # 改为同步函数
     try:
         async def _init():
-            async with CaiBackend() as backend:
+            async with DxbBackend() as backend:
                 patch_log_for_socketio(backend.log)
                 unlocker_type = await backend.initialize()
                 if backend.config is None:
@@ -166,7 +166,7 @@ def initialize_app():  # 改为同步函数
         return jsonify(result)
         
     except Exception as e:
-        dummy_backend = CaiBackend()
+        dummy_backend = DxbBackend()
         message = f"后端初始化失败: {str(e)}"
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message})
@@ -176,7 +176,7 @@ def initialize_app():  # 改为同步函数
 def check_updates():  # 改为同步函数
     try:
         async def _check():
-            async with CaiBackend() as backend:
+            async with DxbBackend() as backend:
                 patch_log_for_socketio(backend.log)
                 await backend.initialize()
                 has_update, update_info = await backend.check_for_updates()
@@ -190,7 +190,7 @@ def check_updates():  # 改为同步函数
         return jsonify(result)
         
     except Exception as e:
-        dummy_backend = CaiBackend()
+        dummy_backend = DxbBackend()
         message = f"检查更新失败: {str(e)}"
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message})
@@ -200,7 +200,7 @@ def check_updates():  # 改为同步函数
 def get_sources():  # 改为同步函数
     try:
         async def _get_sources():
-            async with CaiBackend() as backend:
+            async with DxbBackend() as backend:
                 await backend.initialize()
                 
                 # Built-in sources
@@ -215,7 +215,13 @@ def get_sources():  # 改为同步函数
                     "Sudama库(仅密钥）": "sudama",
                     "清单不求人库（仅清单）": "buqiuren", 
                     "GitHub (Auiowu)": "Auiowu/ManifestAutoUpdate",
-                    "GitHub (SAC)": "SteamAutoCracks/ManifestHub"
+                    "GitHub (SAC)": "SteamAutoCracks/ManifestHub",
+                    "GitHub (ikun0014/ManifestHub)": "ikun0014/ManifestHub",
+                    "GitHub (Masaiki/ManifestAutoUpdate)": "Masaiki/ManifestAutoUpdate",
+                    "GitHub (wxy1343/ManifestAutoUpdate)": "wxy1343/ManifestAutoUpdate",
+                    "GitHub (Cyberbolt/ManifestAutoUpdate)": "Cyberbolt/ManifestAutoUpdate",
+                    "GitHub (Fairyvmos/bruh-hub)": "Fairyvmos/bruh-hub",
+                    "GitHub (Cracko298/ManifestHub)": "Cracko298/ManifestHub",
                 }
                 
                 # Custom sources
@@ -241,13 +247,13 @@ def get_sources():  # 改为同步函数
         return jsonify(result)
         
     except Exception as e:
-        dummy_backend = CaiBackend()
+        dummy_backend = DxbBackend()
         message = f"获取清单源失败: {str(e)}"
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message})
 
 async def _run_search_game_task(game_name):
-    async with CaiBackend() as backend:
+    async with DxbBackend() as backend:
         patch_log_for_socketio(backend.log)
         await backend.initialize()
         results = await backend.find_appid_by_name(game_name)
@@ -263,13 +269,13 @@ def search_game():
         results = asyncio.run(_run_search_game_task(game_name))
         return jsonify({"success": True, "games": results})
     except Exception as e:
-        dummy_backend = CaiBackend()
+        dummy_backend = DxbBackend()
         message = f"搜索时发生错误: {e}"
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message}), 500
 
 async def _run_unlock_task(app_id, tool_type, use_st_auto_update, add_all_dlc, patch_depot_key):
-    async with CaiBackend() as backend:
+    async with DxbBackend() as backend:
         patch_log_for_socketio(backend.log)
         TASK_STATE["status"] = "running"
         TASK_STATE["progress"] = []
@@ -321,7 +327,7 @@ async def _run_unlock_task(app_id, tool_type, use_st_auto_update, add_all_dlc, p
 
 # Workshop task runner
 async def _run_workshop_task(workshop_input, copy_to_config, copy_to_depot):
-    async with CaiBackend() as backend:
+    async with DxbBackend() as backend:
         patch_log_for_socketio(backend.log)
         TASK_STATE["status"] = "running"
         TASK_STATE["progress"] = []
@@ -363,7 +369,7 @@ def start_task():
             TASK_STATE["status"] = "error"
             message = f"发生错误: {str(e)}"
             TASK_STATE["result"] = {"success": False, "message": message}
-            dummy_backend = CaiBackend()
+            dummy_backend = DxbBackend()
             patch_log_for_socketio(dummy_backend.log)
             dummy_backend.log.error(dummy_backend.stack_error(e))
         finally:
@@ -402,7 +408,7 @@ def start_workshop_task():
             TASK_STATE["status"] = "error"
             message = f"发生错误: {str(e)}"
             TASK_STATE["result"] = {"success": False, "message": message}
-            dummy_backend = CaiBackend()
+            dummy_backend = DxbBackend()
             patch_log_for_socketio(dummy_backend.log)
             dummy_backend.log.error(dummy_backend.stack_error(e))
         finally:
@@ -424,7 +430,7 @@ def get_task_status():
 def get_managed_files():
     try:
         async def _get_files():
-            async with CaiBackend() as backend:
+            async with DxbBackend() as backend:
                 await backend.initialize()
                 files_data = await backend.get_managed_files()
                 return {"success": True, "data": files_data}
@@ -433,7 +439,7 @@ def get_managed_files():
         return jsonify(result)
         
     except Exception as e:
-        dummy_backend = CaiBackend()
+        dummy_backend = DxbBackend()
         message = f"获取文件列表失败: {str(e)}"
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message})
@@ -449,7 +455,7 @@ def delete_managed_files():
 
     try:
         async def _delete():
-            async with CaiBackend() as backend:
+            async with DxbBackend() as backend:
                 await backend.initialize()
                 return backend.delete_managed_files(file_type, items)
         
@@ -457,7 +463,7 @@ def delete_managed_files():
         return jsonify(result)
 
     except Exception as e:
-        dummy_backend = CaiBackend()
+        dummy_backend = DxbBackend()
         message = f"删除文件时发生错误: {str(e)}"
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message}), 500
@@ -471,7 +477,7 @@ def open_manager_folder():
     folder_type = data.get('type')
     
     try:
-        backend = CaiBackend()
+        backend = DxbBackend()
         asyncio.run(backend.initialize())
         path_to_open = None
         if folder_type == 'st' and backend.steam_path:
@@ -625,7 +631,7 @@ def serve_userdata(filename): return send_from_directory(app.config['USER_DATA_F
 def restart_steam():  # 改为同步函数
     try:
         async def _restart():
-            async with CaiBackend() as backend:
+            async with DxbBackend() as backend:
                 await backend.initialize()
                 patch_log_for_socketio(backend.log)
                 success = backend.restart_steam()
@@ -638,7 +644,7 @@ def restart_steam():  # 改为同步函数
         return jsonify(result)
         
     except Exception as e:
-        dummy_backend = CaiBackend()
+        dummy_backend = DxbBackend()
         message = f"请求重启Steam时发生后端错误: {str(e)}"
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message}), 500

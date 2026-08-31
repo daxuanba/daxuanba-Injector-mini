@@ -1,6 +1,6 @@
 // --- START OF FILE static/js/app.js (MODIFIED WITH WORKSHOP SUPPORT AND DEPOTKEY PATCH) ---
 
-class CaiWebApp {
+class DxbWebApp {
     constructor() {
         this.socket = null;
         this.taskStatus = 'idle';
@@ -242,20 +242,35 @@ class CaiWebApp {
             const data = await response.json();
             if (data.success) {
                 const sources = data.sources;
+                const entries = Object.entries(sources);
+                const VISIBLE = 6;
                 let html = '';
-                let isFirst = true;
-                
-                // 生成单选按钮列表
-                Object.entries(sources).forEach(([name, value]) => {
-                    html += `<label class="radio-item">
-                        <input type="radio" name="toolType" value="${value}" ${isFirst ? 'checked' : ''}>
+                entries.forEach(([name, value], idx) => {
+                    const hidden = idx >= VISIBLE ? ' style="display:none;"' : '';
+                    html += `<label class="radio-item"${hidden}>
+                        <input type="radio" name="toolType" value="${value}" ${idx === 0 ? 'checked' : ''}>
                         <span class="radio-button"></span>
                         <span class="radio-label">${name}</span>
                     </label>`;
-                    isFirst = false;
                 });
-                
+                if (entries.length > VISIBLE) {
+                    html += `<button type="button" class="btn btn-text more-sources-btn" id="moreSourcesBtn"><span class="material-icons">expand_more</span> 更多清单源</button>`;
+                }
                 this.elements.toolTypeGroup.innerHTML = html;
+                const moreBtn = document.getElementById('moreSourcesBtn');
+                if (moreBtn) {
+                    moreBtn.addEventListener('click', () => {
+                        const items = this.elements.toolTypeGroup.querySelectorAll('.radio-item');
+                        const anyHidden = Array.from(items).some(el => el.style.display === 'none');
+                        items.forEach(el => { el.style.display = ''; });
+                        if (anyHidden) {
+                            moreBtn.innerHTML = '<span class="material-icons">expand_less</span> 收起';
+                        } else {
+                            items.forEach((el, i) => { if (i >= VISIBLE) el.style.display = 'none'; });
+                            moreBtn.innerHTML = '<span class="material-icons">expand_more</span> 更多清单源';
+                        }
+                    });
+                }
                 
                 // 如果有自定义仓库，显示提示信息
                 const customCount = (data.custom_github_count || 0) + (data.custom_zip_count || 0);
@@ -280,6 +295,12 @@ class CaiWebApp {
                 "GitHub (SAC)": "SteamAutoCracks/ManifestHub",
                 "SteamAutoCracks/ManifestHub(2) （仅密钥）": "steamautocracks_v2",
                 "Sudama库 (仅密钥)": "sudama",
+                "GitHub (ikun0014/ManifestHub)": "ikun0014/ManifestHub",
+                "GitHub (Masaiki/ManifestAutoUpdate)": "Masaiki/ManifestAutoUpdate",
+                "GitHub (wxy1343/ManifestAutoUpdate)": "wxy1343/ManifestAutoUpdate",
+                "GitHub (Cyberbolt/ManifestAutoUpdate)": "Cyberbolt/ManifestAutoUpdate",
+                "GitHub (Fairyvmos/bruh-hub)": "Fairyvmos/bruh-hub",
+                "GitHub (Cracko298/ManifestHub)": "Cracko298/ManifestHub",
             };
             
             let html = '';
@@ -591,5 +612,5 @@ class CaiWebApp {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    new CaiWebApp();
+    new DxbWebApp();
 });
