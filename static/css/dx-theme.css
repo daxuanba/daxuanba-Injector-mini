@@ -330,3 +330,114 @@ body.dark-theme {
 #themeToggleBtn .material-icons {
   font-size: 22px;
 }
+
+/* ============================================================
+   左侧栏布局（区别于原版顶部导航）
+   ============================================================ */
+.app-container { display: flex; min-height: 100vh; }
+.sidebar {
+  width: 224px; flex-shrink: 0;
+  background: var(--dx-appbar-bg);
+  border-right: 1px solid var(--dx-appbar-line);
+  display: flex; flex-direction: column;
+  position: sticky; top: 0; height: 100vh;
+  box-shadow: 1px 0 0 var(--dx-hairline);
+}
+.sidebar-brand { padding: 22px 20px 16px; border-bottom: 1px solid var(--dx-hairline); }
+.sidebar-version { margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--dx-yellow); letter-spacing: 0.5px; }
+.sidebar-nav { flex: 1; padding: 14px 12px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
+.nav-item {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px; border-radius: 12px;
+  color: var(--md-sys-color-on-surface); text-decoration: none;
+  font-weight: 500; font-size: 14.5px;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.nav-item .material-icons { font-size: 22px; color: var(--md-sys-color-on-surface-variant); }
+.nav-item:hover { background: var(--dx-yellow-soft); }
+.nav-item.active { background: var(--dx-yellow-soft); }
+.nav-item.active, .nav-item.active .material-icons { color: var(--dx-yellow) !important; }
+.sidebar-footer { padding: 12px; border-top: 1px solid var(--dx-hairline); display: flex; gap: 10px; justify-content: center; }
+.nav-action {
+  width: 44px; height: 44px; border: none; border-radius: 12px; cursor: pointer;
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.nav-action .material-icons { font-size: 22px; }
+.nav-action:hover { background: var(--dx-yellow-soft); color: var(--dx-yellow); }
+#shutdownBtn { color: var(--md-sys-color-on-error-container); background: var(--md-sys-color-error-container); }
+#shutdownBtn:hover { filter: brightness(1.12); }
+#themeToggleBtn { color: var(--dx-yellow); }
+
+.content-area { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.content-header {
+  display: flex; align-items: center; gap: 14px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--dx-appbar-line);
+  background: var(--dx-appbar-bg);
+  position: sticky; top: 0; z-index: 5;
+}
+.content-header .app-title { font-size: 18px; }
+.content-header-actions { margin-left: auto; display: flex; gap: 8px; }
+
+/* 清单源推荐徽标 */
+.recommended-badge {
+  font-size: 11px; font-weight: 700; color: #111111;
+  background: var(--dx-yellow); border-radius: 6px; padding: 1px 6px; margin-left: 8px;
+}
+.radio-item.rec .radio-label { color: var(--dx-yellow) !important; font-weight: 600; }
+
+/* ---------------- 首页 Steam 状态条 ---------------- */
+.steam-status-bar {
+  display: flex; flex-wrap: wrap; gap: 18px;
+  padding: 12px 24px;
+  border-top: 1px solid var(--dx-appbar-line);
+  background: var(--dx-appbar-bg);
+  font-size: 13px;
+}
+.steam-status-item { display: flex; align-items: center; gap: 8px; }
+.steam-status-item .material-icons { font-size: 18px; color: var(--md-sys-color-on-surface-variant); }
+.steam-status-text { color: var(--md-sys-color-on-surface-variant); font-weight: 500; }
+.steam-status-text.ok { color: var(--dx-yellow); }
+.steam-status-text.warn { color: #c0392b; }
+
+/* ---------------- Lua 手搓卡片 ---------------- */
+.checkbox-row { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 14px; }
+.lua-preview {
+  width: 100%; min-height: 160px; margin-top: 14px;
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--dx-card-border);
+  border-radius: 10px; padding: 12px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.55; resize: vertical;
+}
+
+/* 旋转动画（检查更新/手搓中） */
+.material-icons.spin { animation: dxb-spin 1s linear infinite; }
+@keyframes dxb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+
+/* ---------------- 依赖卡片状态 ---------------- */
+.dep-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--dx-card-soft, rgba(127,127,127,0.08));
+    margin-bottom: 12px;
+    min-height: 20px;
+}
+.dep-status .status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #9e9e9e;
+    flex: 0 0 auto;
+}
+.dep-status .status-dot.ok { background: #2e9e44; box-shadow: 0 0 0 3px rgba(46,158,68,0.18); }
+.dep-status .status-dot.warn { background: #d98b00; box-shadow: 0 0 0 3px rgba(217,139,0,0.18); }
+.dep-status .status-text { font-weight: 500; color: var(--md-sys-color-on-surface-variant); }

@@ -223,6 +223,153 @@ def check_updates():  # 改为同步函数
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message})
 
+# NEW: Steam 状态（首页状态条：位置 + 内核检测）
+@app.route('/api/steam_status', methods=['GET'])
+def steam_status():
+    try:
+        async def _st():
+            async with DxbBackend() as backend:
+                await backend.initialize()
+                return backend.get_steam_status()
+        return jsonify({"success": True, **asyncio.run(_st())})
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": str(e)})
+
+# NEW: 依赖模块状态（OpenSteamTool 内核 / SteamTools）
+@app.route('/api/dependency/status', methods=['GET'])
+def dependency_status():
+    try:
+        async def _st():
+            async with DxbBackend() as backend:
+                await backend.initialize()
+                return backend.get_opensteamtool_status(), backend.get_steamtools_status(), backend.get_steam_status()
+        otool, stools, steam = asyncio.run(_st())
+        return jsonify({"success": True, "opensteamtool": otool, "steamtools": stools, "steam": steam})
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": str(e)})
+
+
+def _background_install_dependency(kind: str, force: bool):
+    """后台线程：从 GitHub 下载/更新依赖内核，不阻塞页面。"""
+    async def _run():
+        async with DxbBackend() as backend:
+            patch_log_for_socketio(backend.log)
+            await backend.initialize()
+            if kind == "opensteamtool":
+                res = await backend.ensure_opensteamtool_installed(force=force)
+            elif kind == "steamtools":
+                res = await backend.ensure_steamtools_installed(force=force)
+            else:
+                backend.log.error(f"未知依赖类型: {kind}")
+                return
+            if res:
+                backend.log.info(f"依赖 {kind} 安装/更新完成。")
+            else:
+                backend.log.warning(f"依赖 {kind} 安装/更新失败，请查看日志或手动安装。")
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        print(f"后台安装依赖 {kind} 异常: {e}")
+
+
+@app.route('/api/dependency/install', methods=['POST'])
+def dependency_install():
+    data = request.get_json(silent=True) or {}
+    kind = data.get("kind", "")
+    force = bool(data.get("force", False))
+    if kind not in ("opensteamtool", "steamtools"):
+        return jsonify({"success": False, "message": "未知的依赖类型。"}), 400
+    threading.Thread(target=_background_install_dependency, args=(kind, force), daemon=True).start()
+    label = "OpenSteamTool 内核" if kind == "opensteamtool" else "SteamTools"
+    return jsonify({"success": True, "message": f"已在后台开始下载/更新 {label}。"})
+
+
+# NEW: 应用自更新：下载最新安装包并自动打开安装
+@app.route('/api/auto_update', methods=['POST'])
+def auto_update():
+    try:
+        async def _up():
+            async with DxbBackend() as backend:
+                patch_log_for_socketio(backend.log)
+                await backend.initialize()
+                has_update, info = await backend.check_for_updates()
+                if not has_update:
+                    return {"success": True, "has_update": False}
+                urls = info.get("download_urls", [])
+                if not urls:
+                    return {"success": False, "message": "未找到可下载的安装包。"}
+                # 优先下载 .exe 资产（本应用为单文件 exe）
+                asset = next((u for u in urls if u["name"].lower().endswith(".exe")), urls[0])
+                data = await backend._download_bytes(asset["url"])
+                if not data:
+                    return {"success": False, "message": "下载安装包失败。"}
+                import tempfile
+                tmp = Path(tempfile.gettempdir()) / asset["name"]
+                tmp.write_bytes(data)
+                backend.log.info(f"已下载更新安装包到 {tmp}，即将打开安装...")
+                if sys.platform == 'win32' and os.startfile:
+                    os.startfile(str(tmp))
+                return {"success": True, "has_update": True, "path": str(tmp)}
+        result = asyncio.run(_up())
+        if result.get("has_update") and result.get("success"):
+            # 退出当前进程，让新安装包接管
+            def kill_process():
+                time.sleep(1.0)
+                os._exit(0)
+            threading.Thread(target=kill_process, daemon=True).start()
+        return jsonify(result)
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": str(e)})
+
+
+# NEW: Lua 手搓（Steam API 抓信息 -> 生成 OpenSteamTool 风格 lua）
+@app.route('/api/craft_lua', methods=['POST'])
+def craft_lua():
+    data = request.get_json(silent=True) or {}
+    appid = str(data.get("appid", "")).strip()
+    include_depotkeys = bool(data.get("include_depotkeys", True))
+    include_manifests = bool(data.get("include_manifests", True))
+    if not appid:
+        return jsonify({"success": False, "message": "请输入 AppID。"}), 400
+    try:
+        async def _craft():
+            async with DxbBackend() as backend:
+                patch_log_for_socketio(backend.log)
+                await backend.initialize()
+                lua, filename, info = await backend.craft_opensteamtool_lua(
+                    appid, include_depotkeys=include_depotkeys, include_manifests=include_manifests)
+                return lua, filename, info
+        lua, filename, info = asyncio.run(_craft())
+        return jsonify({"success": True, "lua": lua, "filename": filename, "info": info})
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/download_lua', methods=['POST'])
+def download_lua():
+    data = request.get_json(silent=True) or {}
+    lua = data.get("lua", "")
+    filename = data.get("filename", "crafted.lua")
+    if not lua:
+        return jsonify({"success": False, "message": "无 lua 内容。"}), 400
+    try:
+        import tempfile
+        tmp = Path(tempfile.gettempdir()) / filename
+        tmp.write_text(lua, encoding='utf-8')
+        return send_from_directory(tmp.parent, tmp.name, as_attachment=True,
+                                   mimetype='text/plain; charset=utf-8')
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # NEW: Get available sources (including custom repos)
 @app.route('/api/sources', methods=['GET'])
 def get_sources():  # 改为同步函数
@@ -263,10 +410,23 @@ def get_sources():  # 改为同步函数
                 # Add custom ZIP repos  
                 for repo in custom_zip_repos:
                     builtin_sources[f"{repo['name']} (自定义ZIP)"] = f"custom_zip_{repo['name']}"
+
+                # 探测所有内置源可用性，剔除不可用，自动选最优
+                availability, recommended = await backend.test_sources()
+                filtered_sources = {
+                    name: value for name, value in builtin_sources.items()
+                    if availability.get(value, True)
+                }
+                # 自定义源默认视为可用（用户已配置）
+                if recommended not in filtered_sources.values():
+                    # 若推荐项被过滤，回退到过滤后第一个可用源
+                    recommended = next(iter(filtered_sources.values()), None)
                 
                 return {
                     "success": True,
-                    "sources": builtin_sources,
+                    "sources": filtered_sources,
+                    "recommended": recommended,
+                    "availability": availability,
                     "custom_github_count": len(custom_github_repos),
                     "custom_zip_count": len(custom_zip_repos)
                 }

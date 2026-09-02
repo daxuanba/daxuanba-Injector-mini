@@ -24,19 +24,39 @@
 <body>
 <div id="background-overlay"></div>
 <div class="app-container">
-    <!-- 修复: 使header与设置/关于页面保持一致 -->
-    <header class="app-bar">
-        <div class="app-bar-content">
-            <button class="btn btn-text" onclick="window.location.href='/'">
-                <span class="material-icons">arrow_back</span>
-            </button>
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <span class="dxb-wordmark">大轩巴</span>
+            <div class="sidebar-version">入库器mini</div>
+        </div>
+        <nav class="sidebar-nav">
+            <a class="nav-item" href="/">
+                <span class="material-icons">home</span><span>首页</span>
+            </a>
+            <a class="nav-item active" href="/manager">
+                <span class="material-icons">library_books</span><span>入库管理</span>
+            </a>
+            <a class="nav-item" href="/settings">
+                <span class="material-icons">settings</span><span>设置</span>
+            </a>
+            <a class="nav-item" href="/about">
+                <span class="material-icons">info</span><span>关于</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <button class="nav-action" id="themeToggleBtn" title="切换主题"><span class="material-icons">dark_mode</span></button>
+            <button class="nav-action" id="backgroundSettingsBtn" title="自定义背景"><span class="material-icons">wallpaper</span></button>
+            <button class="nav-action" id="shutdownBtn" title="关闭应用"><span class="material-icons">power_settings_new</span></button>
+        </div>
+    </aside>
+    <div class="content-area">
+        <header class="content-header">
             <span class="dxb-wordmark">大轩巴</span>
             <h1 class="app-title">入库管理</h1>
-        </div>
-    </header>
+        </header>
 
-    <!-- 主内容区域 -->
-    <main class="manager-main-content">
+        <!-- 主内容区域 -->
+        <main class="manager-main-content">
         <div class="card manager-card">
             <div class="card-header">
                 <h2>文件列表</h2>
@@ -117,19 +137,7 @@
             <button id="saveEditorBtn" class="btn btn-primary"><span class="material-icons">save</span> 保存</button>
         </div>
     </div>
-</div>
-
-
-<div class="floating-action-buttons">
-    <button id="shutdownBtn" class="fab" title="关闭应用">
-        <span class="material-icons">power_settings_new</span>
-    </button>
-    <button id="themeToggleBtn" class="fab" title="切换主题">
-        <span class="material-icons">dark_mode</span>
-    </button>
-    <button id="backgroundSettingsBtn" class="fab" title="自定义背景">
-        <span class="material-icons">wallpaper</span>
-    </button>
+    </div>
 </div>
 
 <!-- 添加背景设置模态框 -->

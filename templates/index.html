@@ -25,32 +25,36 @@
 <body>
 <div id="background-overlay"></div>
 <div class="app-container">
-    <!-- 顶部应用栏 -->
-    <header class="app-bar">
-        <div class="app-bar-content">
-            <a href="/" style="color: inherit; text-decoration: none; display: flex; align-items: center; gap: 12px;">
-                <span class="dxb-wordmark">大轩巴</span>
-                <h1 class="app-title">入库器mini</h1>
-            </a>
-            <div class="app-version">mini v2.5</div>
-            
-            <!-- Spacer to push buttons to the right -->
-            <div style="flex-grow: 1;"></div>
-
-            <!-- Navigation Buttons Group -->
-            <a class="btn btn-text settings-link" href="/manager">
-                <span class="settings-text">入库管理</span>
-            </a>
-            <a class="btn btn-text settings-link" href="/about">
-                <span class="material-icons">info_outline</span>
-                <span class="settings-text">关于</span>
-            </a>
-            <a class="btn btn-text settings-link" href="/settings">
-                <span class="material-icons">settings</span>
-                <span class="settings-text">设置</span>
-            </a>
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <span class="dxb-wordmark">大轩巴</span>
+            <div class="sidebar-version">入库器mini</div>
         </div>
-    </header>
+        <nav class="sidebar-nav">
+            <a class="nav-item active" href="/">
+                <span class="material-icons">home</span><span>首页</span>
+            </a>
+            <a class="nav-item" href="/manager">
+                <span class="material-icons">library_books</span><span>入库管理</span>
+            </a>
+            <a class="nav-item" href="/settings">
+                <span class="material-icons">settings</span><span>设置</span>
+            </a>
+            <a class="nav-item" href="/about">
+                <span class="material-icons">info</span><span>关于</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <button class="nav-action" id="themeToggleBtn" title="切换主题"><span class="material-icons">dark_mode</span></button>
+            <button class="nav-action" id="backgroundSettingsBtn" title="自定义背景"><span class="material-icons">wallpaper</span></button>
+            <button class="nav-action" id="shutdownBtn" title="关闭应用"><span class="material-icons">power_settings_new</span></button>
+        </div>
+    </aside>
+    <div class="content-area">
+        <header class="content-header">
+            <span class="dxb-wordmark">大轩巴</span>
+            <h1 class="app-title">入库器mini</h1>
+        </header>
     <!-- 主内容区域 -->
     <main class="main-content">
         <!-- 配置状态卡片 -->
@@ -207,6 +211,45 @@
             </div>
         </div>
 
+        <!-- Lua 手搓卡片 -->
+        <div class="card lua-craft-card">
+            <div class="card-header">
+                <span class="material-icons">auto_fix_high</span>
+                <h2>Lua 手搓（清单生成）</h2>
+                <div class="card-actions">
+                    <span class="input-helper">找不到现成清单时，自动从 Steam 抓取信息生成 OpenSteamTool 风格 lua</span>
+                </div>
+            </div>
+            <div class="card-content">
+                <div class="input-group">
+                    <label class="input-label" for="luaAppId">App ID</label>
+                    <input class="text-field" id="luaAppId" name="luaAppId" placeholder="例如: 730 或 Steam 链接"/>
+                    <div class="input-helper">输入游戏 AppID，自动获取名称、depot、manifest 与 depotkey。</div>
+                </div>
+                <div class="checkbox-row">
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="luaIncludeKeys" checked>
+                        <span class="checkbox-button"></span>
+                        <div class="checkbox-content"><span class="checkbox-label">包含 depotkey</span></div>
+                    </label>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="luaIncludeManifests" checked>
+                        <span class="checkbox-button"></span>
+                        <div class="checkbox-content"><span class="checkbox-label">包含 manifest 绑定</span></div>
+                    </label>
+                </div>
+                <div class="button-group">
+                    <button class="btn btn-primary" id="luaCraftBtn" type="button">
+                        <span class="material-icons">auto_fix_high</span> 手搓
+                    </button>
+                    <button class="btn btn-secondary" id="luaDownloadBtn" type="button" disabled>
+                        <span class="material-icons">download</span> 下载
+                    </button>
+                </div>
+                <textarea class="lua-preview" id="luaPreview" readonly placeholder="生成结果将显示在这里..."></textarea>
+            </div>
+        </div>
+
         <!-- 日志卡片 -->
         <div class="card progress-card">
             <div class="card-header">
@@ -229,24 +272,19 @@
             </div>
         </div>
     </main>
-    <!-- 页脚 -->
-    <footer class="app-footer">
-        <div class="copyright">
-            <p>© 2026 大轩巴入库器mini</p>
+        <!-- Steam 状态条 -->
+        <div class="steam-status-bar" id="steamStatusBar">
+            <div class="steam-status-item"><span class="material-icons">folder</span><span class="steam-status-text" id="steamPathText">检测中...</span></div>
+            <div class="steam-status-item"><span class="material-icons">memory</span><span class="steam-status-text" id="steamKernelText">内核: 检测中</span></div>
+            <div class="steam-status-item"><span class="material-icons">verified</span><span class="steam-status-text" id="steamToolsText">SteamTools: 检测中</span></div>
         </div>
-    </footer>
-</div>
-
-<div class="floating-action-buttons">
-    <button id="shutdownBtn" class="fab" title="关闭应用">
-        <span class="material-icons">power_settings_new</span>
-    </button>
-    <button id="themeToggleBtn" class="fab" title="切换主题">
-        <span class="material-icons">dark_mode</span>
-    </button>
-    <button id="backgroundSettingsBtn" class="fab" title="自定义背景">
-        <span class="material-icons">wallpaper</span>
-    </button>
+        <!-- 页脚 -->
+        <footer class="app-footer">
+            <div class="copyright">
+                <p>© 2026 大轩巴入库器mini</p>
+            </div>
+        </footer>
+    </div>
 </div>
 
 <div class="snackbar" id="snackbar">

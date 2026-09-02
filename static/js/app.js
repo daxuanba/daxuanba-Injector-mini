@@ -48,6 +48,18 @@ class DxbWebApp {
             modeIndicator: document.getElementById('modeIndicator'),
             gameModeOptions: document.getElementById('gameModeOptions'),
             workshopModeOptions: document.getElementById('workshopModeOptions'),
+            // Lua 手搓元素
+            luaAppId: document.getElementById('luaAppId'),
+            luaAppId: document.getElementById('luaAppId'),
+            luaIncludeKeys: document.getElementById('luaIncludeKeys'),
+            luaIncludeManifests: document.getElementById('luaIncludeManifests'),
+            luaCraftBtn: document.getElementById('luaCraftBtn'),
+            luaDownloadBtn: document.getElementById('luaDownloadBtn'),
+            luaPreview: document.getElementById('luaPreview'),
+            // Steam 状态条元素
+            steamPathText: document.getElementById('steamPathText'),
+            steamKernelText: document.getElementById('steamKernelText'),
+            steamToolsText: document.getElementById('steamToolsText'),
         };
 
         this.initializeSocket();
@@ -103,6 +115,10 @@ class DxbWebApp {
 
         // 创意工坊模式切换
         this.elements.workshopModeBtn.addEventListener('click', () => this.toggleWorkshopMode());
+
+        // Lua 手搓
+        this.elements.luaCraftBtn.addEventListener('click', () => this.craftLua());
+        this.elements.luaDownloadBtn.addEventListener('click', () => this.downloadLua());
 
         this.elements.unlockForm.addEventListener('change', (event) => {
             if (event.target.name === 'toolType') {
@@ -204,6 +220,7 @@ class DxbWebApp {
                 this.elements.patchDepotKeyGroup.style.display = showStOptions ? 'block' : 'none'; // NEW: 显示depotkey修补选项
                 
                 await this.loadSources();
+                this.loadSteamStatus();
             } else {
                 this.elements.configStatus.innerHTML = `<div class="status-item error"><span class="material-icons status-icon">error</span><span class="status-text">后端错误: ${data.message}</span></div>`;
             }
@@ -241,12 +258,15 @@ class DxbWebApp {
             
             const data = await response.json();
             if (data.success) {
-                this.renderSourceList(data.sources);
+                this.renderSourceList(data.sources, data.recommended);
                 // 如果有自定义仓库，显示提示信息
                 const customCount = (data.custom_github_count || 0) + (data.custom_zip_count || 0);
                 if (customCount > 0) {
                     console.log(`已加载 ${customCount} 个自定义清单源`);
                     this.showSnackbar(`已加载 ${customCount} 个自定义清单源`, 'success');
+                }
+                if (data.recommended) {
+                    this.showSnackbar('已自动选择最优可用清单源', 'info');
                 }
             } else {
                 throw new Error(data.message || '获取清单源失败');
@@ -272,21 +292,24 @@ class DxbWebApp {
                 "GitHub (Fairyvmos/bruh-hub)": "Fairyvmos/bruh-hub",
                 "GitHub (Cracko298/ManifestHub)": "Cracko298/ManifestHub",
             };
-            this.renderSourceList(fallbackSources);
+            this.renderSourceList(fallbackSources, 'search');
             this.showSnackbar('加载自定义清单源失败，使用默认源', 'warning');
         }
     }
 
-    renderSourceList(sources) {
+    renderSourceList(sources, recommended) {
         const entries = Object.entries(sources);
         const VISIBLE = 6;
         let html = '';
         entries.forEach(([name, value], idx) => {
             const hidden = idx >= VISIBLE ? ' style="display:none;"' : '';
-            html += `<label class="radio-item"${hidden}>
-                <input type="radio" name="toolType" value="${value}" ${idx === 0 ? 'checked' : ''}>
+            const isRec = recommended && value === recommended;
+            const checked = isRec ? 'checked' : (!recommended && idx === 0 ? 'checked' : '');
+            const badge = isRec ? ' <span class="recommended-badge">推荐</span>' : '';
+            html += `<label class="radio-item${isRec ? ' rec' : ''}"${hidden}>
+                <input type="radio" name="toolType" value="${value}" ${checked}>
                 <span class="radio-button"></span>
-                <span class="radio-label">${name}</span>
+                <span class="radio-label">${name}${badge}</span>
             </label>`;
         });
         if (entries.length > VISIBLE) {
@@ -306,6 +329,92 @@ class DxbWebApp {
                     moreBtn.innerHTML = '<span class="material-icons">expand_more</span> 更多清单源';
                 }
             });
+        }
+    }
+
+    // 首页 Steam 状态条：位置 + 内核 + SteamTools
+    async loadSteamStatus() {
+        try {
+            const response = await fetch('/api/steam_status');
+            const data = await response.json();
+            if (!data.success) return;
+            const st = data;
+            this.elements.steamPathText.textContent = st.exists
+                ? `Steam: ${st.steam_path}`
+                : 'Steam: 未检测到';
+            const kernelMap = {
+                'opensteamtool': { t: '内核: OpenSteamTool（清单导入）', c: 'ok' },
+                'steamtools': { t: '内核: SteamTools（稳定入库）', c: 'ok' },
+                'none': { t: '内核: 未安装', c: 'warn' },
+            };
+            const k = kernelMap[st.kernel] || kernelMap['none'];
+            this.elements.steamKernelText.textContent = k.t;
+            this.elements.steamKernelText.className = `steam-status-text ${k.c}`;
+            this.elements.steamToolsText.textContent = `SteamTools: ${st.steamtools ? '已检测' : '未检测'}`;
+            this.elements.steamToolsText.className = `steam-status-text ${st.steamtools ? 'ok' : ''}`;
+        } catch (e) {
+            this.elements.steamPathText.textContent = 'Steam: 检测失败';
+        }
+    }
+
+    // Lua 手搓
+    async craftLua() {
+        const appid = this.elements.luaAppId.value.trim();
+        if (!appid) { this.showSnackbar('请输入 AppID。', 'error'); return; }
+        const btn = this.elements.luaCraftBtn;
+        btn.disabled = true;
+        const original = btn.innerHTML;
+        btn.innerHTML = '<span class="material-icons spin">hourglass_top</span> 手搓中...';
+        try {
+            const response = await fetch('/api/craft_lua', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    appid,
+                    include_depotkeys: this.elements.luaIncludeKeys.checked,
+                    include_manifests: this.elements.luaIncludeManifests.checked,
+                }),
+            });
+            const data = await response.json();
+            if (data.success) {
+                this.elements.luaPreview.value = data.lua;
+                this.luaFilename = data.filename;
+                this.elements.luaDownloadBtn.disabled = false;
+                const info = data.info || {};
+                const keys = (info.depotkeys && Object.keys(info.depotkeys).length) || 0;
+                this.showSnackbar(`手搓完成：名称 ${info.name || appid}，depot ${info.depots ? info.depots.length : 0}，密钥 ${keys}`, 'success');
+            } else {
+                this.showSnackbar(`手搓失败: ${data.message}`, 'error');
+            }
+        } catch (error) {
+            this.showSnackbar(`手搓出错: ${error.message}`, 'error');
+        } finally {
+            setTimeout(() => { btn.disabled = false; btn.innerHTML = original; }, 800);
+        }
+    }
+
+    async downloadLua() {
+        const lua = this.elements.luaPreview.value;
+        if (!lua) { this.showSnackbar('没有可下载的内容。', 'error'); return; }
+        try {
+            const response = await fetch('/api/download_lua', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lua, filename: this.luaFilename || 'crafted.lua' }),
+            });
+            if (!response.ok) { this.showSnackbar('下载失败。', 'error'); return; }
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = this.luaFilename || 'crafted.lua';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            this.showSnackbar('已开始下载 lua 文件。', 'success');
+        } catch (error) {
+            this.showSnackbar(`下载出错: ${error.message}`, 'error');
         }
     }
 

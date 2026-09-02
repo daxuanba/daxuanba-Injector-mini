@@ -402,6 +402,136 @@ class DxbBackend:
             self.log.error(f"查询 {repo} 发布失败: {self.stack_error(e)}")
         return None
 
+    async def _fetch_release_tag(self, repo: str) -> str:
+        """获取仓库最新发布的 tag（用于写入版本标记）。"""
+        api = f"https://api.github.com/repos/{repo}/releases/latest"
+        try:
+            github_token = self.config.get("Github_Personal_Token", "").strip()
+            headers = {'Authorization': f'Bearer {github_token}'} if github_token else {}
+            headers['User-Agent'] = 'DaXuanBa-Injector'
+            r = await self.client.get(api, headers=headers, timeout=20)
+            r.raise_for_status()
+            return str(r.json().get('tag_name', '')).strip()
+        except Exception:
+            return ""
+
+    async def _download_and_extract(self, download_url: str, ext_dir: Path) -> bool:
+        """下载 zip 并解压到 ext_dir，返回是否成功。"""
+        import zipfile
+        zpath = self.temp_path / 'dep_extract.zip'
+        try:
+            data = await self._download_bytes(download_url)
+            if not data:
+                return False
+            self.temp_path.mkdir(parents=True, exist_ok=True)
+            zpath.write_bytes(data)
+            ext_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zpath) as zf:
+                zf.extractall(ext_dir)
+            return True
+        except Exception as e:
+            self.log.error(f"下载/解压失败: {self.stack_error(e)}")
+            return False
+        finally:
+            if zpath.exists():
+                try:
+                    zpath.unlink()
+                except Exception:
+                    pass
+
+    async def ensure_opensteamtool_installed(self, force: bool = False) -> str | None:
+        """从 GitHub 下载/更新 OpenSteamTool 内核（清单导入），并导入检测到的 Steam 主文件夹。
+        安装：复制 dwmapi.dll / xinput1_4.dll / OpenSteamTool.dll 到 Steam 根目录，
+        并确保 config\\lua 目录存在（lua 配置目录 = 检测到的 Steam 主文件夹下的 lua 目录）。
+        """
+        sp = self.get_steam_path()
+        if not sp or not sp.exists():
+            self.log.error("无法确定有效的 Steam 路径，无法安装 OpenSteamTool 内核。")
+            return None
+        if not force:
+            st = self.get_opensteamtool_status()
+            if st["installed"]:
+                self.log.info("OpenSteamTool 内核已安装，跳过（如需重装请使用强制更新）。")
+                return "opensteamtool"
+        repo = self.config.get("opensteamtool_repo", "OpenSteam001/OpenSteamTool").strip() or "OpenSteam001/OpenSteamTool"
+        self.log.info(f"正在从 GitHub 获取 OpenSteamTool 最新发布（仓库 {repo}）...")
+        asset = await self._fetch_latest_release_asset(repo, ['.zip'])
+        if not asset:
+            self.log.error("获取 OpenSteamTool 发布资产失败。")
+            return None
+        download_url, asset_name = asset
+        ext_dir = self.temp_path / 'opensteamtool_extract'
+        if not await self._download_and_extract(download_url, ext_dir):
+            return None
+        # 复制核心 dll 到 Steam 根目录
+        copied = False
+        for dll in ext_dir.rglob('OpenSteamTool.dll'):
+            shutil.copy2(dll, sp / dll.name)
+            copied = True
+        for dll in ext_dir.rglob('dwmapi.dll'):
+            shutil.copy2(dll, sp / dll.name)
+        for dll in ext_dir.rglob('xinput1_4.dll'):
+            shutil.copy2(dll, sp / dll.name)
+        # 导入检测到的 Steam 主文件夹：确保 config\\lua 目录存在
+        lua_dir = sp / 'config' / 'lua'
+        lua_dir.mkdir(parents=True, exist_ok=True)
+        # 若压缩包内已有 lua 示例，也一并复制
+        for lua in ext_dir.rglob('*.lua'):
+            shutil.copy2(lua, lua_dir / lua.name)
+        # 写版本标记
+        tag = await self._fetch_release_tag(repo)
+        try:
+            (sp / 'opensteamtool_version.txt').write_text(tag or asset_name, encoding='utf-8')
+        except Exception:
+            pass
+        shutil.rmtree(ext_dir, ignore_errors=True)
+        if copied:
+            self.log.info(f"OpenSteamTool 内核已安装到 Steam 根目录（{sp}），lua 目录: {lua_dir}")
+            return "opensteamtool"
+        self.log.warning("OpenSteamTool 发布包中未找到核心 dll，安装可能不完整。")
+        return None
+
+    async def ensure_steamtools_installed(self, force: bool = False) -> str | None:
+        """从 GitHub 下载/更新 SteamTools（稳定入库）到 Steam 的 stplug-in 目录。"""
+        sp = self.get_steam_path()
+        if not sp or not sp.exists():
+            self.log.error("无法确定有效的 Steam 路径，无法安装 SteamTools。")
+            return None
+        if not force:
+            st = self.get_steamtools_status()
+            if st["installed"]:
+                self.log.info("SteamTools 已安装，跳过。")
+                return "steamtools"
+        repo = self.config.get("steamtools_repo", "SteamTools/STAupdater").strip() or "SteamTools/STAupdater"
+        self.log.info(f"正在从 GitHub 获取 SteamTools 最新发布（仓库 {repo}）...")
+        asset = await self._fetch_latest_release_asset(repo, ['.zip', '.7z'])
+        if not asset:
+            self.log.error("获取 SteamTools 发布资产失败。")
+            return None
+        download_url, asset_name = asset
+        ext_dir = self.temp_path / 'steamtools_extract'
+        # 优先尝试 zip；若资产是 7z 则用 _download_and_extract 的 zip 分支会失败，给出提示
+        ok = False
+        if asset_name.lower().endswith('.zip'):
+            ok = await self._download_and_extract(download_url, ext_dir)
+        if not ok:
+            self.log.warning("SteamTools 发布资产非 zip 或解压失败，请前往设置页使用官方安装包手动安装。")
+            shutil.rmtree(ext_dir, ignore_errors=True)
+            return None
+        dst = sp / 'config' / 'stplug-in'
+        dst.mkdir(parents=True, exist_ok=True)
+        for item in ext_dir.rglob('*'):
+            if item.is_file():
+                shutil.copy2(item, dst / item.name)
+        tag = await self._fetch_release_tag(repo)
+        try:
+            (sp / 'steamtools_version.txt').write_text(tag or asset_name, encoding='utf-8')
+        except Exception:
+            pass
+        shutil.rmtree(ext_dir, ignore_errors=True)
+        self.log.info(f"SteamTools 已释放到 {dst}，请按官方指引完成注册。")
+        return "steamtools"
+
     async def _download_bytes(self, url: str) -> bytes | None:
         try:
             r = await self.client.get(url, timeout=120, follow_redirects=True)
@@ -471,7 +601,66 @@ class DxbBackend:
         except Exception:
             self.log.error(f'获取Steam路径失败。请检查Steam是否正确安装，或在config.json中设置Custom_Steam_Path。')
             return None
-            
+
+    def get_steam_status(self) -> Dict:
+        """检测 Steam 路径与已安装内核，供首页状态条显示。
+        kernel: steamtools(稳定入库) / opensteamtool(清单导入) / none
+        注意：OpenSteamTool 实际把 lua 放在 Steam 根目录的 config\\lua\\，
+        内核 dll(OpenSteamTool.dll/dwmapi.dll/xinput1_4.dll) 也在 Steam 根目录。
+        """
+        sp = self.get_steam_path()
+        if not sp or not sp.exists():
+            return {"steam_path": None, "exists": False, "kernel": "none",
+                    "steamtools": False, "greenluma": False, "opensteamtool": False}
+        is_steamtools = (sp / 'config' / 'stplug-in').is_dir()
+        is_greenluma = any((sp / dll).exists() for dll in ['GreenLuma_2025_x86.dll', 'GreenLuma_2025_x64.dll'])
+        # OpenSteamTool：Steam 根目录的 OpenSteamTool.dll 或 config\\lua 目录
+        is_opensteamtool = (sp / 'OpenSteamTool.dll').exists() or (sp / 'config' / 'lua').is_dir()
+        if is_steamtools:
+            kernel = "steamtools"
+        elif is_greenluma or is_opensteamtool:
+            kernel = "opensteamtool"
+        else:
+            kernel = "none"
+        return {
+            "steam_path": str(sp), "exists": True, "kernel": kernel,
+            "steamtools": is_steamtools, "greenluma": is_greenluma, "opensteamtool": is_opensteamtool
+        }
+
+    def get_opensteamtool_status(self) -> Dict:
+        """检测 OpenSteamTool 内核（清单导入）状态，供设置页依赖卡片显示。"""
+        sp = self.get_steam_path()
+        installed = False
+        version = ""
+        lua_dir = None
+        if sp and sp.exists():
+            lua_dir = sp / 'config' / 'lua'
+            installed = (sp / 'OpenSteamTool.dll').exists() or (lua_dir.is_dir() and any(lua_dir.glob('*.lua')))
+            vf = sp / 'opensteamtool_version.txt'
+            if vf.exists():
+                try:
+                    version = vf.read_text(encoding='utf-8').strip()
+                except Exception:
+                    version = ""
+        return {"steam_path": str(sp) if sp else None, "installed": installed, "version": version,
+                "lua_dir": str(lua_dir) if lua_dir else None}
+
+    def get_steamtools_status(self) -> Dict:
+        """检测 SteamTools（稳定入库）状态，供设置页依赖卡片显示。"""
+        sp = self.get_steam_path()
+        installed = False
+        version = ""
+        if sp and sp.exists():
+            st = sp / 'config' / 'stplug-in'
+            installed = st.is_dir() and any(st.glob('*.lua'))
+            vf = sp / 'steamtools_version.txt'
+            if vf.exists():
+                try:
+                    version = vf.read_text(encoding='utf-8').strip()
+                except Exception:
+                    version = ""
+        return {"steam_path": str(sp) if sp else None, "installed": installed, "version": version}
+
     # --- NEW: File Manager Methods ---
 
     async def _fetch_game_name_for_manager(self, appid: str) -> str:
@@ -740,6 +929,78 @@ class DxbBackend:
         builtin_repos = ['Auiowu/ManifestAutoUpdate', 'SteamAutoCracks/ManifestHub']
         custom_repos = [repo['repo'] for repo in self.get_custom_github_repos()]
         return builtin_repos + custom_repos
+
+    # ============================================================
+    # 清单源可用性探测（测试所有清单，剔除不可用，自动选最优）
+    # 每个内置源映射一个"根可达性"探针 URL + 质量权重(越大越优先)
+    #   None 探针 => 始终可用（如自动搜索 search）
+    # ============================================================
+    SOURCE_PROBE: Dict[str, Any] = {
+        # 自动搜索：始终可用，权重最高（兜底）
+        "search": None,
+        # GitHub 仓库源（探测 github.com 仓库页可达性，不耗 API rate）
+        "Auiowu/ManifestAutoUpdate":      ("https://github.com/Auiowu/ManifestAutoUpdate", 95),
+        "SteamAutoCracks/ManifestHub":    ("https://github.com/SteamAutoCracks/ManifestHub", 90),
+        "ikun0014/ManifestHub":           ("https://github.com/ikun0014/ManifestHub", 88),
+        "Masaiki/ManifestAutoUpdate":     ("https://github.com/Masaiki/ManifestAutoUpdate", 85),
+        "wxy1343/ManifestAutoUpdate":     ("https://github.com/wxy1343/ManifestAutoUpdate", 82),
+        "Cyberbolt/ManifestAutoUpdate":   ("https://github.com/Cyberbolt/ManifestAutoUpdate", 80),
+        "Fairyvmos/bruh-hub":             ("https://github.com/Fairyvmos/bruh-hub", 78),
+        "Cracko298/ManifestHub":          ("https://github.com/Cracko298/ManifestHub", 75),
+        # ZIP 直链源（探测服务根域名可达性）
+        "printedwaste":                   ("https://api.printedwaste.com/", 70),
+        "steamdatabase":                  ("https://steamdatabase.s3.eu-north-1.amazonaws.com/", 68),
+        "furcate":                        ("https://furcate.eu/", 64),
+        "cysaw":                          ("https://cysaw.top/", 60),
+        "walftech":                       ("https://walftech.com/", 55),
+        # 特殊源（走 steamui / ddxnb API）
+        "steamautocracks_v2":             ("https://steamui.com/", 50),
+        "sudama":                         ("https://steam.ddxnb.cn/", 52),
+        "buqiuren":                       ("https://steamui.com/", 50),
+    }
+
+    # 探测结果缓存（300s），避免每次切页都重探
+    _source_test_cache: Dict[str, Any] = {"ts": 0.0, "availability": None, "recommended": None}
+
+    async def _probe_one_source(self, value: str, url: str):
+        """探测单个源根域名可达性（连接失败/超时 => 不可用）"""
+        try:
+            r = await self.client.get(url, timeout=8.0, follow_redirects=True)
+            return value, (r.status_code < 500)
+        except Exception:
+            return value, False
+
+    async def test_sources(self) -> Tuple[Dict[str, bool], str | None]:
+        """并发探测所有内置源；返回 {value: 可用布尔} 与推荐源 value。
+        缓存 300s 内复用。"""
+        now = time.time()
+        cache = DxbBackend._source_test_cache
+        if cache.get("availability") and (now - cache.get("ts", 0.0)) < 300:
+            return cache["availability"], cache["recommended"]
+
+        results: Dict[str, bool] = {}
+        # 始终可用源
+        for value, spec in DxbBackend.SOURCE_PROBE.items():
+            if spec is None:
+                results[value] = True
+
+        # 并发探测其余源
+        tasks = {
+            value: asyncio.create_task(self._probe_one_source(value, spec[0]))
+            for value, spec in DxbBackend.SOURCE_PROBE.items() if spec is not None
+        }
+        for value, t in tasks.items():
+            v, ok = await t
+            results[v] = ok
+            self.log.info(f"清单源探测 {v}: {'可用' if ok else '不可用(剔除)'}")
+
+        # 推荐：可用源中权重最高者
+        avail = [v for v, ok in results.items() if ok]
+        avail.sort(key=lambda v: DxbBackend.SOURCE_PROBE[v][1], reverse=True)
+        recommended = avail[0] if avail else None
+
+        cache.update(ts=now, availability=results, recommended=recommended)
+        return results, recommended
 
     # NEW: HTTP helper function for safe requests with retry mechanism
     async def http_get_safe(self, url: str, timeout: int = 30, max_retries: int = 3, retry_delay: float = 1.0) -> httpx.Response | None:
@@ -2513,6 +2774,61 @@ class DxbBackend:
         match = re.search(r"/app/(\d+)", user_input) or re.search(r"steamdb\.info/app/(\d+)", user_input)
         if match: return match.group(1)
         return user_input if user_input.isdigit() else None
+
+    async def craft_opensteamtool_lua(self, appid: str, include_depotkeys: bool = True, include_manifests: bool = True) -> Tuple[str, str, Dict]:
+        """手搓 OpenSteamTool 风格 lua：从 Steam API 抓取游戏名 / depot / manifest / depotkey，
+        生成 addappid / setManifestid 语句。返回 (lua文本, 文件名, 信息字典)。
+        """
+        appid = self.extract_app_id(appid) or appid.strip()
+        if not appid or not appid.isdigit():
+            raise ValueError("无效的 AppID，请输入数字或 Steam 链接。")
+        info: Dict[str, Any] = {"appid": appid, "name": "", "depots": [], "depotkeys": {}, "manifests": {}}
+        # 1. 游戏名（Steam 商店 appdetails）
+        try:
+            headers = {'User-Agent': 'DaXuanBa-Injector'}
+            d = await self._fetch_store_appdetails(appid, headers)
+            if d:
+                info["name"] = d.get("name", "")
+        except Exception as e:
+            self.log.warning(f"获取游戏名失败: {e}")
+        # 2. depot + manifest（steamui / ddxnb）
+        depot_manifest: Dict[str, str] = {}
+        try:
+            depot_manifest = await self._get_depots_and_manifests_from_steamui(appid) or {}
+        except Exception as e:
+            self.log.warning(f"获取 depot/manifest 失败: {e}")
+        # 3. depotkey（Sudama / 993499094 密钥库，按 depotid 索引）
+        depotkeys: Dict[str, str] = {}
+        if include_depotkeys:
+            try:
+                dk = await self.download_depotkeys_json() or {}
+                for dep in depot_manifest.keys():
+                    if dep in dk and dk[dep]:
+                        depotkeys[dep] = str(dk[dep]).strip()
+            except Exception as e:
+                self.log.warning(f"获取 depotkey 失败: {e}")
+        # 4. 生成 lua
+        lines = [
+            "-- 大轩巴入库器mini · 手搓 OpenSteamTool lua",
+            f"-- AppID: {appid}" + (f"  名称: {info['name']}" if info['name'] else ""),
+            "-- 放入 Steam 根目录的 config\\lua\\ 下自动加载",
+            f"addappid({appid})  -- 解锁游戏 {info['name'] or appid}",
+        ]
+        for dep, gid in depot_manifest.items():
+            key = depotkeys.get(dep)
+            if key:
+                lines.append(f'addappid({dep}, 0, "{key}")  -- depot {dep} 含解密密钥')
+            else:
+                lines.append(f"addappid({dep})  -- depot {dep}" + (" (无密钥)" if include_depotkeys else ""))
+            if include_manifests and gid:
+                lines.append(f'setManifestid({dep}, "{gid}")')
+        lua = "\n".join(lines) + "\n"
+        filename = f"{appid}.lua"
+        info["depots"] = list(depot_manifest.keys())
+        info["depotkeys"] = depotkeys
+        info["manifests"] = depot_manifest
+        self.log.info(f"已手搓 lua: appid={appid} name={info['name']} depots={len(depot_manifest)} keys={len(depotkeys)}")
+        return lua, filename, info
 
     async def find_appid_by_name(self, game_name: str) -> List[Dict]:
         """搜索游戏名称 -> AppID，支持直接输入 AppID、多区域 Steam 搜索、SteamDB、小黑盒备用。"""

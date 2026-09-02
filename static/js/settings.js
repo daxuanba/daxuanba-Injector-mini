@@ -21,6 +21,12 @@ class SettingsManager {
             unlockerPrefRadios: document.querySelectorAll('input[name="unlockerPref"]'),
             greenlumaRepo: document.getElementById('greenlumaRepo'),
             steamtoolsRepo: document.getElementById('steamtoolsRepo'),
+            // 依赖模块元素
+            ostStatus: document.getElementById('ostStatus'),
+            opensteamtoolRepo: document.getElementById('opensteamtoolRepo'),
+            ostInstallBtn: document.getElementById('ostInstallBtn'),
+            stoolsStatus: document.getElementById('stoolsStatus'),
+            stoolsInstallBtn: document.getElementById('stoolsInstallBtn'),
             // NEW: 自定义清单库相关元素
             checkUpdatesBtn: document.getElementById('checkUpdatesBtn'),
             addGithubRepoBtn: document.getElementById('addGithubRepoBtn'),
@@ -88,6 +94,12 @@ class SettingsManager {
 
         // 顶部分类导航：点击切换显示的配置分类
         this.setupCategoryTabs();
+
+        // 依赖模块安装
+        this.elements.ostInstallBtn.addEventListener('click', () => this.installDependency('opensteamtool'));
+        this.elements.stoolsInstallBtn.addEventListener('click', () => this.installDependency('steamtools'));
+
+        this.loadDependencyStatus();
     }
 
     setupCategoryTabs() {
@@ -221,11 +233,23 @@ class SettingsManager {
     }
 
     downloadUpdate() {
-        const updateUrl = this.elements.updateModal.dataset.updateUrl;
-        if (updateUrl) {
-            window.open(updateUrl, '_blank');
-            this.hideUpdateModal();
-        }
+        const btn = this.elements.downloadUpdateBtn;
+        const original = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="material-icons spin">hourglass_top</span> 正在更新...';
+        fetch('/api/auto_update', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success && data.has_update) {
+                    this.showSnackbar('已下载更新安装包，即将自动安装...', 'success');
+                } else if (data.success && !data.has_update) {
+                    this.showSnackbar('当前已是最新版本。', 'info');
+                } else {
+                    this.showSnackbar(`更新失败: ${data.message}`, 'error');
+                }
+            })
+            .catch(e => this.showSnackbar(`更新出错: ${e.message}`, 'error'))
+            .finally(() => { setTimeout(() => { btn.disabled = false; btn.innerHTML = original; }, 1200); this.hideUpdateModal(); });
     }
 
     ignoreUpdate() {
@@ -236,6 +260,53 @@ class SettingsManager {
             this.showSnackbar(`已忽略版本 ${latestVersion}`, 'info');
         }
         this.hideUpdateModal();
+    }
+
+    async loadDependencyStatus() {
+        try {
+            const response = await fetch('/api/dependency/status');
+            const data = await response.json();
+            if (!data.success) return;
+            const render = (el, st) => {
+                if (!el) return;
+                const ok = st && st.installed;
+                const ver = (st && st.version) ? ` v${st.version}` : '';
+                el.innerHTML = ok
+                    ? `<span class="status-dot ok"></span><span class="status-text">已安装${ver}</span>`
+                    : `<span class="status-dot warn"></span><span class="status-text">未安装</span>`;
+            };
+            render(this.elements.ostStatus, data.opensteamtool);
+            render(this.elements.stoolsStatus, data.steamtools);
+        } catch (e) {
+            console.error('加载依赖状态失败', e);
+        }
+    }
+
+    async installDependency(kind) {
+        const btn = kind === 'opensteamtool' ? this.elements.ostInstallBtn : this.elements.stoolsInstallBtn;
+        if (!btn) return;
+        const original = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="material-icons spin">hourglass_top</span> 下载中...';
+        try {
+            const response = await fetch('/api/dependency/install', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ kind, force: false })
+            });
+            const data = await response.json();
+            if (data.success) {
+                this.showSnackbar(data.message, 'info');
+                setTimeout(() => this.loadDependencyStatus(), 4000);
+                setTimeout(() => this.loadDependencyStatus(), 9000);
+            } else {
+                this.showSnackbar(`安装失败: ${data.message}`, 'error');
+            }
+        } catch (e) {
+            this.showSnackbar(`安装出错: ${e.message}`, 'error');
+        } finally {
+            setTimeout(() => { btn.disabled = false; btn.innerHTML = original; }, 1500);
+        }
     }
 
     // NEW: 显示添加仓库模态框
@@ -423,6 +494,7 @@ class SettingsManager {
                 });
                 this.elements.greenlumaRepo.value = data.config.greenluma_repo || '';
                 this.elements.steamtoolsRepo.value = data.config.steamtools_repo || '';
+                this.elements.opensteamtoolRepo.value = data.config.opensteamtool_repo || '';
 
                 // NEW: 加载自定义清单库配置
                 this.customRepos = data.config.custom_repos || { github: [], zip: [] };
@@ -453,6 +525,7 @@ class SettingsManager {
             unlocker_preference: (document.querySelector('input[name="unlockerPref"]:checked') || {}).value || 'greenluma',
             greenluma_repo: this.elements.greenlumaRepo.value.trim(),
             steamtools_repo: this.elements.steamtoolsRepo.value.trim(),
+            opensteamtool_repo: this.elements.opensteamtoolRepo.value.trim(),
             // NEW: 保存自定义清单库配置
             custom_repos: this.customRepos,
         };
