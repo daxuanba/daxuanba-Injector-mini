@@ -1,6 +1,17 @@
-# 大轩巴入库器mini v1.0.0
+# 大轩巴入库器mini v2.5
 
 基于本地清单的 Steam 一键下载与入库图形工具，内嵌 Web 应用，双击即用、不调用外部浏览器。
+
+## 本次更新（v2.5）
+- **左侧栏布局改版**：顶部导航（含设置）整体移到左侧，区别于原版顶部 app-bar，视觉更独立。
+- **清单源探测 + 自动选优**：启动并发探测所有内置清单源可用性，自动剔除不可用源，默认选中加权推荐的源并打「推荐」徽标；优化下载与连接。
+- **首页 Steam 状态条**：主页底部实时显示 Steam 安装路径、当前内核（OpenSteamTool / SteamTools / 无）以及是否检测到 SteamTools。
+- **双依赖一键安装**：
+  - OpenSteamTool 内核（清单导入）：设置页「依赖」卡一键从 GitHub 下载 / 更新，复制内核 dll 到 Steam 根目录并建 `config\lua`，导入检测到的 Steam 主文件夹。
+  - SteamTools（稳定入库）：同页卡一键下载 / 更新到 `config\stplug-in`。
+  - 两者均可在线更新到官方源最新版。
+- **应用自更新自动安装**：检测到新版本自动下载安装包并打开安装，无需手动去发布页。
+- **Lua 手搓**：首页输入 AppID，自动从 Steam 抓取游戏名 / Depots / Manifest / DepotKey，手搓出 OpenSteamTool 风格 lua 并可下载。
 
 ## 版本说明
 - **Daxuanba-Injector-mini.exe** —— 大轩巴入库器mini：黑黄主题、DX 图标、设置页分类导航、清单源折叠（点「更多」展开）、应用内打开链接、搜索增强（支持 AppID 直查 / Steam 多区域 / SteamDB / 小黑盒）、解锁器（OpenSteamTool / GreenLuma）后台自动下载安装、DLC 入库、创意工坊资源下载。

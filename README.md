@@ -33,6 +33,21 @@
    python dxb_desktop.py
    ```
 
+## 📦 打包为 exe
+
+在 Windows 真机（需有网络）执行，产物为单文件 `大轩巴入库器mini.exe`：
+
+```bash
+pip install PySide6 PyInstaller Flask Flask-SocketIO flask-cors httpx aiofiles colorlog vdf ujson requests
+python build_exe.py
+```
+
+构建完成后，发布到 GitHub Releases（token 走环境变量 `GITHUB_TOKEN` 或同目录 `gh_token.txt`，tag 自动取 `backend.CURRENT_VERSION`）：
+
+```bash
+python upload_release.py
+```
+
 ## 💡 使用指南
 
 1. 在「设置」填写 GitHub Personal Access Token（强烈建议，提升 API 限额，避免频率限制）。
