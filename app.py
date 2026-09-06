@@ -66,8 +66,10 @@ except ImportError as e:
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'dxb-injector-secret-key-v2'
 app.config['USER_DATA_FOLDER'] = project_root / 'userdata'
+# 仅保留一次初始化，并显式指定 threading 模式：
+# 后台线程（安装依赖/跑任务）会通过 patch_log_for_socketio 调用 socketio.emit，
+# 必须运行在 threading 模式下，否则跨线程 emit 会失败。
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
-socketio = SocketIO(app, cors_allowed_origins="*")
 
 # --- GUI Port Prompt ---
 def get_port_from_gui():
@@ -418,9 +420,14 @@ def get_sources():  # 改为同步函数
                     if availability.get(value, True)
                 }
                 # 自定义源默认视为可用（用户已配置）
-                if recommended not in filtered_sources.values():
-                    # 若推荐项被过滤，回退到过滤后第一个可用源
-                    recommended = next(iter(filtered_sources.values()), None)
+                if recommended is None or recommended not in filtered_sources.values():
+                    # 若推荐项被过滤（不可用），回退到过滤后第一个「内置」可用源；
+                    # 仅从 availability 中筛选内置源，避免把自定义源误当推荐默认。
+                    recommended = next(
+                        (v for v in filtered_sources.values()
+                         if availability.get(v, False)),
+                        None,
+                    )
                 
                 return {
                     "success": True,
@@ -473,10 +480,11 @@ async def _run_unlock_task(app_id, tool_type, use_st_auto_update, add_all_dlc, p
             raise Exception("解锁工具类型未能确定，请检查配置或Steam路径。")
 
         await backend.checkcn()
-        if tool_type == "search" or "github" in tool_type.lower() or 'auiowu' in tool_type.lower() or 'steamautocracks' in tool_type.lower():
-            # 注意：这里需要排除steamautocracks_v2，因为它不是GitHub仓库
-            if tool_type != "steamautocracks_v2" and not await backend.check_github_api_rate_limit():
-                raise Exception("GitHub API 请求次数已用尽，无法继续。")
+        # 需要查 GitHub API 的源（仓库类 + 自动搜索）才校验速率；
+        # steamautocracks_v2 走 steamui 接口，不消耗 GitHub API 额度，排除。
+        needs_github_api = (tool_type == "search") or ("/" in tool_type and tool_type != "steamautocracks_v2")
+        if needs_github_api and not await backend.check_github_api_rate_limit():
+            raise Exception("GitHub API 请求次数已用尽，无法继续。")
                 
         app_id_extracted = backend.extract_app_id(app_id)
         if not app_id_extracted:

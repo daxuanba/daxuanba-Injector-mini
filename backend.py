@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.5"  # 当前版本号
+CURRENT_VERSION = "2.6"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -1277,7 +1277,7 @@ class DxbBackend:
         return backup_token
 
 
-    async def get_workshop_depot_info(self, workshop_id: str) -> Tuple[str, str, str] | None:
+    async def get_workshop_depot_info(self, workshop_id: str) -> Tuple[str, str, str, str, str] | None:
         """Get depot and manifest info for workshop item with title"""
         try:
             self.log.info(f"正在查询创意工坊物品 {workshop_id} 的信息...")
