@@ -994,8 +994,9 @@ class DxbBackend:
             results[v] = ok
             self.log.info(f"清单源探测 {v}: {'可用' if ok else '不可用(剔除)'}")
 
-        # 推荐：可用源中权重最高者
-        avail = [v for v, ok in results.items() if ok]
+        # 推荐：可用源中权重最高者（排除 search 等 spec=None 的兜底源）
+        avail = [v for v, ok in results.items()
+                 if ok and DxbBackend.SOURCE_PROBE.get(v) is not None]
         avail.sort(key=lambda v: DxbBackend.SOURCE_PROBE[v][1], reverse=True)
         recommended = avail[0] if avail else None
 
