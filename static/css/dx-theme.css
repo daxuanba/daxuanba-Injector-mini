@@ -334,7 +334,7 @@ body.dark-theme {
 /* ============================================================
    左侧栏布局（区别于原版顶部导航）
    ============================================================ */
-.app-container { display: flex; min-height: 100vh; }
+.app-container { display: flex; flex-direction: row; flex-wrap: nowrap; min-height: 100vh; }
 .sidebar {
   width: 224px; flex-shrink: 0;
   background: var(--dx-appbar-bg);

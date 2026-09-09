@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.6"  # 当前版本号
+CURRENT_VERSION = "2.7"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
