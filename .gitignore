@@ -12,3 +12,6 @@ _wheels/
 *.exe
 *.dll
 *.spec
+config.json
+build_log.txt
+push_log.txt

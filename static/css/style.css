@@ -1159,3 +1159,18 @@ body:not(.dark-theme) .log-entry.warning {
 .modal-footer #resetBgBtn {
     margin-right: auto;
 }
+/* 搜索结果缩略图 */
+.search-result-thumb {
+  width: 92px;
+  height: 34px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+  background: var(--md-sys-color-surface-container-high);
+}
+
+/* 全局滚动条统一窄条（含页面级） */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(127,127,127,0.45); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(241,196,15,0.55); }

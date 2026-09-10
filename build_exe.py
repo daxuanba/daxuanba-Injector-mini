@@ -82,7 +82,10 @@ def main():
         f'--name={NAME}',
         f'--icon={BASE / "assets" / "icon.ico"}',
         f'--distpath={BASE / "dist"}',
-        f'--workpath={BASE / "build"}',
+        # 允许用环境变量换一个全新的工作目录：
+        # 复用旧目录时 PyInstaller 会先 os.remove(base_library.zip)，
+        # 在受限环境（删除被回收站钩子接管）下会失败，换目录即可绕开。
+        f'--workpath={BASE / os.environ.get("DXB_WORKPATH", "build")}',
         f'--specpath={BASE}',
     ]
 

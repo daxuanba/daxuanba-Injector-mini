@@ -205,7 +205,7 @@ HAVE_QT = None
 try:
     from PySide6.QtWidgets import QApplication, QMainWindow, QToolBar, QLabel
     from PySide6.QtGui import QAction, QIcon
-    from PySide6.QtCore import QUrl
+    from PySide6.QtCore import QUrl, Qt
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWebEngineCore import QWebEnginePage
     HAVE_QT = 'PySide6'
@@ -216,7 +216,7 @@ except ImportError as e:
     try:
         from PyQt6.QtWidgets import QApplication, QMainWindow, QToolBar, QLabel
         from PyQt6.QtGui import QAction, QIcon
-        from PyQt6.QtCore import QUrl
+        from PyQt6.QtCore import QUrl, Qt
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         from PyQt6.QtWebEngineCore import QWebEnginePage
         HAVE_QT = 'PyQt6'
@@ -230,9 +230,45 @@ if HAVE_QT is None:
 
 
 class DxbWebPage(QWebEnginePage):
-    """拦截 target=_blank 新窗口，改为同一视图内打开，避免调用系统浏览器。"""
+    """target=_blank / window.open 弹出独立浏览窗口（带返回按钮）。
+    无法创建窗口时直接不打开。"""
+    def __init__(self, parent_view, win_ref=None):
+        super().__init__(parent_view)
+        self._win_ref = win_ref  # 用于拿到主窗口的弹窗容器
+
     def createWindow(self, wintype):
-        return self
+        host = self._win_ref() if callable(self._win_ref) else None
+        if host is None:
+            return None  # 打不开就不打开
+        return host.open_popup()
+
+
+class DxbPopup(QMainWindow):
+    """外链独立小窗口：返回 / 关闭"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('大轩巴 · 浏览')
+        self.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
+        self.resize(1040, 720)
+        self.setStyleSheet(
+            'QMainWindow{background:#0b0b0b;}'
+            'QToolBar{background:#0b0b0b;border:none;spacing:6px;}'
+            'QToolButton{color:#f3f3f3;background:#1a1a1a;border:none;'
+            'padding:6px 12px;border-radius:8px;}'
+        )
+        self.view = QWebEngineView()
+        self.view.setPage(DxbWebPage(self.view, lambda: self.parent()))
+        self.setCentralWidget(self.view)
+        tb = QToolBar('导航')
+        tb.setMovable(False)
+        self.addToolBar(tb)
+        for text, slot in (('返回', self.view.back), ('刷新', self.view.reload), ('关闭', self.close)):
+            a = QAction(text, self)
+            a.triggered.connect(slot)
+            tb.addAction(a)
+
+    def load(self, qurl):
+        self.view.setUrl(qurl)
 
 
 class DxbWindow(QMainWindow):
@@ -252,8 +288,9 @@ class DxbWindow(QMainWindow):
         )
 
         self.browser = QWebEngineView()
-        self.browser.setPage(DxbWebPage(self.browser))
+        self.browser.setPage(DxbWebPage(self.browser, lambda: self))
         self.setCentralWidget(self.browser)
+        self.popups = []
 
         tb = QToolBar('导航')
         tb.setMovable(False)
@@ -272,6 +309,15 @@ class DxbWindow(QMainWindow):
         a = QAction(text, self)
         a.triggered.connect(slot)
         tb.addAction(a)
+
+    def open_popup(self):
+        """创建外链浏览小窗口（保持引用防 GC）"""
+        popup = DxbPopup(self)
+        popup.setAttribute(Qt.WA_DeleteOnClose, True)
+        popup.show()
+        self.popups.append(popup)
+        popup.destroyed.connect(lambda: self.popups.remove(popup) if popup in self.popups else None)
+        return popup.view.page()
 
     def closeEvent(self, event):
         shutdown_server(self.base_url)

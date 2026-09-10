@@ -25,7 +25,8 @@ class FileManagerApp {
             editorStatus: document.getElementById('editorStatus'),
         };
         this.fullData = {};
-        this.currentTab = 'st';
+        this.currentTab = 'installed';
+        this.installedData = null;
         this.currentItemForEditor = null;
         this.initialize();
     }
@@ -76,6 +77,9 @@ class FileManagerApp {
     }
 
     async fetchFiles() {
+        if (this.currentTab === 'installed') {
+            return this.fetchInstalled();
+        }
         this.setLoading(true);
         this.elements.statusText.textContent = '正在从服务器获取文件列表...';
         try {
@@ -97,13 +101,41 @@ class FileManagerApp {
         }
     }
 
+    async fetchInstalled() {
+        this.setLoading(true);
+        this.elements.statusText.textContent = '正在扫描 Steam 已装应用...';
+        try {
+            const response = await fetch('/api/manager/installed');
+            if (!response.ok) throw new Error(`服务器响应错误: ${response.status}`);
+            const result = await response.json();
+            this.installedData = result;
+            this.renderInstalled();
+            if (result.success) {
+                this.showSnackbar(`已扫描 ${result.total} 个游戏 / ${result.dlc_total} 个已装 DLC`, 'success');
+            } else {
+                this.showSnackbar(result.message || '扫描失败', 'error');
+            }
+        } catch (error) {
+            this.showSnackbar(error.message, 'error');
+            this.elements.statusText.textContent = `错误: ${error.message}`;
+        } finally {
+            this.setLoading(false);
+        }
+    }
+
     switchTab(tab) {
         this.currentTab = tab;
         this.elements.tabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tab));
-        this.renderGrid();
+        if (tab === 'installed') {
+            if (this.installedData) this.renderInstalled();
+            else this.fetchInstalled();
+        } else {
+            this.renderGrid();
+        }
     }
 
     renderGrid() {
+        if (this.currentTab === 'installed') { this.renderInstalled(); return; }
         const data = this.fullData[this.currentTab] || [];
         const searchTerm = this.elements.searchInput.value.toLowerCase();
         
@@ -175,8 +207,66 @@ class FileManagerApp {
     }
 
 
-    filterGrid() { this.renderGrid(); }
-    
+    filterGrid() {
+        if (this.currentTab === 'installed') { this.renderInstalled(); }
+        else { this.renderGrid(); }
+    }
+
+    renderInstalled() {
+        const result = this.installedData;
+        const container = this.elements.gridContainer;
+        if (!result || !result.success) {
+            this.elements.noResultsMessage.textContent = (result && result.message) || '扫描失败';
+            this.elements.noResultsMessage.style.display = 'block';
+            container.innerHTML = '';
+            return;
+        }
+        const term = this.elements.searchInput.value.toLowerCase();
+        const games = (result.games || []).filter(g =>
+            (g.name || '').toLowerCase().includes(term) || g.appid.includes(term) ||
+            (g.dlcs || []).some(d => (d.name || '').toLowerCase().includes(term) || d.appid.includes(term))
+        );
+        if (games.length === 0) {
+            this.elements.noResultsMessage.textContent = result.games.length === 0 ? '未检测到已安装的游戏。' : '没有匹配的搜索结果。';
+            this.elements.noResultsMessage.style.display = 'block';
+            container.innerHTML = '';
+            this.updateSelectionState();
+            return;
+        }
+        this.elements.noResultsMessage.style.display = 'none';
+        const html = games.map(g => {
+            const img = `https://cdn.akamai.steamstatic.com/steam/apps/${g.appid}/header.jpg`;
+            const dlcs = (g.dlcs || []).map(d => `
+                <div class="dlc-item" data-appid="${d.appid}">
+                    <span class="dlc-name" title="${d.name}">${d.name}</span>
+                    <span class="dlc-appid">APPID: ${d.appid}</span>
+                    <button class="btn btn-icon dlc-copy" data-appid="${d.appid}" title="复制 AppID"><span class="material-icons">content_copy</span></button>
+                </div>`).join('');
+            return `
+            <div class="game-tree-card" data-appid="${g.appid}">
+                <div class="game-tree-header" onclick="window.open('steam://run/${g.appid}')" title="启动/安装游戏">
+                    <img class="game-tree-cover" src="${img}" loading="lazy" onerror="this.style.display='none'"/>
+                    <div class="game-tree-info">
+                        <span class="game-tree-title">${g.name}</span>
+                        <span class="game-tree-appid">APPID: ${g.appid} · DLC: ${g.dlcs.length}</span>
+                    </div>
+                    <button class="btn btn-icon game-copy" data-appid="${g.appid}" title="复制 AppID"><span class="material-icons">content_copy</span></button>
+                </div>
+                ${g.dlcs.length ? `<div class="dlc-list">${dlcs}</div>` : `<div class="dlc-list empty">无已装 DLC</div>`}
+            </div>`;
+        }).join('');
+        container.innerHTML = html;
+
+        container.querySelectorAll('.game-copy, .dlc-copy').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                const id = btn.dataset.appid;
+                navigator.clipboard.writeText(id).then(() => this.showSnackbar(`AppID ${id} 已复制`, 'success'));
+            });
+        });
+        this.updateSelectionState();
+    }
+
     toggleSelectAll() {
         const isChecked = this.elements.selectAllCheckbox.checked;
         this.elements.gridContainer.querySelectorAll('.card-checkbox:not(:disabled)').forEach(cb => cb.checked = isChecked);

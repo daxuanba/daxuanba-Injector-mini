@@ -36,6 +36,9 @@
             <a class="nav-item" href="/manager">
                 <span class="material-icons">library_books</span><span>入库管理</span>
             </a>
+            <a class="nav-item" href="/free">
+                <span class="material-icons">card_giftcard</span><span>免费游戏</span>
+            </a>
             <a class="nav-item active" href="/settings">
                 <span class="material-icons">settings</span><span>设置</span>
             </a>
@@ -225,6 +228,16 @@
                             <div class="checkbox-content">
                                 <span class="checkbox-label">保存日志文件</span>
                                 <span class="checkbox-description">将日志保存到文件中，便于问题排查</span>
+                            </div>
+                        </label>
+                    </div>
+                    <div class="setting-item">
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="disableLogging" class="checkbox-input">
+                            <span class="checkbox-button"></span>
+                            <div class="checkbox-content">
+                                <span class="checkbox-label">关闭日志输出</span>
+                                <span class="checkbox-description">彻底安静运行，仅保留错误提示（最省心）</span>
                             </div>
                         </label>
                     </div>

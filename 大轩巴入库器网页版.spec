@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['C:/Users/HW/Desktop/大轩巴入库器网页版/dxb_desktop.py'],
+    ['dxb_desktop.py'],
     pathex=[],
     binaries=[],
-    datas=[('C:/Users/HW/Desktop/大轩巴入库器网页版/templates', 'templates'), ('C:/Users/HW/Desktop/大轩巴入库器网页版/static', 'static'), ('C:/Users/HW/Desktop/大轩巴入库器网页版/assets', 'assets'), ('C:/Users/HW/Desktop/大轩巴入库器网页版/app.py', '.'), ('C:/Users/HW/.workbuddy/binaries/python/envs/dxb/Lib/site-packages/PySide6/plugins', 'PySide6/plugins')],
+    datas=[('templates', 'templates'), ('static', 'static'), ('assets', 'assets'), ('app.py', '.'), ('C:/Users/HW/.workbuddy/binaries/python/envs/default/Lib/site-packages/PySide6/plugins', 'PySide6/plugins')],
     hiddenimports=['backend', 'flask', 'flask_socketio', 'flask_cors', 'engineio', 'engineio.async_drivers.threading', 'socketio', 'simple_websocket', 'httpx', 'aiofiles', 'colorlog', 'ujson', 'vdf', 'requests'],
     hookspath=[],
     hooksconfig={},

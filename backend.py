@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.7"  # 当前版本号
+CURRENT_VERSION = "2.8"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -41,6 +41,7 @@ DEFAULT_CONFIG = {
     "Custom_Steam_Path": "",
     "debug_mode": False,
     "logging_files": True,
+    "disable_logging": False,
     "background_image_path": "",
     "background_blur": 0,
     "background_saturation": 100,
@@ -128,6 +129,17 @@ class DxbBackend:
     def _configure_logger(self):
         if not self.config:
             self.log.warning("无法应用日志配置，因为配置尚未加载。")
+            return
+        # 主开关：关闭日志输出（仅保留 ERROR 以上，便于安静运行）
+        if self.config.get("disable_logging", False):
+            level = logging.ERROR
+            self.log.setLevel(level)
+            for handler in self.log.handlers:
+                if isinstance(handler, logging.StreamHandler):
+                    handler.setLevel(level)
+            self.log.debug("日志输出已按设置关闭（disable_logging）。")
+            # 清掉文件 handler
+            self.log.handlers = [h for h in self.log.handlers if not isinstance(h, logging.FileHandler)]
             return
         is_debug = self.config.get("debug_mode", False)
         level = logging.DEBUG if is_debug else logging.INFO
@@ -301,12 +313,14 @@ class DxbBackend:
 
         force_unlocker = self.config.get("force_unlocker_type", "auto")
 
-        if force_unlocker in ["steamtools", "greenluma"]:
+        if force_unlocker in ["steamtools", "greenluma", "opensteamtool"]:
             self.unlocker_type = force_unlocker
-            self.log.warning(f"已根据配置强制使用解锁工具: {force_unlocker.capitalize()}")
+            self.log.warning(f"已根据配置强制使用解锁工具: {force_unlocker}")
         else:
             is_steamtools = (self.steam_path / 'config' / 'stplug-in').is_dir()
             is_greenluma = any((self.steam_path / dll).exists() for dll in ['GreenLuma_2025_x86.dll', 'GreenLuma_2025_x64.dll'])
+            _lua_dir = self.steam_path / 'config' / 'lua'
+            is_opensteamtool = (self.steam_path / 'OpenSteamTool.dll').exists() or _lua_dir.is_dir()
             if is_steamtools and is_greenluma:
                 self.log.error("环境冲突：同时检测到SteamTools和GreenLuma！请在设置中强制指定一个。")
                 self.unlocker_type = "conflict"
@@ -316,6 +330,9 @@ class DxbBackend:
             elif is_greenluma:
                 self.log.info("自动检测到解锁工具: GreenLuma")
                 self.unlocker_type = "greenluma"
+            elif is_opensteamtool:
+                self.log.info("自动检测到解锁工具: OpenSteamTool")
+                self.unlocker_type = "opensteamtool"
             else:
                 self.log.warning("未能自动检测到解锁工具。")
                 if self.config.get("auto_install_unlocker", True):
@@ -334,6 +351,12 @@ class DxbBackend:
             self.log.error(f"创建Steam子目录时失败: {e}")
 
         return self.unlocker_type
+
+    def lua_output_dir(self) -> Path:
+        """lua 解锁文件输出目录：opensteamtool -> config/lua；其余 -> config/stplug-in"""
+        if getattr(self, 'unlocker_type', None) == 'opensteamtool':
+            return self.steam_path / 'config' / 'lua'
+        return self.steam_path / 'config' / 'stplug-in'
 
     async def ensure_unlocker_installed(self) -> str | None:
         pref = self.config.get("unlocker_preference", "greenluma")
@@ -588,6 +611,31 @@ class DxbBackend:
             self.log.error("配置文件已损坏并被重置。请重启程序。")
             return None
 
+    def _load_config_sync(self) -> Dict:
+        """同步加载配置（供非异步路由使用）。"""
+        config_path = self.project_root / 'config.json'
+        if not config_path.exists():
+            return DEFAULT_CONFIG.copy()
+        try:
+            with open(config_path, mode="r", encoding="utf-8") as f:
+                user_config = json.loads(f.read())
+            config = DEFAULT_CONFIG.copy()
+            config.update(user_config)
+            if 'Custom_Repos' not in config or not isinstance(config['Custom_Repos'], dict):
+                config['Custom_Repos'] = {"github": [], "zip": []}
+            else:
+                config['Custom_Repos'].setdefault('github', [])
+                config['Custom_Repos'].setdefault('zip', [])
+            return config
+        except Exception:
+            return DEFAULT_CONFIG.copy()
+
+    def _save_config_sync(self, config: Dict) -> None:
+        """同步保存配置（供非异步路由使用）。"""
+        config_path = self.project_root / 'config.json'
+        with open(config_path, mode="w", encoding="utf-8") as f:
+            f.write(json.dumps(config, ensure_ascii=False, indent=2))
+
     def get_steam_path(self) -> Path | None:
         try:
             custom_steam_path = self.config.get("Custom_Steam_Path", "").strip()
@@ -660,6 +708,208 @@ class DxbBackend:
                 except Exception:
                     version = ""
         return {"steam_path": str(sp) if sp else None, "installed": installed, "version": version}
+
+    def installed_games_tree(self) -> Dict:
+        """真实扫描 Steam 已装应用（appmanifest），把 DLC 归入各自游戏下。
+        返回 {games:[{appid,name,dlcs:[{appid,name}]}], others:[...], total, dlc_total}。"""
+        sp = self.get_steam_path()
+        if not sp or not sp.exists():
+            return {"success": False, "message": "未找到 Steam 路径，请在设置中配置。",
+                    "games": [], "others": [], "total": 0, "dlc_total": 0}
+        steamapps = sp / 'steamapps'
+        if not steamapps.is_dir():
+            return {"success": False, "message": "steamapps 目录不存在。",
+                    "games": [], "others": [], "total": 0, "dlc_total": 0}
+
+        installed = {}  # appid -> name
+        for f in steamapps.glob('appmanifest_*.acf'):
+            try:
+                text = f.read_text(encoding='utf-8', errors='ignore')
+                data = vdf.loads(text).get('AppState', {})
+                appid = str(data.get('appid', '')).strip()
+                name = data.get('name', '') or f'App {appid}'
+                if appid.isdigit():
+                    installed[appid] = name
+            except Exception as e:
+                self.log.warning(f"解析 {f.name} 失败: {e}")
+
+        if not installed:
+            return {"success": True, "games": [], "others": [], "total": 0, "dlc_total": 0,
+                    "message": "未检测到已安装的应用。"}
+
+        # 批量查询 Steam 商店详情（每批 50），获取类型/名称/父游戏/DLC 列表
+        details = {}  # appid -> data
+        appids = list(installed.keys())
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        import httpx as _httpx
+        for i in range(0, len(appids), 50):
+            chunk = appids[i:i + 50]
+            try:
+                with _httpx.Client(verify=False, timeout=30) as cli:
+                    r = cli.get("https://store.steampowered.com/api/appdetails",
+                                params={'appids': ','.join(chunk), 'l': 'schinese', 'cc': 'CN'},
+                                headers=headers)
+                    r.raise_for_status()
+                    j = r.json()
+                    for aid, val in j.items():
+                        if isinstance(val, dict) and val.get('success') and val.get('data'):
+                            details[aid] = val['data']
+            except Exception as e:
+                self.log.warning(f"批量查询商店详情失败（{i // 50 + 1}批）: {e}")
+
+        games = []
+        dlcs = {}  # parent_appid -> [{appid,name}]
+        others = []
+        for appid, fallback_name in installed.items():
+            d = details.get(appid, {})
+            name = d.get('name') or fallback_name
+            fgame = d.get('fullgame')
+            gtype = (d.get('type') or '').lower()
+            if fgame and str(fgame.get('appid')) != appid:
+                # 这是 DLC，归入父游戏
+                parent = str(fgame.get('appid'))
+                dlcs.setdefault(parent, []).append({"appid": appid, "name": name})
+            elif gtype in ('game', 'application', 'demo'):
+                games.append({"appid": appid, "name": name, "dlcs": []})
+            else:
+                others.append({"appid": appid, "name": name})
+
+        # 把已装的 DLC 挂到对应游戏下
+        dlc_count = 0
+        for g in games:
+            owned = dlcs.get(g['appid'], [])
+            g['dlcs'] = owned
+            dlc_count += len(owned)
+        # 父游戏未在已装列表中的 DLC（孤儿）归到 others
+        parented = {g['appid'] for g in games}
+        for parent, lst in dlcs.items():
+            if parent not in parented:
+                others.extend(lst)
+
+        games.sort(key=lambda x: x['name'].lower())
+        others.sort(key=lambda x: x['name'].lower())
+        return {"success": True, "games": games, "others": others,
+                "total": len(games), "dlc_total": dlc_count,
+                "steam_path": str(sp)}
+
+    # --- 免费游戏页 ---
+    def free_games_list(self, query: str = "", max_items: int = 400) -> Dict:
+        """用 Steam 官方搜索接口（maxprice=free）分页抓取免费游戏，最多 max_items 个。
+        AppID 从 logo URL 的 /apps/<id>/ 中提取。"""
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        games: List[Dict] = []
+        seen = set()
+        try:
+            import httpx as _httpx
+            with _httpx.Client(verify=False, timeout=30) as cli:
+                start = 0
+                while len(games) < max_items:
+                    params = {'query': query, 'start': start, 'count': 50,
+                              'maxprice': 'free', 'supportedlang': 'schinese',
+                              'cc': 'CN', 'l': 'schinese', 'json': 1}
+                    r = cli.get("https://store.steampowered.com/search/results/",
+                                params=params, headers=headers)
+                    r.raise_for_status()
+                    items = r.json().get('items', [])
+                    if not items:
+                        break
+                    for it in items:
+                        logo = it.get('logo') or ''
+                        m = re.search(r'/apps/(\d+)/', logo)
+                        appid = m.group(1) if m else ''
+                        name = (it.get('name') or '').strip()
+                        if not appid or appid in seen:
+                            continue
+                        seen.add(appid)
+                        games.append({
+                            "appid": appid,
+                            "name": name,
+                            "header_image": f"https://cdn.akamai.steamstatic.com/steam/apps/{appid}/header.jpg"
+                        })
+                        if len(games) >= max_items:
+                            break
+                    start += 50
+            return {"success": True, "games": games, "total": len(games)}
+        except Exception as e:
+            self.log.error(f"获取免费游戏失败: {self.stack_error(e)}")
+            return {"success": False, "message": f"获取免费游戏失败: {e}", "games": [], "total": 0}
+
+    def free_account_info(self, cookie: str) -> Dict:
+        """用 steamLoginSecure cookie 获取账号名/头像/钱包余额。"""
+        if not cookie or 'steamLoginSecure' not in cookie:
+            return {"success": False, "message": "请提供有效的 steamLoginSecure Cookie。"}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                   'Cookie': cookie.strip()}
+        try:
+            import httpx as _httpx
+            name, avatar = "", ""
+            with _httpx.Client(verify=False, timeout=30, follow_redirects=True) as cli:
+                # 个人资料
+                try:
+                    pr = cli.get("https://steamcommunity.com/my/profile?json=1", headers=headers)
+                    if pr.ok:
+                        pj = pr.json()
+                        name = pj.get('personaName') or pj.get('name') or name
+                        avatar = pj.get('avatarFull') or pj.get('avatar') or avatar
+                except Exception as e:
+                    self.log.warning(f"获取 Steam 个人资料失败: {e}")
+                # 钱包余额
+                balance, currency = None, ""
+                try:
+                    wr = cli.get("https://store.steampowered.com/api/userwalletinfo/v1/", headers=headers)
+                    if wr.ok:
+                        wj = wr.json()
+                        balance = wj.get('wallet_balance')  # 单位：分
+                        currency = wj.get('wallet_country') or wj.get('currency') or ""
+                except Exception as e:
+                    self.log.warning(f"获取钱包余额失败: {e}")
+            if not name and balance is None:
+                return {"success": False, "message": "Cookie 无效或已过期，无法读取账号信息。"}
+            return {"success": True, "name": name, "avatar": avatar,
+                    "balance": balance, "currency": currency}
+        except Exception as e:
+            self.log.error(f"读取账号信息失败: {self.stack_error(e)}")
+            return {"success": False, "message": f"读取账号信息失败: {e}"}
+
+    def inject_free_games(self, appids: List[str], name_map: Dict[str, str] = None) -> Dict:
+        """把免费游戏批量永久入库：在解锁器 lua 目录为每个 AppID 写 addappid 文件。
+        已存在的跳过（幂等），文件保留即永久有效。"""
+        name_map = name_map or {}
+        try:
+            if not self.steam_path:
+                self.steam_path = self.get_steam_path()
+            if not self.steam_path or not self.steam_path.exists():
+                return {"success": False, "message": "未找到有效的 Steam 路径。", "injected": 0, "skipped": 0}
+            lua_dir = self.lua_output_dir()
+            lua_dir.mkdir(parents=True, exist_ok=True)
+
+            injected, skipped, names = 0, 0, []
+            seen = set()
+            for raw in appids:
+                appid = str(raw).strip()
+                if not appid.isdigit() or appid in seen:
+                    continue
+                seen.add(appid)
+                target = lua_dir / f"{appid}.lua"
+                if target.exists():
+                    skipped += 1
+                    continue
+                gname = name_map.get(appid, "")
+                lines = [
+                    "-- 大轩巴入库器mini · 免费游戏永久入库",
+                    f"-- AppID: {appid}" + (f"  名称: {gname}" if gname else ""),
+                    "-- 永久生效：如需移除请删除本文件或在入库管理中删除",
+                    f"addappid({appid})  -- {gname or appid}",
+                ]
+                target.write_text("\n".join(lines) + "\n", encoding='utf-8')
+                injected += 1
+                names.append(gname or appid)
+            self.log.info(f"免费游戏永久入库完成：新增 {injected} 个，已存在跳过 {skipped} 个 -> {lua_dir}")
+            return {"success": True, "injected": injected, "skipped": skipped,
+                    "dir": str(lua_dir), "names": names[:20]}
+        except Exception as e:
+            self.log.error(f"免费游戏入库失败: {self.stack_error(e)}")
+            return {"success": False, "message": f"入库失败: {e}", "injected": 0, "skipped": 0}
 
     # --- NEW: File Manager Methods ---
 
@@ -1339,11 +1589,53 @@ class DxbBackend:
             return None
 
 
+    async def check_workshop_exists(self, workshop_id: str) -> Dict:
+        """下载前先检测创意工坊物品是否存在（GetPublishedFileDetails）。
+        返回 {exists, title, consumer_app_id, banned, reason}。"""
+        try:
+            api_url = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+            data = {'itemcount': 1, 'publishedfileids[0]': workshop_id}
+            for attempt in range(3):
+                try:
+                    resp = await self.client.post(api_url, data=data, timeout=30)
+                    resp.raise_for_status()
+                    result = resp.json()
+                    details = result.get('response', {}).get('publishedfiledetails', [])
+                    if not details:
+                        return {"exists": False, "title": "", "consumer_app_id": None,
+                                "banned": False, "reason": "API 响应为空"}
+                    d = details[0]
+                    if int(d.get('result', 0)) != 1:
+                        return {"exists": False, "title": "", "consumer_app_id": None,
+                                "banned": False, "reason": d.get('banned_text') or "物品不存在或已删除"}
+                    # 已存在性：本地是否已有该工坊资源
+                    consumer_app_id = str(d.get('consumer_app_id'))
+                    title = d.get('title', '未知标题')
+                    local_exists = False
+                    if self.steam_path:
+                        dl = self.steam_path / 'workshop' / 'downloads' / consumer_app_id / workshop_id
+                        depot = self.steam_path / 'depotcache' / f"{consumer_app_id}_{d.get('hcontent_file')}.manifest"
+                        local_exists = dl.is_dir() or depot.exists()
+                    return {"exists": True, "title": title, "consumer_app_id": consumer_app_id,
+                            "banned": False, "reason": "", "local_exists": local_exists}
+                except httpx.RequestError as e:
+                    if attempt < 2:
+                        await asyncio.sleep(2)
+                    else:
+                        return {"exists": False, "title": "", "consumer_app_id": None,
+                                "banned": False, "reason": f"网络请求失败: {e}"}
+                except Exception as e:
+                    return {"exists": False, "title": "", "consumer_app_id": None,
+                            "banned": False, "reason": self.stack_error(e)}
+        except Exception as e:
+            return {"exists": False, "title": "", "consumer_app_id": None,
+                    "banned": False, "reason": self.stack_error(e)}
+
     async def download_workshop_manifest(self, depot_id: str, manifest_id: str) -> bytes | None:
         """Download workshop manifest using new method from CLI version"""
         output_filename = f"{depot_id}_{manifest_id}.manifest"
         self.log.info(f"准备下载清单: {output_filename}")
-        
+
         max_retries = 3
         
         for attempt in range(max_retries):
@@ -1700,7 +1992,7 @@ class DxbBackend:
                     return False
                 
                 # 保存文件到depotcache目录
-                if self.unlocker_type == "steamtools":
+                if self.unlocker_type in ("steamtools", "opensteamtool"):
                     st_depot_path = self.steam_path / 'config' / 'depotcache'
                     gl_depot_path = self.steam_path / 'depotcache'
                     
@@ -1835,7 +2127,7 @@ class DxbBackend:
                 return False
 
             # 4. 根据解锁工具类型处理 (复用 ManifestHub V2 的逻辑)
-            if unlocker_type == "steamtools":
+            if unlocker_type in ("steamtools", "opensteamtool"):
                 # 将 sudama_keys 作为 depotkeys_data 传入，以便复用修补逻辑
                 return await self._process_steamautocracks_v2_for_steamtools(
                     app_id, valid_depots, depot_manifest_map, use_st_auto_update, add_all_dlc, patch_depot_key, sudama_keys
@@ -1944,7 +2236,7 @@ class DxbBackend:
                 return False
             
             # 4. 根据解锁工具类型处理
-            if unlocker_type == "steamtools":
+            if unlocker_type in ("steamtools", "opensteamtool"):
                 return await self._process_steamautocracks_v2_for_steamtools(app_id, valid_depots, depot_manifest_map, use_st_auto_update, add_all_dlc, patch_depot_key, depotkeys_data)
             else:
                 return await self._process_steamautocracks_v2_for_greenluma(app_id, valid_depots)
@@ -2075,7 +2367,7 @@ class DxbBackend:
     async def _process_steamautocracks_v2_for_steamtools(self, app_id: str, valid_depots: Dict[str, str], depot_manifest_map: Dict[str, str], use_st_auto_update: bool, add_all_dlc: bool, patch_depot_key: bool, depotkeys_data: Dict) -> bool:
         """为 SteamTools 处理 SteamAutoCracks/ManifestHub(2) 清单"""
         try:
-            stplug_path = self.steam_path / 'config' / 'stplug-in'
+            stplug_path = self.lua_output_dir()
             
             lua_filename = f"{app_id}.lua"
             lua_filepath = stplug_path / lua_filename
@@ -2536,9 +2828,9 @@ class DxbBackend:
             manifest_files = list(extract_path.glob('*.manifest'))
             lua_files = list(extract_path.glob('*.lua'))
             
-            if unlocker_type == "steamtools":
-                self.log.info(f"SteamTools 自动更新模式: {'已启用' if use_st_auto_update else '已禁用'}")
-                stplug_path = self.steam_path / 'config' / 'stplug-in'
+            if unlocker_type in ("steamtools", "opensteamtool"):
+                self.log.info(f"解锁内核模式: {unlocker_type} (自动更新: {'已启用' if use_st_auto_update else '已禁用'})")
+                stplug_path = self.lua_output_dir()
                 
                 all_depots = {}
                 for lua_f in lua_files:
@@ -2695,7 +2987,7 @@ class DxbBackend:
         all_files_in_tree = r2_json.get('tree', [])
         files_to_download = all_files_in_tree[:]
         
-        if unlocker_type == "steamtools" and use_st_auto_update:
+        if unlocker_type in ("steamtools", "opensteamtool") and use_st_auto_update:
             files_to_download = [item for item in all_files_in_tree if not item['path'].endswith('.manifest')]
         
         if not files_to_download and all_files_in_tree: self.log.info("没有需要下载的文件（可能是因为自动更新模式跳过了所有文件）。")
@@ -2723,9 +3015,9 @@ class DxbBackend:
                 all_depots = depots_config.get('depots', {})
             except Exception as e: self.log.error(f"解析 key.vdf 失败: {e}")
 
-        if unlocker_type == "steamtools":
-            self.log.info(f"SteamTools 自动更新模式: {'已启用' if use_st_auto_update else '已禁用'}")
-            stplug_path = self.steam_path / 'config' / 'stplug-in'
+        if unlocker_type in ("steamtools", "opensteamtool"):
+            self.log.info(f"解锁内核模式: {unlocker_type} (自动更新: {'已启用' if use_st_auto_update else '已禁用'})")
+            stplug_path = self.lua_output_dir()
             lua_filename = f"{app_id}.lua"
             lua_filepath = stplug_path / lua_filename
             async with aiofiles.open(lua_filepath, mode="w", encoding="utf-8") as lua_file:
@@ -2777,14 +3069,14 @@ class DxbBackend:
         return user_input if user_input.isdigit() else None
 
     async def craft_opensteamtool_lua(self, appid: str, include_depotkeys: bool = True, include_manifests: bool = True) -> Tuple[str, str, Dict]:
-        """手搓 OpenSteamTool 风格 lua：从 Steam API 抓取游戏名 / depot / manifest / depotkey，
-        生成 addappid / setManifestid 语句。返回 (lua文本, 文件名, 信息字典)。
+        """手搓 OpenSteamTool 风格 lua：仅用官方源（Steam 商店 API + SteamCMD 官方 appinfo 镜像），
+        不调用任何第三方密钥库。返回 (lua文本, 文件名, 信息字典)。
         """
         appid = self.extract_app_id(appid) or appid.strip()
         if not appid or not appid.isdigit():
             raise ValueError("无效的 AppID，请输入数字或 Steam 链接。")
         info: Dict[str, Any] = {"appid": appid, "name": "", "depots": [], "depotkeys": {}, "manifests": {}}
-        # 1. 游戏名（Steam 商店 appdetails）
+        # 1. 游戏名（Steam 官方商店 appdetails）
         try:
             headers = {'User-Agent': 'DaXuanBa-Injector'}
             d = await self._fetch_store_appdetails(appid, headers)
@@ -2792,44 +3084,73 @@ class DxbBackend:
                 info["name"] = d.get("name", "")
         except Exception as e:
             self.log.warning(f"获取游戏名失败: {e}")
-        # 2. depot + manifest（steamui / ddxnb）
+        # 2. depot + manifest（SteamCMD 官方 appinfo 镜像，数据源头为 Valve 官方）
         depot_manifest: Dict[str, str] = {}
         try:
-            depot_manifest = await self._get_depots_and_manifests_from_steamui(appid) or {}
+            raw = await self._get_steamcmd_api_data(appid) or {}
+            info_root = (raw.get("data", {}) or {}).get(str(appid), {}) or {}
+            depots_cfg = info_root.get("depots", {}) or {}
+            for dep_id, dep_cfg in depots_cfg.items():
+                if not str(dep_id).isdigit() or not isinstance(dep_cfg, dict):
+                    continue  # 跳过非数字键（如 branchmeta 等）
+                gid = str((dep_cfg.get("manifests", {}) or {}).get("public", {}).get("gid", "") or "")
+                depot_manifest[str(dep_id)] = gid
+            if depot_manifest:
+                self.log.info(f"从 SteamCMD 官方 appinfo 获取到 {len(depot_manifest)} 个 depot。")
+            else:
+                self.log.warning("SteamCMD 官方 appinfo 中未找到 depot 信息。")
         except Exception as e:
             self.log.warning(f"获取 depot/manifest 失败: {e}")
-        # 3. depotkey（Sudama / 993499094 密钥库，按 depotid 索引）
-        depotkeys: Dict[str, str] = {}
-        if include_depotkeys:
-            try:
-                dk = await self.download_depotkeys_json() or {}
-                for dep in depot_manifest.keys():
-                    if dep in dk and dk[dep]:
-                        depotkeys[dep] = str(dk[dep]).strip()
-            except Exception as e:
-                self.log.warning(f"获取 depotkey 失败: {e}")
-        # 4. 生成 lua
+        # 3. 生成 lua（不含任何第三方密钥）
         lines = [
-            "-- 大轩巴入库器mini · 手搓 OpenSteamTool lua",
+            "-- 大轩巴入库器mini · 手搓 OpenSteamTool lua（官方源）",
             f"-- AppID: {appid}" + (f"  名称: {info['name']}" if info['name'] else ""),
             "-- 放入 Steam 根目录的 config\\lua\\ 下自动加载",
             f"addappid({appid})  -- 解锁游戏 {info['name'] or appid}",
         ]
         for dep, gid in depot_manifest.items():
-            key = depotkeys.get(dep)
-            if key:
-                lines.append(f'addappid({dep}, 0, "{key}")  -- depot {dep} 含解密密钥')
-            else:
-                lines.append(f"addappid({dep})  -- depot {dep}" + (" (无密钥)" if include_depotkeys else ""))
+            lines.append(f"addappid({dep})  -- depot {dep}")
             if include_manifests and gid:
                 lines.append(f'setManifestid({dep}, "{gid}")')
         lua = "\n".join(lines) + "\n"
         filename = f"{appid}.lua"
         info["depots"] = list(depot_manifest.keys())
-        info["depotkeys"] = depotkeys
         info["manifests"] = depot_manifest
-        self.log.info(f"已手搓 lua: appid={appid} name={info['name']} depots={len(depot_manifest)} keys={len(depotkeys)}")
+        self.log.info(f"已手搓 lua: appid={appid} name={info['name']} depots={len(depot_manifest)} (仅官方源，无第三方密钥)")
         return lua, filename, info
+
+    def _normalize_name(self, s: str) -> str:
+        """归一化：去空白、去标点、转小写，便于模糊比较。"""
+        s = (s or '').lower()
+        s = re.sub(r'[^0-9a-z\u4e00-\u9fff]', '', s)
+        return s
+
+    def _rank_game_results(self, query: str, items: List[Dict]) -> List[Dict]:
+        """对搜索结果做相似度重排：名称包含/子序列/分词命中优先，避免逐字完全匹配。"""
+        q = self._normalize_name(query)
+        if not q:
+            return items
+        def score(item):
+            n = self._normalize_name(item.get('name', ''))
+            if not n:
+                return 0
+            if n == q:
+                return 100
+            if q in n or n in q:
+                return 80
+            # 子序列匹配（允许漏字）
+            it = iter(n)
+            if all(c in it for c in q):
+                return 60
+            # 分词命中（按空格/标点切后的任一片段包含）
+            for tok in re.split(r'[\s\-_]+', q):
+                if len(tok) >= 2 and tok in n:
+                    return 40
+            return 10
+        scored = [(score(it), it) for it in items]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        # 仅保留有一定相关度的结果，避免无关项
+        return [it for s, it in scored if s >= 10]
 
     async def find_appid_by_name(self, game_name: str) -> List[Dict]:
         """搜索游戏名称 -> AppID，支持直接输入 AppID、多区域 Steam 搜索、SteamDB、小黑盒备用。"""
@@ -2869,6 +3190,7 @@ class DxbBackend:
                         if appid and name:
                             games_list.append({'appid': str(appid), 'name': name, 'header_image': image})
                     if games_list:
+                        games_list = self._rank_game_results(game_name, games_list)
                         self.log.info(f"成功找到 {len(games_list)} 个结果")
                         return games_list
                 except Exception as e:

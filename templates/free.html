@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>免费游戏 - 大轩巴入库器mini</title>
+    <link rel="icon" href="{{ url_for('static', filename='dxb-word.svg') }}" type="image/svg+xml"/>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/manager.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dx-theme.css') }}">
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('dxb-theme-preference') || 'dark';
+                document.documentElement.classList.add(t === 'dark' ? 'dxb-dark' : 'dxb-light');
+            } catch (e) {
+                document.documentElement.classList.add('dxb-dark');
+            }
+        })();
+    </script>
+</head>
+<body>
+<div id="background-overlay"></div>
+<div class="app-container">
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <span class="dxb-wordmark">大轩巴</span>
+            <div class="sidebar-version">入库器mini</div>
+        </div>
+        <nav class="sidebar-nav">
+            <a class="nav-item" href="/">
+                <span class="material-icons">home</span><span>首页</span>
+            </a>
+            <a class="nav-item" href="/manager">
+                <span class="material-icons">library_books</span><span>入库管理</span>
+            </a>
+            <a class="nav-item" href="/craft"><span class="material-icons">auto_fix_high</span><span>手搓</span></a>
+            <a class="nav-item" href="/free">
+                <span class="material-icons">card_giftcard</span><span>免费游戏</span>
+            </a>
+            <a class="nav-item" href="/settings">
+                <span class="material-icons">settings</span><span>设置</span>
+            </a>
+            <a class="nav-item" href="/about">
+                <span class="material-icons">info</span><span>关于</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <button class="nav-action" id="themeToggleBtn" title="切换主题"><span class="material-icons">dark_mode</span></button>
+            <button class="nav-action" id="backgroundSettingsBtn" title="自定义背景"><span class="material-icons">wallpaper</span></button>
+            <button class="nav-action" id="shutdownBtn" title="关闭应用"><span class="material-icons">power_settings_new</span></button>
+        </div>
+    </aside>
+    <div class="content-area">
+        <header class="content-header">
+            <span class="dxb-wordmark">大轩巴</span>
+            <h1 class="app-title">免费游戏</h1>
+        </header>
+        <main class="manager-main-content">
+            <div class="card manager-card">
+                <div class="card-header"><h2>Steam 账号</h2></div>
+                <div class="account-bar" id="accountBar">
+                    <img id="accountAvatar" class="account-avatar" alt="头像" style="display:none"/>
+                    <div class="account-info">
+                        <span id="accountName" class="account-name">未登录</span>
+                        <span id="accountBalance" class="account-balance"></span>
+                    </div>
+                    <div class="account-login" id="accountLogin">
+                        <input type="text" id="cookieInput" class="text-field" placeholder="粘贴 steamLoginSecure Cookie 以读取头像/余额">
+                        <button class="btn btn-primary" id="loginBtn"><span class="material-icons">login</span> 登录</button>
+                        <button class="btn btn-text" id="logoutBtn" style="display:none">退出</button>
+                    </div>
+                </div>
+                <div class="input-helper">余额与头像需登录态。Cookie 仅保存在本地 config.json，请自行保管，关闭应用即清除登录态。</div>
+            </div>
+
+            <div class="card manager-card">
+                <div class="card-header"><h2>免费游戏</h2></div>
+                <div class="manager-toolbar">
+                    <div class="toolbar-section search-section">
+                        <span class="material-icons">search</span>
+                        <input type="text" id="freeSearch" class="text-field" placeholder="搜索免费游戏...">
+                        <button class="btn btn-secondary" id="freeSearchBtn"><span class="material-icons">search</span> 搜索</button>
+                    </div>
+                    <button class="btn btn-primary" id="freeRefreshBtn"><span class="material-icons">refresh</span> 刷新</button>
+                    <button class="btn btn-secondary" id="injectPageBtn"><span class="material-icons">add_to_queue</span> 入库本页</button>
+                    <button class="btn btn-secondary" id="injectAllBtn"><span class="material-icons">library_add</span> 一键入库全部</button>
+                </div>
+                <div class="grid-view-container">
+                    <div class="loading-overlay" id="freeLoading" style="display:none"><div class="loading">正在加载...</div></div>
+                    <div class="file-grid" id="freeGrid"></div>
+                    <div id="freeNoResults" class="no-results" style="display:none"></div>
+                </div>
+                <div class="pagination-bar" id="freePagination">
+                    <button class="btn btn-text" id="prevPageBtn"><span class="material-icons">chevron_left</span> 上一页</button>
+                    <span id="pageInfo">第 1 / 1 页</span>
+                    <button class="btn btn-text" id="nextPageBtn">下一页 <span class="material-icons">chevron_right</span></button>
+                    <span class="page-size-hint">每页 20 个</span>
+                </div>
+            </div>
+        </main>
+    </div>
+</div>
+
+<div class="snackbar" id="snackbar">
+    <div class="snackbar-content">
+        <span id="snackbarMessage"></span>
+        <button class="snackbar-action" id="snackbarClose"><span class="material-icons">close</span></button>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
+<script src="{{ url_for('static', filename='js/free.js') }}"></script>
+<script src="{{ url_for('static', filename='js/background-manager.js') }}"></script>
+</body>
+</html>

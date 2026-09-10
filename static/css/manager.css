@@ -407,3 +407,34 @@
     font-size: 14px;
     color: var(--md-sys-color-on-surface-variant);
 }
+/* --- 真实已装游戏树 --- */
+.game-tree-card {
+    background: var(--md-sys-color-surface);
+    border-radius: var(--md-sys-shape-corner-medium, 12px);
+    overflow: hidden;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.18);
+}
+.game-tree-header {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer;
+}
+.game-tree-cover { width: 120px; height: 45px; object-fit: cover; border-radius: 6px; flex: none; }
+.game-tree-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.game-tree-title { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.game-tree-appid { font-size: 12px; color: var(--md-sys-color-on-surface-variant); }
+.game-tree-header .btn-icon { flex: none; }
+.dlc-list { border-top: 1px solid var(--md-sys-color-outline-variant, rgba(255,255,255,.08)); padding: 6px 12px 10px 140px; }
+.dlc-list.empty { color: var(--md-sys-color-on-surface-variant); font-size: 13px; padding: 8px 12px; }
+.dlc-item { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.dlc-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; cursor: pointer; }
+.dlc-name:hover { color: var(--md-sys-color-primary); text-decoration: underline; }
+.dlc-appid { font-size: 12px; color: var(--md-sys-color-on-surface-variant); }
+
+/* --- 分页条 --- */
+.pagination-bar {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    padding: 12px 0 4px; flex-wrap: wrap;
+}
+.pagination-bar #pageInfo { font-size: 14px; color: var(--md-sys-color-on-surface-variant); }
+.pagination-bar .btn[disabled] { opacity: .45; cursor: not-allowed; }
+.page-size-hint { font-size: 12px; color: var(--md-sys-color-on-surface-variant); opacity: .8; }

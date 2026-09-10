@@ -7,6 +7,7 @@ class SettingsManager {
             steamPathStatus: document.getElementById('steamPathStatus'),
             debugMode: document.getElementById('debugMode'),
             loggingFiles: document.getElementById('loggingFiles'),
+            disableLogging: document.getElementById('disableLogging'),
             saveBtn: document.getElementById('saveConfig'),
             resetBtn: document.getElementById('resetConfig'),
             snackbar: document.getElementById('snackbar'),
@@ -478,6 +479,7 @@ class SettingsManager {
                 this.elements.steamPath.value = data.config.steam_path || '';
                 this.elements.debugMode.checked = data.config.debug_mode || false;
                 this.elements.loggingFiles.checked = data.config.logging_files !== false;
+                this.elements.disableLogging.checked = data.config.disable_logging || false;
                 this.elements.showConsoleOnStartup.checked = data.config.show_console_on_startup || false;
 
                 // 加载强制解锁工具设置
@@ -519,6 +521,7 @@ class SettingsManager {
             steam_path: this.elements.steamPath.value.trim(),
             debug_mode: this.elements.debugMode.checked,
             logging_files: this.elements.loggingFiles.checked,
+            disable_logging: this.elements.disableLogging.checked,
             show_console_on_startup: this.elements.showConsoleOnStartup.checked,
             force_unlocker_type: forceUnlockerValue,
             auto_install_unlocker: this.elements.autoInstallUnlocker.checked,

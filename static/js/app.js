@@ -48,14 +48,6 @@ class DxbWebApp {
             modeIndicator: document.getElementById('modeIndicator'),
             gameModeOptions: document.getElementById('gameModeOptions'),
             workshopModeOptions: document.getElementById('workshopModeOptions'),
-            // Lua 手搓元素
-            luaAppId: document.getElementById('luaAppId'),
-            luaAppId: document.getElementById('luaAppId'),
-            luaIncludeKeys: document.getElementById('luaIncludeKeys'),
-            luaIncludeManifests: document.getElementById('luaIncludeManifests'),
-            luaCraftBtn: document.getElementById('luaCraftBtn'),
-            luaDownloadBtn: document.getElementById('luaDownloadBtn'),
-            luaPreview: document.getElementById('luaPreview'),
             // Steam 状态条元素
             steamPathText: document.getElementById('steamPathText'),
             steamKernelText: document.getElementById('steamKernelText'),
@@ -115,10 +107,6 @@ class DxbWebApp {
 
         // 创意工坊模式切换
         this.elements.workshopModeBtn.addEventListener('click', () => this.toggleWorkshopMode());
-
-        // Lua 手搓
-        this.elements.luaCraftBtn.addEventListener('click', () => this.craftLua());
-        this.elements.luaDownloadBtn.addEventListener('click', () => this.downloadLua());
 
         this.elements.unlockForm.addEventListener('change', (event) => {
             if (event.target.name === 'toolType') {
@@ -239,8 +227,6 @@ class DxbWebApp {
         };
         const status = unlockerStatusMap[config.unlocker_type] || unlockerStatusMap.none;
         items.push(`<div class="status-item ${status.class}"><span class="material-icons status-icon">${status.icon}</span><span class="status-text">${status.text}</span></div>`);
-        const tokenStatus = config.has_token ? { class: 'success', text: '已配置 GitHub Token', icon: 'check_circle' } : { class: 'warning', text: '未配置 GitHub Token (可能影响下载)', icon: 'warning' };
-        items.push(`<div class="status-item ${tokenStatus.class}"><span class="material-icons status-icon">${tokenStatus.icon}</span><span class="status-text">${tokenStatus.text}</span></div>`);
         const steamPathStatus = config.steam_path !== 'Not Found' ? { class: 'success', text: `Steam 路径: ${config.steam_path}`, icon: 'check_circle' } : { class: 'error', text: '未找到 Steam 路径!', icon: 'error' };
         items.push(`<div class="status-item ${steamPathStatus.class}"><span class="material-icons status-icon">${steamPathStatus.icon}</span><span class="status-text">${steamPathStatus.text}</span></div>`);
         return items.join('');
@@ -357,67 +343,6 @@ class DxbWebApp {
         }
     }
 
-    // Lua 手搓
-    async craftLua() {
-        const appid = this.elements.luaAppId.value.trim();
-        if (!appid) { this.showSnackbar('请输入 AppID。', 'error'); return; }
-        const btn = this.elements.luaCraftBtn;
-        btn.disabled = true;
-        const original = btn.innerHTML;
-        btn.innerHTML = '<span class="material-icons spin">hourglass_top</span> 手搓中...';
-        try {
-            const response = await fetch('/api/craft_lua', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    appid,
-                    include_depotkeys: this.elements.luaIncludeKeys.checked,
-                    include_manifests: this.elements.luaIncludeManifests.checked,
-                }),
-            });
-            const data = await response.json();
-            if (data.success) {
-                this.elements.luaPreview.value = data.lua;
-                this.luaFilename = data.filename;
-                this.elements.luaDownloadBtn.disabled = false;
-                const info = data.info || {};
-                const keys = (info.depotkeys && Object.keys(info.depotkeys).length) || 0;
-                this.showSnackbar(`手搓完成：名称 ${info.name || appid}，depot ${info.depots ? info.depots.length : 0}，密钥 ${keys}`, 'success');
-            } else {
-                this.showSnackbar(`手搓失败: ${data.message}`, 'error');
-            }
-        } catch (error) {
-            this.showSnackbar(`手搓出错: ${error.message}`, 'error');
-        } finally {
-            setTimeout(() => { btn.disabled = false; btn.innerHTML = original; }, 800);
-        }
-    }
-
-    async downloadLua() {
-        const lua = this.elements.luaPreview.value;
-        if (!lua) { this.showSnackbar('没有可下载的内容。', 'error'); return; }
-        try {
-            const response = await fetch('/api/download_lua', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ lua, filename: this.luaFilename || 'crafted.lua' }),
-            });
-            if (!response.ok) { this.showSnackbar('下载失败。', 'error'); return; }
-            const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = this.luaFilename || 'crafted.lua';
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
-            this.showSnackbar('已开始下载 lua 文件。', 'success');
-        } catch (error) {
-            this.showSnackbar(`下载出错: ${error.message}`, 'error');
-        }
-    }
-
     async searchGame() {
         const gameName = this.elements.gameNameInput.value.trim();
         if (!gameName) { this.showSnackbar('请输入游戏名称。', 'error'); return; }
@@ -438,7 +363,23 @@ class DxbWebApp {
 
     displayGameResults(games) {
         if (!games || games.length === 0) { this.elements.gameSearchResults.innerHTML = `<div class="status-item warning">未找到相关游戏。</div>`; return; }
-        let html = games.map(game => ` <div class="search-result-item"> <div class="search-result-info"> <span class="name">${game.name}</span> <span class="appid">AppID: ${game.appid}</span> </div> <button class="preview-btn" data-appid="${game.appid}" title="预览图片"> <span class="material-icons">image</span> </button> <button class="select-copy-btn" data-appid="${game.appid}" title="选择并复制 AppID"> <span class="material-icons">content_copy</span> </button> </div> `).join('');
+        let html = games.map(game => `
+            <div class="search-result-item">
+                <img class="search-result-thumb" loading="lazy"
+                     src="https://cdn.akamai.steamstatic.com/steam/apps/${game.appid}/capsule_184x69.jpg"
+                     onerror="this.style.display='none'"/>
+                <div class="search-result-info">
+                    <span class="name">${game.name}</span>
+                    <span class="appid">AppID: ${game.appid}</span>
+                </div>
+                <button class="preview-btn" data-appid="${game.appid}" title="预览图片">
+                    <span class="material-icons">image</span>
+                </button>
+                <button class="select-copy-btn" data-appid="${game.appid}" title="选择并复制 AppID">
+                    <span class="material-icons">content_copy</span>
+                </button>
+            </div>
+        `).join('');
         this.elements.gameSearchResults.innerHTML = html;
     }
 
@@ -511,6 +452,27 @@ class DxbWebApp {
         this.addLogEntry('info', `--- 开始下载创意工坊资源: '${this.currentAppId}' ---`);
 
         try {
+            // 下载前先检测物品是否存在，避免无效下载
+            this.addLogEntry('info', '正在检测创意工坊物品是否存在...');
+            const checkResp = await fetch('/api/workshop/check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ workshop_input: this.currentAppId }),
+            });
+            const checkData = await checkResp.json();
+            if (!checkData.success || !checkData.exists) {
+                const reason = (checkData.reason) || (checkData.message) || '物品不存在';
+                this.addLogEntry('error', `检测失败: ${reason}`);
+                this.showSnackbar(`创意工坊物品不存在: ${reason}`, 'error');
+                this.taskStatus = 'idle';
+                this.setFormDisabled(false);
+                return;
+            }
+            this.addLogEntry('info', `物品存在: ${checkData.title}`);
+            if (checkData.local_exists) {
+                this.addLogEntry('warning', '该物品已在本地存在，将覆盖更新。');
+            }
+
             const response = await fetch('/api/workshop/start_task', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },

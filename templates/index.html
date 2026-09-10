@@ -37,6 +37,8 @@
             <a class="nav-item" href="/manager">
                 <span class="material-icons">library_books</span><span>入库管理</span>
             </a>
+            <a class="nav-item" href="/craft"><span class="material-icons">auto_fix_high</span><span>手搓</span></a>
+            <a class="nav-item" href="/free"><span class="material-icons">card_giftcard</span><span>免费游戏</span></a>
             <a class="nav-item" href="/settings">
                 <span class="material-icons">settings</span><span>设置</span>
             </a>
@@ -208,45 +210,6 @@
                         </div>
                     </div>
                 </form>
-            </div>
-        </div>
-
-        <!-- Lua 手搓卡片 -->
-        <div class="card lua-craft-card">
-            <div class="card-header">
-                <span class="material-icons">auto_fix_high</span>
-                <h2>Lua 手搓（清单生成）</h2>
-                <div class="card-actions">
-                    <span class="input-helper">找不到现成清单时，自动从 Steam 抓取信息生成 OpenSteamTool 风格 lua</span>
-                </div>
-            </div>
-            <div class="card-content">
-                <div class="input-group">
-                    <label class="input-label" for="luaAppId">App ID</label>
-                    <input class="text-field" id="luaAppId" name="luaAppId" placeholder="例如: 730 或 Steam 链接"/>
-                    <div class="input-helper">输入游戏 AppID，自动获取名称、depot、manifest 与 depotkey。</div>
-                </div>
-                <div class="checkbox-row">
-                    <label class="checkbox-item">
-                        <input type="checkbox" id="luaIncludeKeys" checked>
-                        <span class="checkbox-button"></span>
-                        <div class="checkbox-content"><span class="checkbox-label">包含 depotkey</span></div>
-                    </label>
-                    <label class="checkbox-item">
-                        <input type="checkbox" id="luaIncludeManifests" checked>
-                        <span class="checkbox-button"></span>
-                        <div class="checkbox-content"><span class="checkbox-label">包含 manifest 绑定</span></div>
-                    </label>
-                </div>
-                <div class="button-group">
-                    <button class="btn btn-primary" id="luaCraftBtn" type="button">
-                        <span class="material-icons">auto_fix_high</span> 手搓
-                    </button>
-                    <button class="btn btn-secondary" id="luaDownloadBtn" type="button" disabled>
-                        <span class="material-icons">download</span> 下载
-                    </button>
-                </div>
-                <textarea class="lua-preview" id="luaPreview" readonly placeholder="生成结果将显示在这里..."></textarea>
             </div>
         </div>
 

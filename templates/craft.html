@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>手搓 - 大轩巴入库器mini</title>
+    <link rel="icon" href="{{ url_for('static', filename='dxb-word.svg') }}" type="image/svg+xml"/>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet"/>
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet"/>
+    <link href="{{ url_for('static', filename='css/dx-theme.css') }}" rel="stylesheet"/>
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('dxb-theme-preference') || 'dark';
+                document.documentElement.classList.add(t === 'dark' ? 'dxb-dark' : 'dxb-light');
+            } catch (e) {
+                document.documentElement.classList.add('dxb-dark');
+            }
+        })();
+    </script>
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+</head>
+<body>
+<div id="background-overlay"></div>
+<div class="app-container">
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <span class="dxb-wordmark">大轩巴</span>
+            <div class="sidebar-version">入库器mini</div>
+        </div>
+        <nav class="sidebar-nav">
+            <a class="nav-item" href="/"><span class="material-icons">home</span><span>首页</span></a>
+            <a class="nav-item" href="/manager"><span class="material-icons">library_books</span><span>入库管理</span></a>
+            <a class="nav-item active" href="/craft"><span class="material-icons">auto_fix_high</span><span>手搓</span></a>
+            <a class="nav-item" href="/free"><span class="material-icons">card_giftcard</span><span>免费游戏</span></a>
+            <a class="nav-item" href="/settings"><span class="material-icons">settings</span><span>设置</span></a>
+            <a class="nav-item" href="/about"><span class="material-icons">info</span><span>关于</span></a>
+        </nav>
+        <div class="sidebar-footer">
+            <button class="nav-action" id="themeToggleBtn" title="切换主题"><span class="material-icons">dark_mode</span></button>
+            <button class="nav-action" id="backgroundSettingsBtn" title="自定义背景"><span class="material-icons">wallpaper</span></button>
+            <button class="nav-action" id="shutdownBtn" title="关闭应用"><span class="material-icons">power_settings_new</span></button>
+        </div>
+    </aside>
+    <div class="content-area">
+        <header class="content-header">
+            <span class="dxb-wordmark">大轩巴</span>
+            <h1 class="app-title">手搓</h1>
+        </header>
+        <main class="main-content" style="grid-template-columns: 1fr;">
+            <div class="card">
+                <div class="card-header">
+                    <span class="material-icons">auto_fix_high</span>
+                    <h2>手搓清单（仅官方源）</h2>
+                </div>
+                <div class="card-content">
+                    <div class="input-group">
+                        <label class="input-label" for="luaAppId">App ID</label>
+                        <input class="text-field" id="luaAppId" name="luaAppId" placeholder="例如: 4000 或 Steam 链接"/>
+                        <div class="input-helper">数据来源：Steam 官方商店 API + SteamCMD 官方 appinfo（Valve 官方数据），不使用任何第三方密钥库。</div>
+                    </div>
+                    <div class="button-group">
+                        <button class="btn btn-primary" id="luaCraftBtn" type="button">
+                            <span class="material-icons">auto_fix_high</span> 手搓
+                        </button>
+                        <button class="btn btn-primary" id="luaImportBtn" type="button" disabled>
+                            <span class="material-icons">download_done</span> 入库
+                        </button>
+                        <button class="btn btn-secondary" id="luaDownloadBtn" type="button" disabled>
+                            <span class="material-icons">download</span> 下载
+                        </button>
+                    </div>
+                    <textarea class="lua-preview" id="luaPreview" readonly placeholder="生成结果将显示在这里..." style="min-height: 320px;"></textarea>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="material-icons">timeline</span>
+                    <h2>执行日志</h2>
+                    <div class="card-actions">
+                        <button class="btn btn-text" id="clearLogBtn"><span class="material-icons">clear_all</span> 清空</button>
+                    </div>
+                </div>
+                <div class="card-content">
+                    <div class="progress-container" id="progressContainer">
+                        <div class="progress-placeholder"><span class="material-icons">info</span><p>等待任务开始...</p></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+        <footer class="app-footer">
+            <div class="copyright"><p>© 2026 大轩巴入库器mini</p></div>
+        </footer>
+    </div>
+</div>
+
+<div class="snackbar" id="snackbar">
+    <div class="snackbar-content">
+        <span id="snackbarMessage"></span>
+        <button class="snackbar-action" id="snackbarClose"><span class="material-icons">close</span></button>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
+<script src="{{ url_for('static', filename='js/craft.js') }}"></script>
+<script src="{{ url_for('static', filename='js/background-manager.js') }}"></script>
+</body>
+</html>

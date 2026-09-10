@@ -6,6 +6,7 @@ import webbrowser
 import sys
 import threading
 import time
+import logging
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 import json as standard_json
@@ -145,6 +146,15 @@ def about_page(): return render_template('about.html')
 @app.route('/manager')
 def manager_page():
     return render_template('manager.html')
+
+# NEW: 手搓独立页面
+@app.route('/craft')
+def craft_page():
+    return render_template('craft.html')
+
+@app.route('/free')
+def free_page():
+    return render_template('free.html')
 
 
 # --- Core API Routes ---
@@ -353,6 +363,35 @@ def craft_lua():
         dummy = DxbBackend()
         dummy.log.error(dummy.stack_error(e))
         return jsonify({"success": False, "message": str(e)})
+
+
+# NEW: 手搓结果一键入库（写入 Steam config\lua）
+@app.route('/api/craft_import', methods=['POST'])
+def craft_import():
+    data = request.get_json(silent=True) or {}
+    lua = data.get("lua", "")
+    filename = str(data.get("filename", "")).strip()
+    if not lua:
+        return jsonify({"success": False, "message": "无 lua 内容，请先手搓。"}), 400
+    if not filename or not filename.endswith(".lua") or "/" in filename or "\\" in filename:
+        return jsonify({"success": False, "message": "文件名无效。"}), 400
+    try:
+        async def _imp():
+            async with DxbBackend() as backend:
+                patch_log_for_socketio(backend.log)
+                await backend.initialize()
+                lua_dir = backend.steam_path / 'config' / 'lua'
+                lua_dir.mkdir(parents=True, exist_ok=True)
+                target = lua_dir / filename
+                target.write_text(lua, encoding='utf-8')
+                backend.log.info(f"手搓 lua 已入库: {target}")
+                return str(target)
+        target = asyncio.run(_imp())
+        return jsonify({"success": True, "message": f"已写入 {target}，重启 Steam 后生效。", "path": target})
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": f"入库失败: {e}"})
 
 
 @app.route('/api/download_lua', methods=['POST'])
@@ -578,6 +617,32 @@ def start_task():
     return jsonify({"success": True, "message": "任务已开始。"})
 
 # Workshop task endpoint
+@app.route('/api/workshop/check', methods=['POST'])
+def workshop_check():
+    """下载前检测创意工坊物品是否存在。"""
+    data = request.get_json(silent=True) or {}
+    workshop_input = (data.get('workshop_input') or '').strip()
+    if not workshop_input:
+        return jsonify({"success": False, "message": "请输入创意工坊物品链接或ID。"}), 400
+    try:
+        backend = DxbBackend()
+        backend.log = logging.getLogger(' 大轩巴入库器mini')
+        workshop_id = backend.extract_workshop_id(workshop_input)
+        if not workshop_id:
+            return jsonify({"success": False, "message": "无法从输入中提取有效的创意工坊ID。"}), 400
+        info = asyncio.run(_run_workshop_check(workshop_id))
+        return jsonify({"success": True, **info})
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": f"检测失败: {e}"}), 500
+
+async def _run_workshop_check(workshop_id):
+    async with DxbBackend() as backend:
+        patch_log_for_socketio(backend.log)
+        await backend.initialize()
+        return await backend.check_workshop_exists(workshop_id)
+
 @app.route('/api/workshop/start_task', methods=['POST'])
 def start_workshop_task():
     if TASK_STATE["status"] == "running":
@@ -639,6 +704,69 @@ def get_managed_files():
         message = f"获取文件列表失败: {str(e)}"
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message})
+
+@app.route('/api/manager/installed', methods=['GET'])
+def get_installed_games():
+    """真实扫描 Steam 已装应用，DLC 归入各自游戏下。"""
+    try:
+        backend = DxbBackend()
+        backend.log = logging.getLogger(' 大轩巴入库器mini')
+        backend.config = backend._load_config_sync()
+        tree = backend.installed_games_tree()
+        return jsonify(tree)
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": f"扫描已装应用失败: {e}",
+                        "games": [], "others": [], "total": 0, "dlc_total": 0})
+
+# --- 免费游戏页 API ---
+@app.route('/api/free/games', methods=['GET'])
+def free_games():
+    query = request.args.get('q', '').strip()
+    try:
+        backend = DxbBackend()
+        backend.log = logging.getLogger(' 大轩巴入库器mini')
+        result = backend.free_games_list(query)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"获取免费游戏失败: {e}", "games": [], "total": 0})
+
+@app.route('/api/free/inject', methods=['POST'])
+def free_inject():
+    """批量永久入库免费游戏（写入解锁器 lua 目录）。"""
+    data = request.get_json(silent=True) or {}
+    appids = data.get('appids') or []
+    names = data.get('names') or {}
+    if not appids:
+        return jsonify({"success": False, "message": "没有需要入库的游戏。"}), 400
+    try:
+        async def _inject():
+            async with DxbBackend() as backend:
+                await backend.initialize()
+                return backend.inject_free_games(appids, names)
+        return jsonify(asyncio.run(_inject()))
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": f"入库失败: {e}", "injected": 0, "skipped": 0})
+
+@app.route('/api/free/account', methods=['POST'])
+def free_account():
+    data = request.get_json(silent=True) or {}
+    cookie = (data.get('cookie') or '').strip()
+    try:
+        backend = DxbBackend()
+        backend.log = logging.getLogger(' 大轩巴入库器mini')
+        result = backend.free_account_info(cookie)
+        # 记住 cookie 到配置（本地工具，敏感信息自行保管）
+        if result.get('success') and cookie:
+            cfg = backend._load_config_sync()
+            cfg['steam_cookie'] = cookie
+            backend._save_config_sync(cfg)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"读取账号信息失败: {e}"})
 
 @app.route('/api/manager/delete', methods=['POST'])
 def delete_managed_files():
@@ -747,7 +875,7 @@ def update_config():  # 改为同步函数
         
         # 更新所有可能的键
         updatable_keys = [
-            "github_token", "steam_path", "debug_mode", "logging_files",
+            "github_token", "steam_path", "debug_mode", "logging_files", "disable_logging",
             "background_image_path", "background_blur", "background_saturation",
             "background_brightness", "show_console_on_startup", "force_unlocker_type",
             "auto_install_unlocker", "unlocker_preference", "greenluma_repo", "steamtools_repo"
