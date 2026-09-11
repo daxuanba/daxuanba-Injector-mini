@@ -7,6 +7,10 @@
     margin: 0 auto;
     padding: 24px;
     display: flex;
+    /* 纵向排列：免费游戏页有多张卡片，横向 flex 会把卡片压扁导致文字被裁 */
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
 }
 
 .manager-card {
@@ -488,3 +492,30 @@
 .rec-price-row { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; font-size: 14px; font-weight: 600; }
 .price-off { background: #e5484d; color: #fff; border-radius: 6px; padding: 1px 6px; font-size: 12px; font-weight: 700; }
 .price-original { color: var(--md-sys-color-on-surface-variant); text-decoration: line-through; font-weight: 400; font-size: 12px; }
+
+/* ---- 免费游戏 / 推荐页：卡片按钮（入库 + 安装 + 商店）自适应换行 ---- */
+.free-card .game-card-actions,
+.rec-card .game-card-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+}
+.free-card .game-card-actions .btn,
+.rec-card .game-card-actions .btn {
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.free-card .game-card-actions .btn-primary,
+.rec-card .game-card-actions .btn-primary {
+    flex: 1 1 auto;
+}
+
+/* ---- 这两页的入库日志面板：卡片内固定高度、内部滚动 ---- */
+.manager-main-content .progress-container,
+.recommend-main .progress-container {
+    max-height: 320px;
+    height: 240px;
+}
+.recommend-main .card.manager-card {
+    width: 100%;
+    flex: 0 0 auto;
+}

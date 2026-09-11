@@ -1,4 +1,6 @@
-// --- 免费游戏页：账号登录（内置浏览器）+ 分页 + 一键入库 ---
+// --- 免费游戏页：账号登录（内置浏览器）+ 分页 + 入库/安装 ---
+// 说明：入库 = 写 addappid 永久解锁清单；安装 = 调 Steam 客户端下载本体。
+//       入库必须先登录（未登录会自动拉起内置浏览器登录窗口）。
 class FreeGamesApp {
     constructor() {
         this.elements = {
@@ -28,12 +30,21 @@ class FreeGamesApp {
             nextPageBtn: document.getElementById('nextPageBtn'),
             pageInfo: document.getElementById('pageInfo'),
             pagination: document.getElementById('freePagination'),
+            log: document.getElementById('freeLog'),
+            logClear: document.getElementById('freeLogClear'),
         };
         this.pageSize = 20;
         this.page = 1;
         this.games = [];
         this.pollTimer = null;
+        this.busy = false;
+        // 入库日志走本地快照：切到别的页面再回来，日志还在
+        this.store = window.DxbTaskLog ? window.DxbTaskLog.local('free') : null;
         this.initialize();
+    }
+
+    log(type, msg) {
+        if (this.store) this.store.append(type, msg);
     }
 
     initialize() {
@@ -56,18 +67,39 @@ class FreeGamesApp {
         if (this.elements.cookieSubmitBtn) {
             this.elements.cookieSubmitBtn.addEventListener('click', () => this.manualLogin());
         }
+        if (this.store) this.store.mount(this.elements.log);
+        if (this.elements.logClear && this.store) {
+            this.elements.logClear.addEventListener('click', () => this.store.clear());
+        }
         this.fetchGames('');
         this.restoreLogin();
     }
 
     /* ---------- 账号登录 ---------- */
 
+    /** 登录态：内置浏览器已登录成功，或配置里存过 Cookie */
+    async isLoggedIn() {
+        try {
+            const r = await fetch('/api/steam/login/status');
+            const d = await r.json();
+            if (d.status === 'success' && d.account) return true;
+        } catch (e) { /* ignore */ }
+        try {
+            const r = await fetch('/api/config/detailed');
+            if (r.ok) {
+                const d = await r.json();
+                if (d.config && d.config.steam_cookie) return true;
+            }
+        } catch (e) { /* ignore */ }
+        return false;
+    }
+
     async restoreLogin() {
         // 1) 优先问服务端：内置浏览器是否已经登录过
         try {
             const r = await fetch('/api/steam/login/status');
             const d = await r.json();
-            if (d.status === 'success' && d.account) { this.applyAccount(d.account); return; }
+            if (d.status === 'success' && d.account) { this.applyAccount(d.account, true); return; }
         } catch (e) { /* ignore */ }
         // 2) 回落到本地保存的 Cookie
         try {
@@ -80,7 +112,7 @@ class FreeGamesApp {
         } catch (e) { /* ignore */ }
     }
 
-    applyAccount(acc) {
+    applyAccount(acc, silent = false) {
         this.elements.name.textContent = acc.name || '已登录';
         if (acc.balance !== null && acc.balance !== undefined) {
             const sym = (acc.currency === 'CN' || !acc.currency) ? '¥' : (acc.currency + ' ');
@@ -102,9 +134,10 @@ class FreeGamesApp {
             }
         }
         this.elements.logoutBtn.style.display = 'inline-block';
+        if (!silent) this.log('success', `已登录：${acc.name || 'Steam 账号'}`);
     }
 
-    /** 用内置（沉默）浏览器登录 Steam */
+    /** 用内置（沉默）浏览器登录 Steam。@returns {Promise<boolean>} 是否登录成功 */
     async browserLogin() {
         this.elements.loginBtn.disabled = true;
         try {
@@ -112,50 +145,62 @@ class FreeGamesApp {
             const d = await resp.json();
             if (!d.available) {
                 this.showSnackbar('当前环境没有内置浏览器，已打开 Steam 登录页，请登录后手动粘贴 Cookie。', 'warning');
+                this.log('warn', '当前环境没有内置浏览器，已打开网页登录页，可登录后手动粘贴 Cookie。');
                 if (this.elements.cookieManual) this.elements.cookieManual.style.display = 'flex';
                 window.open('https://store.steampowered.com/login/', '_blank');
-                return;
+                return false;
             }
             this.showSnackbar('已打开登录窗口，请在窗口中完成 Steam 登录（会自动读取登录态）…', 'info');
-            this.pollLogin();
+            this.log('info', '已打开内置浏览器登录窗口，等待登录…');
+            return await this.pollLogin();
         } catch (e) {
             this.showSnackbar(`打开登录窗口失败: ${e.message}`, 'error');
+            this.log('error', `打开登录窗口失败：${e.message}`);
+            return false;
         } finally {
             this.elements.loginBtn.disabled = false;
         }
     }
 
+    /** 轮询登录结果，登录成功/失败/超时后 resolve */
     pollLogin() {
-        clearInterval(this.pollTimer);
-        const started = Date.now();
-        this.pollTimer = setInterval(async () => {
-            try {
-                const r = await fetch('/api/steam/login/status');
-                const d = await r.json();
-                if (d.status === 'success' && d.account) {
+        return new Promise((resolve) => {
+            clearInterval(this.pollTimer);
+            const started = Date.now();
+            this.pollTimer = setInterval(async () => {
+                try {
+                    const r = await fetch('/api/steam/login/status');
+                    const d = await r.json();
+                    if (d.status === 'success' && d.account) {
+                        clearInterval(this.pollTimer);
+                        this.applyAccount(d.account);
+                        this.showSnackbar(d.message || '已登录。', 'success');
+                        resolve(true);
+                        return;
+                    }
+                    if (d.status === 'error') {
+                        clearInterval(this.pollTimer);
+                        this.showSnackbar(d.message || '登录失败。', 'error');
+                        this.log('error', `登录失败：${d.message || ''}`);
+                        if (this.elements.cookieManual) this.elements.cookieManual.style.display = 'flex';
+                        resolve(false);
+                        return;
+                    }
+                } catch (e) { /* 继续轮询 */ }
+                if (Date.now() - started > 300000) {
                     clearInterval(this.pollTimer);
-                    this.applyAccount(d.account);
-                    this.showSnackbar(d.message || '已登录。', 'success');
-                    return;
+                    this.showSnackbar('等待登录超时，可改用手动粘贴 Cookie。', 'warning');
+                    this.log('warn', '等待登录超时。');
+                    resolve(false);
                 }
-                if (d.status === 'error') {
-                    clearInterval(this.pollTimer);
-                    this.showSnackbar(d.message || '登录失败。', 'error');
-                    if (this.elements.cookieManual) this.elements.cookieManual.style.display = 'flex';
-                    return;
-                }
-            } catch (e) { /* 继续轮询 */ }
-            if (Date.now() - started > 300000) {
-                clearInterval(this.pollTimer);
-                this.showSnackbar('等待登录超时，可改用手动粘贴 Cookie。', 'warning');
-            }
-        }, 1500);
+            }, 1500);
+        });
     }
 
     /** 手动粘贴 Cookie（降级方案） */
     async manualLogin(cookieValue, silent = false) {
         const cookie = (cookieValue !== undefined && cookieValue !== null)
-            ? cookie : (this.elements.cookieInput.value || '').trim();
+            ? cookieValue : (this.elements.cookieInput.value || '').trim();
         if (!cookie) { this.showSnackbar('请输入 steamLoginSecure Cookie。', 'error'); return; }
         if (this.elements.cookieInput) this.elements.cookieInput.value = cookie;
         try {
@@ -165,10 +210,11 @@ class FreeGamesApp {
             });
             const d = await resp.json();
             if (d.success) {
-                this.applyAccount(d);
+                this.applyAccount(d, silent);
                 if (!silent) this.showSnackbar('已读取账号信息。', 'success');
             } else if (!silent) {
                 this.showSnackbar(d.message || '读取失败', 'error');
+                this.log('error', `读取账号信息失败：${d.message || ''}`);
             }
         } catch (e) {
             if (!silent) this.showSnackbar(`请求失败: ${e.message}`, 'error');
@@ -236,6 +282,9 @@ class FreeGamesApp {
                         <button class="btn btn-primary free-inject" data-appid="${g.appid}" data-name="${g.name}">
                             <span class="material-icons">library_add</span> 入库
                         </button>
+                        <button class="btn btn-secondary free-install" data-appid="${g.appid}" data-name="${g.name}" title="让 Steam 下载安装">
+                            <span class="material-icons">download</span> 安装
+                        </button>
                         <button class="btn btn-icon free-store" data-appid="${g.appid}" title="商店页">
                             <span class="material-icons">open_in_new</span>
                         </button>
@@ -247,6 +296,12 @@ class FreeGamesApp {
             btn.addEventListener('click', e => {
                 e.stopPropagation();
                 this.inject([{ appid: btn.dataset.appid, name: btn.dataset.name }]);
+            });
+        });
+        this.elements.grid.querySelectorAll('.free-install').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                this.install(btn.dataset.appid, btn.dataset.name);
             });
         });
         this.elements.grid.querySelectorAll('.free-store').forEach(btn => {
@@ -266,14 +321,53 @@ class FreeGamesApp {
         this.elements.pagination.style.display = this.games.length ? 'flex' : 'none';
     }
 
+    /** 让 Steam 安装（下载本体） */
+    async install(appid, name) {
+        this.log('info', `请求 Steam 安装 ${name || appid}（AppID ${appid}）…`);
+        try {
+            const r = await fetch('/api/steam/launch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'install', appid })
+            });
+            const d = await r.json();
+            if (d.success) {
+                this.showSnackbar(`已请求 Steam 安装 ${name || appid}，请在 Steam 客户端确认。`, 'success');
+                this.log('success', `已请求 Steam 安装 ${name || appid}。`);
+            } else {
+                this.showSnackbar(d.message || '安装请求失败', 'error');
+                this.log('error', `安装请求失败：${d.message || ''}`);
+            }
+        } catch (e) {
+            this.showSnackbar(`安装请求失败: ${e.message}`, 'error');
+            this.log('error', `安装请求失败：${e.message}`);
+        }
+    }
+
     async inject(list) {
+        if (this.busy) return;
         if (!list || !list.length) { this.showSnackbar('没有可入库的游戏。', 'warning'); return; }
+
+        // 入库必须先登录：未登录则自动拉起内置浏览器登录窗口，登录成功后继续入库
+        if (!(await this.isLoggedIn())) {
+            this.showSnackbar('请先登录 Steam 账号，正在为你打开登录窗口…', 'warning');
+            this.log('warn', '未登录，先打开 Steam 登录窗口…');
+            const ok = await this.browserLogin();
+            if (!ok) {
+                this.showSnackbar('未登录，已取消入库。', 'warning');
+                this.log('error', '登录未完成，已取消入库。');
+                return;
+            }
+            this.log('success', '登录成功，继续入库。');
+        }
+
         const appids = list.map(g => g.appid);
         const names = {};
         list.forEach(g => { names[g.appid] = g.name; });
+        this.busy = true;
         this.elements.injectAllBtn.disabled = true;
         this.elements.injectPageBtn.disabled = true;
         this.showSnackbar(`正在永久入库 ${appids.length} 个游戏...`, 'info');
+        this.log('info', `开始永久入库 ${appids.length} 个游戏：${appids.slice(0, 20).join(', ')}${appids.length > 20 ? ' …' : ''}`);
         try {
             const resp = await fetch('/api/free/inject', {
                 method: 'POST',
@@ -282,13 +376,22 @@ class FreeGamesApp {
             });
             const d = await resp.json();
             if (d.success) {
-                this.showSnackbar(`已永久入库 ${d.injected} 个${d.skipped ? `，跳过已存在 ${d.skipped} 个` : ''}。重启 Steam 生效。`, 'success');
+                const msg = `已永久入库 ${d.injected} 个${d.skipped ? `，跳过已存在 ${d.skipped} 个` : ''}。重启 Steam 生效。`;
+                this.showSnackbar(msg, 'success');
+                this.log('success', msg);
+                if (d.dir) this.log('info', `写入目录：${d.dir}`);
+            } else if (d.need_login) {
+                this.showSnackbar(d.message || '请先登录 Steam 账号。', 'warning');
+                this.log('warn', d.message || '请先登录 Steam 账号。');
             } else {
                 this.showSnackbar(d.message || '入库失败', 'error');
+                this.log('error', `入库失败：${d.message || ''}`);
             }
         } catch (e) {
             this.showSnackbar(`入库失败: ${e.message}`, 'error');
+            this.log('error', `入库失败：${e.message}`);
         } finally {
+            this.busy = false;
             this.elements.injectAllBtn.disabled = false;
             this.elements.injectPageBtn.disabled = false;
         }

@@ -189,6 +189,24 @@ def steam_login_succeeded(cookie: str):
     STEAM_LOGIN["message"] = "已登录：" + (account.get('name') or 'Steam 账号')
     return {"success": True, "account": account}
 
+
+def _is_steam_logged_in() -> bool:
+    """入库前的登录态判定：内置浏览器登录成功，或配置里已存过 Cookie。"""
+    if STEAM_LOGIN.get("status") == "success" and STEAM_LOGIN.get("account"):
+        return True
+    try:
+        cfg = _quick_backend()._load_config_sync() or {}
+        return bool(str(cfg.get('steam_cookie') or '').strip())
+    except Exception:
+        return False
+
+
+def _steam_login_required():
+    """统一的“请先登录”响应体。"""
+    return jsonify({"success": False, "need_login": True, "injected": 0, "skipped": 0,
+                    "available": STEAM_LOGIN.get("available", False),
+                    "message": "请先登录 Steam 账号，登录后才能入库。"})
+
 # --- HTML Page Routes ---
 @app.route('/')
 def index(): return render_template('index.html')
@@ -812,11 +830,39 @@ def steam_login_status():
 
 @app.route('/api/steam/img/<appid>')
 def steam_image(appid):
-    """封面图本地代理：多 CDN 回退 + 落盘缓存，解决 webview 直连 CDN 空白。"""
+    """封面图本地代理：多 CDN/多路径回退 + appdetails 兜底 + 落盘缓存，
+    解决 webview 直连 CDN 空白。可选 ?u=<图片URL> 直接指定地址。"""
+    url = request.args.get('u', '').strip()
     try:
-        data = _quick_backend().fetch_steam_image(appid)
+        data = _quick_backend().fetch_steam_image(appid, url)
     except Exception:
         data = None
+    if not data:
+        return Response(status=404)
+    resp = Response(data, mimetype='image/jpeg')
+    resp.headers['Cache-Control'] = 'public, max-age=604800'
+    return resp
+
+
+@app.route('/api/steam/proxy')
+def steam_image_proxy():
+    """通用 Steam 图片代理。
+
+    推荐页 header_image 是带 hash 目录 + 时间戳的完整地址（如
+    .../store_item_assets/steam/apps/3892270/<hash>/header.jpg），拼模板必然 404，
+    只能按 URL 原样代理。仅放行 Steam CDN 白名单域名，避免变成任意 URL 转发器。
+    """
+    # 前端用 encodeURIComponent 传参，Flask 已解码一次，这里不要再 unquote
+    url = request.args.get('u', '').strip()
+    appid = request.args.get('appid', '').strip()
+    data = None
+    if url:
+        try:
+            b = _quick_backend()
+            if b._is_allowed_image_url(url):
+                data = b.fetch_image_by_url(url, appid)
+        except Exception:
+            data = None
     if not data:
         return Response(status=404)
     resp = Response(data, mimetype='image/jpeg')
@@ -852,6 +898,9 @@ def free_inject():
     names = data.get('names') or {}
     if not appids:
         return jsonify({"success": False, "message": "没有需要入库的游戏。"}), 400
+    # 未登录不允许入库：先让用户用内置浏览器登录 Steam
+    if not _is_steam_logged_in():
+        return _steam_login_required()
     try:
         async def _inject():
             async with DxbBackend() as backend:
@@ -1068,6 +1117,33 @@ def upload_background():
 
 @app.route('/userdata/<path:filename>')
 def serve_userdata(filename): return send_from_directory(app.config['USER_DATA_FOLDER'], filename)
+
+@app.route('/api/steam/launch', methods=['POST'])
+def steam_launch():
+    """让系统协议处理器打开 steam:// 链接（安装 / 启动游戏）。
+
+    webview 里 window.open('steam://...') 不可靠（会被当普通外链拦截），
+    统一改由本地服务调用系统默认处理程序，最稳。
+    """
+    data = request.get_json(silent=True) or {}
+    action = str(data.get('action') or '').strip().lower()
+    appid = str(data.get('appid') or '').strip()
+    if not appid.isdigit():
+        return jsonify({"success": False, "message": "无效的 AppID。"})
+    if action not in ('install', 'run'):
+        return jsonify({"success": False, "message": "无效的操作。"})
+    url = f'steam://{action}/{appid}'
+    try:
+        if hasattr(os, 'startfile'):
+            os.startfile(url)          # Windows：交给系统协议处理器
+        else:
+            webbrowser.open(url)
+        return jsonify({"success": True, "url": url,
+                        "message": "已请求 Steam 安装，请在 Steam 客户端确认。" if action == 'install'
+                                   else "已请求 Steam 启动。"})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"调用 Steam 失败: {e}", "url": url})
+
 
 @app.route('/api/steam/restart', methods=['POST'])
 def restart_steam():  # 改为同步函数

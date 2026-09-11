@@ -107,6 +107,18 @@
                     <span class="page-size-hint">每页 20 个</span>
                 </div>
             </div>
+
+            <div class="card manager-card">
+                <div class="card-header">
+                    <h2>入库日志</h2>
+                    <div class="card-actions">
+                        <button class="btn btn-text" id="freeLogClear"><span class="material-icons">clear_all</span> 清空</button>
+                    </div>
+                </div>
+                <div class="progress-container" id="freeLog">
+                    <div class="progress-placeholder"><span class="material-icons">info</span><p>等待操作...</p></div>
+                </div>
+            </div>
         </main>
     </div>
 </div>
@@ -119,6 +131,7 @@
 </div>
 
 <script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
+<script src="{{ url_for('static', filename='js/task-log.js') }}"></script>
 <script src="{{ url_for('static', filename='js/free.js') }}"></script>
 <script src="{{ url_for('static', filename='js/background-manager.js') }}"></script>
 </body>

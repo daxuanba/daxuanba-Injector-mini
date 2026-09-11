@@ -123,6 +123,24 @@ class FileManagerApp {
         }
     }
 
+    /** 让 Steam 启动 / 安装某游戏。
+     * 走本地服务的系统协议通道（后端 os.startfile('steam://run/<id>')），
+     * 比 webview 里 window.open('steam://...') 可靠。 */
+    async launchGame(appid) {
+        if (!appid || !/^\d+$/.test(String(appid))) return;
+        try {
+            const r = await fetch('/api/steam/launch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'run', appid: String(appid) })
+            });
+            const d = await r.json();
+            this.showSnackbar(d.message || (d.success ? '已请求 Steam 启动。' : '启动失败'),
+                              d.success ? 'success' : 'error');
+        } catch (e) {
+            this.showSnackbar(`启动失败: ${e.message}`, 'error');
+        }
+    }
+
     switchTab(tab) {
         this.currentTab = tab;
         this.elements.tabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tab));
@@ -162,7 +180,7 @@ class FileManagerApp {
                 const statusInfo = statusMap[item.status] || { text: '未知', class: '' };
                 const isCoreFile = item.status === 'core_file';
                 const hasValidAppID = item.appid && /^\d+$/.test(item.appid);
-                const imageUrl = hasValidAppID ? `https://cdn.akamai.steamstatic.com/steam/apps/${item.appid}/header.jpg` : '';
+                const imageUrl = hasValidAppID ? `/api/steam/img/${item.appid}` : '';
                 
                 const imageHtml = hasValidAppID 
                     ? `<img src="${imageUrl}" alt="${item.game_name || 'Game Cover'}" loading="lazy" onerror="this.parentElement.innerHTML = '<div class=\\'placeholder\\'><span class=\\'material-icons\\'>hide_image</span></div>';">`
@@ -235,7 +253,7 @@ class FileManagerApp {
         }
         this.elements.noResultsMessage.style.display = 'none';
         const html = games.map(g => {
-            const img = `https://cdn.akamai.steamstatic.com/steam/apps/${g.appid}/header.jpg`;
+            const img = `/api/steam/img/${g.appid}`;
             const dlcs = (g.dlcs || []).map(d => `
                 <div class="dlc-item" data-appid="${d.appid}">
                     <span class="dlc-name" title="${d.name}">${d.name}</span>
@@ -244,12 +262,15 @@ class FileManagerApp {
                 </div>`).join('');
             return `
             <div class="game-tree-card" data-appid="${g.appid}">
-                <div class="game-tree-header" onclick="window.open('steam://run/${g.appid}')" title="启动/安装游戏">
-                    <img class="game-tree-cover" src="${img}" loading="lazy" onerror="this.style.display='none'"/>
+                <div class="game-tree-header">
+                    <img class="game-tree-cover" src="${img}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'"/>
                     <div class="game-tree-info">
                         <span class="game-tree-title">${g.name}</span>
                         <span class="game-tree-appid">APPID: ${g.appid} · DLC: ${g.dlcs.length}</span>
                     </div>
+                    <button class="btn btn-secondary game-launch" data-appid="${g.appid}" title="让 Steam 启动 / 安装本游戏">
+                        <span class="material-icons">play_circle</span> 启动/安装
+                    </button>
                     <button class="btn btn-icon game-copy" data-appid="${g.appid}" title="复制 AppID"><span class="material-icons">content_copy</span></button>
                 </div>
                 ${g.dlcs.length ? `<div class="dlc-list">${dlcs}</div>` : `<div class="dlc-list empty">无已装 DLC</div>`}
@@ -257,6 +278,12 @@ class FileManagerApp {
         }).join('');
         container.innerHTML = html;
 
+        container.querySelectorAll('.game-launch').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                this.launchGame(btn.dataset.appid);
+            });
+        });
         container.querySelectorAll('.game-copy, .dlc-copy').forEach(btn => {
             btn.addEventListener('click', e => {
                 e.stopPropagation();
@@ -409,7 +436,7 @@ class FileManagerApp {
     handleContextMenuAction(action, item) {
         switch (action) {
             case 'run':
-                if (item.appid && /^\d+$/.test(item.appid)) window.open(`steam://run/${item.appid}`);
+                if (item.appid && /^\d+$/.test(item.appid)) this.launchGame(item.appid);
                 break;
             case 'edit':
                 this.showEditor(item);

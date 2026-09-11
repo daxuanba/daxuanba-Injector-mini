@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.9"  # 当前版本号
+CURRENT_VERSION = "2.10"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -709,6 +709,67 @@ class DxbBackend:
                     version = ""
         return {"steam_path": str(sp) if sp else None, "installed": installed, "version": version}
 
+    # 已知“非游戏”的运行库/工具 AppID：商店详情拿不到时据此过滤，避免误当游戏
+    _NON_GAME_APPIDS = {
+        '228980',   # Steamworks Common Redistributables
+        '1070560', '1391110', '1628350',  # Steam Linux Runtime 系列
+    }
+
+    def _steam_library_roots(self, sp: Path) -> List[Path]:
+        """返回所有 Steam 库根目录：主目录 + libraryfolders.vdf 里登记的其他盘。
+        用户经常把游戏装在 D 盘等别处，只扫主 steamapps 会“识别不出来”。"""
+        roots: List[Path] = []
+
+        def _add(p):
+            if not p:
+                return
+            try:
+                pth = Path(str(p))
+            except Exception:
+                return
+            if pth not in roots:
+                roots.append(pth)
+
+        _add(sp)
+        for lf in (sp / 'steamapps' / 'libraryfolders.vdf', sp / 'config' / 'libraryfolders.vdf'):
+            if not lf.exists():
+                continue
+            try:
+                data = vdf.loads(lf.read_text(encoding='utf-8', errors='ignore'))
+            except Exception as e:
+                self.log.warning(f"解析 {lf.name} 失败: {e}")
+                continue
+            libs = data.get('libraryfolders') or data.get('LibraryFolders') or {}
+            if isinstance(libs, dict):
+                for _, info in libs.items():
+                    if isinstance(info, dict):
+                        _add(info.get('path') or info.get('Path'))
+                    elif isinstance(info, str):
+                        _add(info)
+            break
+        return roots
+
+    def _scan_installed_manifests(self, sp: Path) -> Dict[str, Dict]:
+        """扫描所有库目录的 appmanifest_*.acf → {appid: {name, library}}"""
+        found: Dict[str, Dict] = {}
+        for root in self._steam_library_roots(sp):
+            sa = root / 'steamapps'
+            if not sa.is_dir():
+                continue
+            for f in sa.glob('appmanifest_*.acf'):
+                try:
+                    data = vdf.loads(f.read_text(encoding='utf-8', errors='ignore')).get('AppState', {})
+                    appid = str(data.get('appid', '')).strip()
+                    if not appid.isdigit():
+                        continue
+                    found.setdefault(appid, {
+                        "name": (data.get('name') or '').strip() or f'App {appid}',
+                        "library": str(root),
+                    })
+                except Exception as e:
+                    self.log.warning(f"解析 {f.name} 失败: {e}")
+        return found
+
     def installed_games_tree(self) -> Dict:
         """真实扫描 Steam 已装应用（appmanifest），把 DLC 归入各自游戏下。
         返回 {games:[{appid,name,dlcs:[{appid,name}]}], others:[...], total, dlc_total}。"""
@@ -716,61 +777,45 @@ class DxbBackend:
         if not sp or not sp.exists():
             return {"success": False, "message": "未找到 Steam 路径，请在设置中配置。",
                     "games": [], "others": [], "total": 0, "dlc_total": 0}
-        steamapps = sp / 'steamapps'
-        if not steamapps.is_dir():
-            return {"success": False, "message": "steamapps 目录不存在。",
-                    "games": [], "others": [], "total": 0, "dlc_total": 0}
-
-        installed = {}  # appid -> name
-        for f in steamapps.glob('appmanifest_*.acf'):
-            try:
-                text = f.read_text(encoding='utf-8', errors='ignore')
-                data = vdf.loads(text).get('AppState', {})
-                appid = str(data.get('appid', '')).strip()
-                name = data.get('name', '') or f'App {appid}'
-                if appid.isdigit():
-                    installed[appid] = name
-            except Exception as e:
-                self.log.warning(f"解析 {f.name} 失败: {e}")
-
+        installed = self._scan_installed_manifests(sp)
         if not installed:
             return {"success": True, "games": [], "others": [], "total": 0, "dlc_total": 0,
-                    "message": "未检测到已安装的应用。"}
+                    "message": "未检测到已安装的应用。", "steam_path": str(sp)}
 
-        # 批量查询 Steam 商店详情（每批 50），获取类型/名称/父游戏/DLC 列表
-        details = {}  # appid -> data
+        # ⚠️ appdetails 一次传多个 appid（逗号）会返回 HTTP 400（2026-09 实测），
+        #    必须逐个查；用线程池并发，避免装了几十个游戏时串行卡死。
         appids = list(installed.keys())
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        import httpx as _httpx
-        for i in range(0, len(appids), 50):
-            chunk = appids[i:i + 50]
-            try:
-                with _httpx.Client(verify=False, timeout=30) as cli:
-                    r = cli.get("https://store.steampowered.com/api/appdetails",
-                                params={'appids': ','.join(chunk), 'l': 'schinese', 'cc': 'CN'},
-                                headers=headers)
-                    r.raise_for_status()
-                    j = r.json()
-                    for aid, val in j.items():
-                        if isinstance(val, dict) and val.get('success') and val.get('data'):
-                            details[aid] = val['data']
-            except Exception as e:
-                self.log.warning(f"批量查询商店详情失败（{i // 50 + 1}批）: {e}")
+        details: Dict[str, Dict] = {}
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            workers = min(8, max(1, len(appids)))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for aid, d in zip(appids, ex.map(self._steam_appdetails_one, appids)):
+                    if d:
+                        details[aid] = d
+        except Exception as e:
+            self.log.warning(f"查询商店详情失败: {e}")
 
         games = []
         dlcs = {}  # parent_appid -> [{appid,name}]
         others = []
-        for appid, fallback_name in installed.items():
+        for appid, meta in installed.items():
             d = details.get(appid, {})
-            name = d.get('name') or fallback_name
+            name = d.get('name') or meta['name']
             fgame = d.get('fullgame')
             gtype = (d.get('type') or '').lower()
             if fgame and str(fgame.get('appid')) != appid:
                 # 这是 DLC，归入父游戏
-                parent = str(fgame.get('appid'))
-                dlcs.setdefault(parent, []).append({"appid": appid, "name": name})
+                dlcs.setdefault(str(fgame.get('appid')), []).append({"appid": appid, "name": name})
             elif gtype in ('game', 'application', 'demo'):
                 games.append({"appid": appid, "name": name, "dlcs": []})
+            elif not d:
+                # 详情查不到（超时/被拦）不能据此判定它不是游戏，
+                # 用 acf 里的名字兜底，排除已知运行库后当游戏显示
+                if appid in self._NON_GAME_APPIDS:
+                    others.append({"appid": appid, "name": name})
+                else:
+                    games.append({"appid": appid, "name": name, "dlcs": []})
             else:
                 others.append({"appid": appid, "name": name})
 
@@ -824,7 +869,7 @@ class DxbBackend:
                         games.append({
                             "appid": appid,
                             "name": name,
-                            "header_image": f"https://cdn.akamai.steamstatic.com/steam/apps/{appid}/header.jpg"
+                            "header_image": f"https://cdn.akamai.steamstatic.com/steam/apps/{appid}/header.jpg",
                         })
                         if len(games) >= max_items:
                             break
@@ -857,6 +902,9 @@ class DxbBackend:
                     games.append({
                         "appid": appid,
                         "name": (it.get('name') or '').strip(),
+                        # 官方给了带 hash 目录的完整图片地址，拼模板会 404，必须原样交给代理
+                        "image": (it.get('header_image') or it.get('large_capsule_image')
+                                  or it.get('small_capsule_image') or ''),
                         "discount_percent": it.get('discount_percent') or 0,
                         "original_price": it.get('original_price'),
                         "final_price": it.get('final_price'),
@@ -871,7 +919,9 @@ class DxbBackend:
             self.log.error(f"获取推荐数据失败: {self.stack_error(e)}")
             return {"success": False, "message": f"获取推荐数据失败: {e}", "sections": []}
 
-    # 封面图多 CDN 回退顺序（2026-09 实测国内均可直连）
+    # 封面图多 CDN / 多路径回退（2026-09 实测国内均可直连）
+    # 注意：新游戏的图片在 store_item_assets 的 hash 子目录下（.../apps/<id>/<hash>/header.jpg），
+    #       拼固定模板必然 404，所以模板全失败后要用 appdetails 拿官方 header_image 兜底。
     _STEAM_IMG_HOSTS = (
         'https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/header.jpg',
         'https://cdn.akamai.steamstatic.com/steam/apps/{id}/header.jpg',
@@ -879,18 +929,100 @@ class DxbBackend:
         'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg',
         'https://steamcdn-a.akamaihd.net/steam/apps/{id}/header.jpg',
         'https://media.st.dl.eccdnx.com/steam/apps/{id}/header.jpg',
+        # 新游戏 header.jpg 常不存在，以下为同目录回退
+        'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{id}/header_schinese.jpg',
+        'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{id}/capsule_616x353.jpg',
+        'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{id}/capsule_231x87.jpg',
+        'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{id}/library_hero.jpg',
+        'https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/capsule_231x87.jpg',
+        'https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900.jpg',
     )
+
+    # 允许代理的图片域名后缀（避免本地服务被当成任意 URL 转发器）
+    _IMG_ALLOW_SUFFIX = (
+        '.steamstatic.com', '.akamaihd.net', '.eccdnx.com',
+    )
+
+    def _is_allowed_image_url(self, url: str) -> bool:
+        try:
+            from urllib.parse import urlparse
+            u = urlparse(url or '')
+            if u.scheme not in ('http', 'https'):
+                return False
+            host = (u.hostname or '').lower()
+            return any(host == s.lstrip('.') or host.endswith(s) for s in self._IMG_ALLOW_SUFFIX)
+        except Exception:
+            return False
 
     def steam_image_cache_dir(self) -> Path:
         d = self.project_root / 'userdata' / 'img_cache'
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def fetch_steam_image(self, appid: str) -> bytes | None:
-        """抓 Steam 封面图（header.jpg）并落盘缓存。
-        webview 里直连 CDN 经常一片空白（DNS/热链/超时），所以统一由本地服务代理，
-        多个 CDN 依次回退，成功后缓存到 userdata/img_cache 复用。"""
+    def _download_image(self, url: str, cache_file: Path) -> bytes | None:
+        """下载单张图片，成功后写缓存。"""
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        try:
+            import httpx as _httpx
+            with _httpx.Client(verify=False, timeout=15, follow_redirects=True) as cli:
+                r = cli.get(url, headers=headers)
+                if r.status_code == 200 and len(r.content) > 1024:
+                    try:
+                        cache_file.write_bytes(r.content)
+                    except Exception:
+                        pass
+                    return r.content
+        except Exception:
+            return None
+        return None
+
+    def fetch_image_by_url(self, url: str, appid: str = '') -> bytes | None:
+        """按完整 URL 抓图（推荐页的 header_image 用），带域名白名单与落盘缓存。"""
+        if not self._is_allowed_image_url(url):
+            return None
+        key = str(appid or '').strip()
+        if not key or not key.isdigit():
+            key = 'u' + str(abs(hash(url)))[:15]
+        cache = self.steam_image_cache_dir() / f'{key}.jpg'
+        if cache.exists() and cache.stat().st_size > 1024:
+            try:
+                return cache.read_bytes()
+            except Exception:
+                pass
+        return self._download_image(url, cache)
+
+    def _steam_appdetails_one(self, appid: str) -> Dict:
+        """查询单个 appid 的商店详情。
+        ⚠️ appdetails 用逗号一次传多个 appid 会返回 HTTP 400（2026-09 实测），
+           所以这里严格只查单个 appid。失败返回 {}，绝不抛异常。"""
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        try:
+            import httpx as _httpx
+            with _httpx.Client(verify=False, timeout=15) as cli:
+                r = cli.get('https://store.steampowered.com/api/appdetails',
+                            params={'appids': str(appid), 'l': 'schinese', 'cc': 'CN'},
+                            headers=headers)
+                if r.status_code != 200:
+                    return {}
+                val = (r.json() or {}).get(str(appid)) or {}
+                if isinstance(val, dict) and val.get('success'):
+                    return val.get('data') or {}
+        except Exception:
+            return {}
+        return {}
+
+    def fetch_steam_image(self, appid: str, url: str = '') -> bytes | None:
+        """抓 Steam 封面图并落盘缓存。
+        webview 直连 CDN 常一片空白（DNS/热链/超时），统一由本地服务代理：
+          1) 调用方给了 url（推荐页 header_image，含 hash 路径）→ 直接下载
+          2) 模板候选依次回退（老游戏的 header.jpg 一般有效）
+          3) 模板全挂 → appdetails 拿官方 header_image（新游戏只能这样拿到真实地址）
+        """
         appid = str(appid or '').strip()
+        if url:
+            data = self.fetch_image_by_url(url, appid)
+            if data:
+                return data
         if not appid.isdigit():
             return None
         cache = self.steam_image_cache_dir() / f'{appid}.jpg'
@@ -902,11 +1034,11 @@ class DxbBackend:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         try:
             import httpx as _httpx
-            with _httpx.Client(verify=False, timeout=15, follow_redirects=True) as cli:
+            with _httpx.Client(verify=False, timeout=12, follow_redirects=True) as cli:
                 for tpl in self._STEAM_IMG_HOSTS:
-                    url = tpl.format(id=appid)
+                    u = tpl.format(id=appid)
                     try:
-                        r = cli.get(url, headers=headers)
+                        r = cli.get(u, headers=headers)
                         if r.status_code == 200 and len(r.content) > 1024:
                             try:
                                 cache.write_bytes(r.content)
@@ -917,6 +1049,14 @@ class DxbBackend:
                         continue
         except Exception as e:
             self.log.warning(f'获取封面失败 {appid}: {e}')
+        # 模板全失败：用 appdetails 拿官方图片地址
+        info = self._steam_appdetails_one(appid)
+        for key in ('header_image', 'capsule_image', 'capsule_imagev5', 'background'):
+            u = info.get(key)
+            if u:
+                got = self._download_image(u, cache)
+                if got:
+                    return got
         return None
 
     def free_account_info(self, cookie: str) -> Dict:
