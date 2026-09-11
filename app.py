@@ -824,6 +824,15 @@ def steam_image(appid):
     return resp
 
 
+@app.route('/api/recommend')
+def recommend_games():
+    """游戏推荐页数据：特惠 / 热销 / 新品 / 即将推出（Steam 官方 featuredcategories）。"""
+    try:
+        return jsonify(_quick_backend().featured_games())
+    except Exception as e:
+        return jsonify({"success": False, "message": f"获取推荐数据失败: {e}", "sections": []})
+
+
 @app.route('/api/free/games', methods=['GET'])
 def free_games():
     query = request.args.get('q', '').strip()
