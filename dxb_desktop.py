@@ -172,11 +172,12 @@ def load_flask_module():
     return mod
 
 
-def start_flask_server(port):
-    """在子线程里跑本地服务器"""
+def start_flask_server(port, mod=None):
+    """在子线程里跑本地服务器（mod 由主线程加载后传入，避免重复加载）"""
     try:
         os.chdir(USER_DIR)
-        mod = load_flask_module()
+        if mod is None:
+            mod = load_flask_module()
         print(f'[大轩巴] 本地服务器已启动：http://127.0.0.1:{port}')
         mod.socketio.run(
             mod.app,
@@ -203,22 +204,25 @@ def shutdown_server(url):
 # ---------- QT6 绑定（优先 PySide6，其次 PyQt6） ----------
 HAVE_QT = None
 try:
-    from PySide6.QtWidgets import QApplication, QMainWindow, QToolBar, QLabel
+    from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QLabel,
+                                   QWidget, QVBoxLayout)
     from PySide6.QtGui import QAction, QIcon
-    from PySide6.QtCore import QUrl, Qt
+    from PySide6.QtCore import (QUrl, Qt, QObject, QMetaObject, Slot, QTimer)
     from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
     HAVE_QT = 'PySide6'
 except ImportError as e:
     import traceback
     print('[大轩巴] PySide6 加载失败（将尝试 PyQt6）：', type(e).__name__, e)
     traceback.print_exc()
     try:
-        from PyQt6.QtWidgets import QApplication, QMainWindow, QToolBar, QLabel
+        from PyQt6.QtWidgets import (QApplication, QMainWindow, QToolBar, QLabel,
+                                     QWidget, QVBoxLayout)
         from PyQt6.QtGui import QAction, QIcon
-        from PyQt6.QtCore import QUrl, Qt
+        from PyQt6.QtCore import (QUrl, Qt, QObject, QMetaObject, QTimer,
+                                  pyqtSlot as Slot)
         from PyQt6.QtWebEngineWidgets import QWebEngineView
-        from PyQt6.QtWebEngineCore import QWebEnginePage
+        from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
         HAVE_QT = 'PyQt6'
     except ImportError:
         HAVE_QT = None
@@ -226,7 +230,10 @@ except ImportError as e:
 
 # 无 QT 环境时给占位，保证模块仍能 import（此时走浏览器回退分支，不会实例化窗口）
 if HAVE_QT is None:
-    QMainWindow = QWebEngineView = QToolBar = QLabel = QAction = QIcon = QUrl = QWebEnginePage = object
+    QMainWindow = QWebEngineView = QToolBar = QLabel = QAction = QIcon = QUrl = \
+        QWebEnginePage = QWebEngineProfile = QObject = QMetaObject = QWidget = \
+        QVBoxLayout = QTimer = object
+    Slot = lambda *a, **k: (lambda f: f)  # 占位装饰器，无 QT 时不生效
 
 
 class DxbWebPage(QWebEnginePage):
@@ -324,6 +331,110 @@ class DxbWindow(QMainWindow):
         event.accept()
 
 
+# ---------- 沉默（内置）浏览器登录 Steam ----------
+class DxbLoginBridge(QObject):
+    """住在主线程的桥。Flask 线程调用 launcher 时，通过 QueuedConnection
+    把“打开登录窗口”派发到主线程执行（Qt 控件只能在主线程创建/显示）。"""
+    def __init__(self, flask_mod):
+        super().__init__()
+        self.flask_mod = flask_mod
+        self._login_win = None
+
+    @Slot()
+    def open_login(self):
+        if self._login_win is None or not self._login_win.isVisible():
+            self._login_win = DxbLoginWindow(self.flask_mod, self)
+            self._login_win.show()
+        else:
+            self._login_win.raise_()
+            self._login_win.activateWindow()
+
+
+class DxbLoginWindow(QMainWindow):
+    """用持久 profile 的独立窗口加载 Steam 登录页。登录成功后从 cookieStore
+    抓取 steamLoginSecure 回调 app.steam_login_succeeded；失败回调 steam_login_failed。"""
+    def __init__(self, flask_mod, parent=None):
+        super().__init__(parent)
+        self.flask_mod = flask_mod
+        self._cookies = {}
+        self._done = False
+        self.setWindowTitle('大轩巴 · 登录 Steam')
+        self.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
+        self.resize(1040, 720)
+        self.setStyleSheet(
+            'QMainWindow{background:#0b0b0b;}'
+            'QToolBar{background:#0b0b0b;border:none;spacing:6px;}'
+            'QLabel{color:#f1c40f;font-weight:700;font-size:14px;padding:6px 10px;}'
+            'QToolButton{color:#f3f3f3;background:#1a1a1a;border:none;'
+            'padding:6px 12px;border-radius:8px;}'
+            'QToolButton:hover{background:#262626;}'
+        )
+
+        # 专用持久 profile：Steam 登录态跨启动保留，不必每次重登
+        self.profile = QWebEngineProfile('dxb_steam_profile')
+        try:
+            self.profile.setStoragePath(str(USER_DIR / 'steambrowser_profile'))
+        except Exception:
+            pass
+        self.page = QWebEnginePage(self.profile, self)
+        self.view = QWebEngineView()
+        self.view.setPage(self.page)
+        self.setCentralWidget(self.view)
+
+        tb = QToolBar('导航')
+        tb.setMovable(False)
+        self.addToolBar(tb)
+        self._add_action(tb, '刷新', lambda: self.view.reload())
+        self._add_action(tb, '关闭', self.close)
+        self._status = QLabel('请在大轩巴内置浏览器中登录 Steam，登录成功后会自动返回主程序。')
+        tb.addWidget(self._status)
+
+        # 捕获 Cookie：steamLoginSecure 出现即视为登录成功
+        store = self.profile.cookieStore()
+        store.cookieAdded.connect(self._on_cookie)
+        store.loadAllCookies()   # 把已存的 Cookie 重新派发出来（含持久化登录态）
+        self.view.setUrl(QUrl('https://store.steampowered.com/login/'))
+
+    def _add_action(self, tb, text, slot):
+        a = QAction(text, self)
+        a.triggered.connect(slot)
+        tb.addAction(a)
+
+    def _on_cookie(self, cookie):
+        try:
+            name = cookie.name().data().decode('utf-8', 'replace')
+            value = cookie.value().data().decode('utf-8', 'replace')
+        except Exception:
+            return
+        self._cookies[name] = value
+        if name == 'steamLoginSecure' and not self._done:
+            self._done = True
+            # 等一小会儿让同一批次的 sessionid 等一并到达，再收口
+            QTimer.singleShot(700, self._finish)
+
+    def _finish(self):
+        header = '; '.join(f'{k}={v}' for k, v in self._cookies.items())
+        ok = False
+        try:
+            res = self.flask_mod.steam_login_succeeded(header)
+            ok = bool(res and res.get('success'))
+        except Exception as e:
+            try:
+                self.flask_mod.steam_login_failed(str(e))
+            except Exception:
+                pass
+        if ok:
+            self._status.setText('登录成功，正在返回主程序…')
+            self.view.setEnabled(False)
+            QTimer.singleShot(1500, self.close)
+        else:
+            self._status.setText('登录态无效或读取账号失败，请重试，或改用“手动粘贴 Cookie”。')
+            self._done = False  # 允许再次捕获
+
+    def closeEvent(self, event):
+        event.accept()
+
+
 def main():
     setup_logging()
     # 冻结环境显式指向 QT 平台插件目录，避免找不到 qwindows 导致窗口创建失败
@@ -338,7 +449,16 @@ def main():
     print(f'[大轩巴] 数据目录：{USER_DIR}')
     print(f'[大轩巴] 资源目录：{RESOURCE_DIR}')
 
-    server_thread = threading.Thread(target=start_flask_server, args=(port,), daemon=True)
+    # 主线程先加载 Flask 模块，便于注入内置浏览器登录 launcher 与共享给后台线程
+    try:
+        mod = load_flask_module()
+    except Exception as e:
+        print('[大轩巴] Flask 模块加载失败，无法启动：', e)
+        import traceback
+        traceback.print_exc()
+        return
+
+    server_thread = threading.Thread(target=start_flask_server, args=(port, mod), daemon=True)
     server_thread.start()
 
     if HAVE_QT is None:
@@ -360,6 +480,14 @@ def main():
     app.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
     win = DxbWindow(url)
     win.show()
+
+    # 注入“沉默浏览器登录 Steam”launcher：由主线程的桥在 GUI 线程打开登录窗口
+    if hasattr(mod, 'register_steam_login_launcher'):
+        bridge = DxbLoginBridge(mod)
+        mod.register_steam_login_launcher(
+            lambda: QMetaObject.invokeMethod(bridge, 'open_login', Qt.QueuedConnection)
+        )
+
     app.exec()
     shutdown_server(url)
     os._exit(0)

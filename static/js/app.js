@@ -58,13 +58,55 @@ class DxbWebApp {
         this.initializeEventListeners();
         this.initializeBackend();
         this.setupMutationObserver();
+
+        // 日志/任务状态跨页持久：切走再回来，任务继续跑，日志与进度原样恢复
+        if (window.DxbTaskLog) {
+            window.DxbTaskLog.mount(this.elements.progressContainer, (status) => this.applyTaskState(status));
+            this.restoreUiState();
+        }
     }
 
     initializeSocket() {
-        this.socket = io();
+        // socket.io 走的是公网 CDN，国内可能加载失败；失败也不能影响页面其它功能
+        if (typeof io !== 'function') {
+            console.warn('socket.io 未加载，改用轮询获取日志。');
+            return;
+        }
+        try {
+            this.socket = io();
+        } catch (e) {
+            console.warn('socket 连接失败，改用轮询：', e);
+            return;
+        }
         this.socket.on('connect', () => console.log('Connected to server.'));
         this.socket.on('disconnect', () => this.showSnackbar('Disconnected from server.', 'error'));
-        this.socket.on('task_progress', (data) => this.addLogEntry(data.type, data.message));
+        // 有新日志时触发一次同步（内容以服务端缓冲为准，天然去重）
+        this.socket.on('task_progress', () => {
+            if (window.DxbTaskLog) window.DxbTaskLog.triggerSync();
+        });
+    }
+
+    /** 根据服务端任务状态恢复界面（切换页面回来时不重启任务、不丢进度） */
+    applyTaskState(status) {
+        if (status === 'running') {
+            this.taskStatus = 'running';
+            this.setFormDisabled(true);
+        } else if (this.taskStatus === 'running') {
+            this.taskStatus = 'idle';
+            this.setFormDisabled(false);
+        }
+    }
+
+    async restoreUiState() {
+        try {
+            const r = await fetch('/api/task_status');
+            const d = await r.json();
+            if (d && d.status === 'running') {
+                this.taskStatus = 'running';
+                this.setFormDisabled(true);
+                this.elements.progressContainer.scrollTop = this.elements.progressContainer.scrollHeight;
+            }
+        } catch (e) { /* ignore */ }
     }
 
     initializeEventListeners() {
@@ -448,7 +490,7 @@ class DxbWebApp {
 
         this.taskStatus = 'running';
         this.setFormDisabled(true);
-        this.elements.progressContainer.innerHTML = '';
+        this.newTaskLog();
         this.addLogEntry('info', `--- 开始下载创意工坊资源: '${this.currentAppId}' ---`);
 
         try {
@@ -530,7 +572,7 @@ class DxbWebApp {
             this.elements.searchResultsContainer.innerHTML = '';
         }
         
-        this.elements.progressContainer.innerHTML = '';
+        this.newTaskLog();
         this.addLogEntry('info', `--- 开始为 '${this.currentAppId}' 执行任务 (源: ${toolType}) ---`);
     
         try {
@@ -617,11 +659,19 @@ class DxbWebApp {
         this.elements.unlockBtn.disabled = true;
     }
 
+    /** 新任务开始：清掉上一轮日志（含跨页快照） */
+    newTaskLog() {
+        if (window.DxbTaskLog) { window.DxbTaskLog.clear(); return; }
+        this.elements.progressContainer.innerHTML = '';
+    }
+
     clearLogs() {
+        if (window.DxbTaskLog) { window.DxbTaskLog.clear(); return; }
         this.elements.progressContainer.innerHTML = `<div class="progress-placeholder"> <span class="material-icons">info</span> <p>等待任务开始...</p> </div>`;
     }
 
     addLogEntry(type, message) {
+        if (window.DxbTaskLog) { window.DxbTaskLog.appendLocal(type, message); return; }
         const placeholder = this.elements.progressContainer.querySelector('.progress-placeholder');
         if (placeholder) { this.elements.progressContainer.innerHTML = ''; }
         const div = document.createElement('div');

@@ -612,7 +612,8 @@ body.dark-theme .status-item.warning .status-icon { color: var(--md-sys-color-wa
 .progress-container {
   background-color: var(--md-sys-color-surface);
   border-radius: var(--md-sys-shape-corner-small);
-  height: 300px;
+  height: 240px;
+  max-height: 46vh;
   overflow-y: auto;
   border: 1px solid var(--md-sys-color-outline-variant);
   transition: background-color 0.3s ease, border-color 0.3s ease;
@@ -898,62 +899,54 @@ body:not(.dark-theme) .log-entry.warning {
   font-size: 20px;
 }
 
-/* Desktop Layout Adjustments */
+/* Desktop Layout Adjustments
+   注意：这里以前给 .main-content 写死了 grid-template-rows（300px 460px）并给卡片写死
+   height，只要卡片内容比固定高度高就直接被裁掉（手搓页的 textarea 就是被这样切掉的），
+   同时整页被撑到 1100px+ 又不好滚。现在改成：卡片高度自适应 + 内容区内部滚动。 */
 @media (min-width: 1024px) {
   .main-content {
-    grid-template-columns: 1fr 1fr;
-    /* <<-- MODIFIED RULE -->> */
-    grid-template-rows: 300px 460px;
-    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto;
+    align-items: start;
   }
-  
-  .config-card {
-    grid-column: 1 / 2;
-    grid-row: 1 / 2;
-    height: 300px;
-    display: flex;
-    flex-direction: column;
+
+  /* 单列页面（手搓 / 推荐 等）：铺满一行、高度自适应 */
+  .main-content.single-column {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
   }
-  
-  .search-card {
-    grid-column: 1 / 2;
-    grid-row: 2 / 3;
-    /* <<-- MODIFIED RULE -->> */
-    height: 460px;
-    display: flex;
-    flex-direction: column;
-  }
-  
-  .unlock-card {
-    grid-column: 2 / 3;
-    grid-row: 1 / 3;
-    /* <<-- MODIFIED RULE -->> */
-    height: 784px; /* 300 + 460 + 24 */
-    display: flex;
-    flex-direction: column;
-  }
-  
+
+  .config-card,
+  .search-card,
+  .unlock-card,
   .progress-card {
-    grid-column: 1 / -1;
-    grid-row: 3 / 4;
-    height: 300px;
+    height: auto;
     display: flex;
     flex-direction: column;
   }
-  
+
+  .config-card { grid-column: 1 / 2; grid-row: 1 / 2; min-height: 0; }
+  .search-card { grid-column: 1 / 2; grid-row: 2 / 3; min-height: 320px; }
+  .unlock-card { grid-column: 2 / 3; grid-row: 1 / 3; min-height: 420px; }
+  .progress-card { grid-column: 1 / -1; grid-row: 3 / 4; min-height: 0; }
+
+  /* 内容区内部滚动，避免整页被撑长 */
   .config-card .card-content {
     flex-grow: 1;
     overflow-y: auto;
+    max-height: 300px;
   }
-  
+
   .search-card .card-content {
     flex-grow: 1;
-    overflow-y: hidden;
+    overflow-y: auto;
+    max-height: 420px;
   }
-  
+
   .unlock-card .card-content {
     flex-grow: 1;
-    overflow-y: hidden;
+    overflow-y: auto;
+    max-height: 520px;
   }
 }
 

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>游戏推荐 - 大轩巴入库器mini</title>
+    <link rel="icon" href="{{ url_for('static', filename='dxb-word.svg') }}" type="image/svg+xml"/>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/manager.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dx-theme.css') }}">
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('dxb-theme-preference') || 'dark';
+                document.documentElement.classList.add(t === 'dark' ? 'dxb-dark' : 'dxb-light');
+            } catch (e) {
+                document.documentElement.classList.add('dxb-dark');
+            }
+        })();
+    </script>
+</head>
+<body>
+<div id="background-overlay"></div>
+<div class="app-container">
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <span class="dxb-wordmark">大轩巴</span>
+            <div class="sidebar-version">入库器mini</div>
+        </div>
+        <nav class="sidebar-nav">
+            <a class="nav-item" href="/">
+                <span class="material-icons">home</span><span>首页</span>
+            </a>
+            <a class="nav-item" href="/manager">
+                <span class="material-icons">library_books</span><span>入库管理</span>
+            </a>
+            <a class="nav-item" href="/craft"><span class="material-icons">auto_fix_high</span><span>手搓</span></a>
+            <a class="nav-item" href="/free"><span class="material-icons">card_giftcard</span><span>免费游戏</span></a>
+            <a class="nav-item active" href="/recommend"><span class="material-icons">local_fire_department</span><span>推荐</span></a>
+            <a class="nav-item" href="/settings">
+                <span class="material-icons">settings</span><span>设置</span>
+            </a>
+            <a class="nav-item" href="/about">
+                <span class="material-icons">info</span><span>关于</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <button class="nav-action" id="themeToggleBtn" title="切换主题"><span class="material-icons">dark_mode</span></button>
+            <button class="nav-action" id="backgroundSettingsBtn" title="自定义背景"><span class="material-icons">wallpaper</span></button>
+            <button class="nav-action" id="shutdownBtn" title="关闭应用"><span class="material-icons">power_settings_new</span></button>
+        </div>
+    </aside>
+    <div class="content-area">
+        <header class="content-header">
+            <span class="dxb-wordmark">大轩巴</span>
+            <h1 class="app-title">游戏推荐</h1>
+        </header>
+        <main class="recommend-main">
+            <div class="manager-toolbar">
+                <div class="toolbar-section">
+                    <span class="material-icons">local_fire_department</span>
+                    <span class="toolbar-title">Steam 官方推荐</span>
+                </div>
+                <button class="btn btn-primary" id="recRefreshBtn"><span class="material-icons">refresh</span> 刷新</button>
+            </div>
+            <div class="grid-view-container">
+                <div class="loading-overlay" id="recLoading" style="display:none"><div class="loading">正在加载推荐...</div></div>
+                <div id="recSections"></div>
+                <div id="recNoResults" class="no-results" style="display:none"></div>
+            </div>
+        </main>
+    </div>
+</div>
+
+<div class="snackbar" id="snackbar">
+    <div class="snackbar-content">
+        <span id="snackbarMessage"></span>
+        <button class="snackbar-action" id="snackbarClose"><span class="material-icons">close</span></button>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
+<script src="{{ url_for('static', filename='js/recommend.js') }}"></script>
+<script src="{{ url_for('static', filename='js/background-manager.js') }}"></script>
+</body>
+</html>

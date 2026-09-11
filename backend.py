@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.8"  # 当前版本号
+CURRENT_VERSION = "2.9"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -833,6 +833,91 @@ class DxbBackend:
         except Exception as e:
             self.log.error(f"获取免费游戏失败: {self.stack_error(e)}")
             return {"success": False, "message": f"获取免费游戏失败: {e}", "games": [], "total": 0}
+
+    def featured_games(self) -> Dict:
+        """游戏推荐页数据：特惠 / 热销 / 新品 / 即将推出（Steam 官方 featuredcategories）。"""
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        sections_meta = [("specials", "今日特惠"), ("top_sellers", "热销榜"),
+                         ("new_releases", "新品上架"), ("coming_soon", "即将推出")]
+        try:
+            import httpx as _httpx
+            with _httpx.Client(verify=False, timeout=25) as cli:
+                r = cli.get("https://store.steampowered.com/api/featuredcategories",
+                            params={'cc': 'CN', 'l': 'schinese'}, headers=headers)
+                r.raise_for_status()
+                js = r.json()
+            sections = []
+            for key, title in sections_meta:
+                items = (js.get(key) or {}).get('items') or []
+                games = []
+                for it in items:
+                    appid = str(it.get('id') or '').strip()
+                    if not appid.isdigit():
+                        continue
+                    games.append({
+                        "appid": appid,
+                        "name": (it.get('name') or '').strip(),
+                        "discount_percent": it.get('discount_percent') or 0,
+                        "original_price": it.get('original_price'),
+                        "final_price": it.get('final_price'),
+                        "currency": it.get('currency') or 'CNY',
+                    })
+                if games:
+                    sections.append({"key": key, "title": title, "games": games})
+            if not sections:
+                return {"success": False, "message": "未获取到推荐数据，请检查网络。", "sections": []}
+            return {"success": True, "sections": sections}
+        except Exception as e:
+            self.log.error(f"获取推荐数据失败: {self.stack_error(e)}")
+            return {"success": False, "message": f"获取推荐数据失败: {e}", "sections": []}
+
+    # 封面图多 CDN 回退顺序（2026-09 实测国内均可直连）
+    _STEAM_IMG_HOSTS = (
+        'https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/header.jpg',
+        'https://cdn.akamai.steamstatic.com/steam/apps/{id}/header.jpg',
+        'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg',
+        'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg',
+        'https://steamcdn-a.akamaihd.net/steam/apps/{id}/header.jpg',
+        'https://media.st.dl.eccdnx.com/steam/apps/{id}/header.jpg',
+    )
+
+    def steam_image_cache_dir(self) -> Path:
+        d = self.project_root / 'userdata' / 'img_cache'
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def fetch_steam_image(self, appid: str) -> bytes | None:
+        """抓 Steam 封面图（header.jpg）并落盘缓存。
+        webview 里直连 CDN 经常一片空白（DNS/热链/超时），所以统一由本地服务代理，
+        多个 CDN 依次回退，成功后缓存到 userdata/img_cache 复用。"""
+        appid = str(appid or '').strip()
+        if not appid.isdigit():
+            return None
+        cache = self.steam_image_cache_dir() / f'{appid}.jpg'
+        if cache.exists() and cache.stat().st_size > 1024:
+            try:
+                return cache.read_bytes()
+            except Exception:
+                pass
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        try:
+            import httpx as _httpx
+            with _httpx.Client(verify=False, timeout=15, follow_redirects=True) as cli:
+                for tpl in self._STEAM_IMG_HOSTS:
+                    url = tpl.format(id=appid)
+                    try:
+                        r = cli.get(url, headers=headers)
+                        if r.status_code == 200 and len(r.content) > 1024:
+                            try:
+                                cache.write_bytes(r.content)
+                            except Exception:
+                                pass
+                            return r.content
+                    except Exception:
+                        continue
+        except Exception as e:
+            self.log.warning(f'获取封面失败 {appid}: {e}')
+        return None
 
     def free_account_info(self, cookie: str) -> Dict:
         """用 steamLoginSecure cookie 获取账号名/头像/钱包余额。"""
@@ -2674,19 +2759,40 @@ class DxbBackend:
             return False
 
     async def _get_from_mirrors(self, sha: str, path: str, repo: str) -> bytes:
-        urls = [f'https://raw.githubusercontent.com/{repo}/{sha}/{path}']
-        if os.environ.get('IS_CN') == 'yes':
-            urls = [f'https://gh-proxy.org/https://github.com/{repo}/{sha}/{path}',f'https://cdn.gh-proxy.org/https://github.com/{repo}/{sha}/{path}',f'https://edgeone.gh-proxy.org/https://github.com/{repo}/{sha}/{path}',f'https://github.chenc.dev/github.com/{repo}/{sha}/{path}',f'https://fastgit.cc/https://github.com/{repo}/{sha}/{path}',f'https://gh.llkk.cc/https://github.com/{repo}/{sha}/{path}',f'https://gh.akass.cn/{repo}/{sha}/{path}',f'https://raw.githubusercontent.com/{repo}/{sha}/{path}']
+        """按可用性排序依次尝试下载。
+        2026-09 实测：raw.githubusercontent.com 与 jsdelivr(cdn/fastly/gcore) 在国内可用，
+        而 gh-proxy.org / cdn.gh-proxy.org / edgeone / fastgit / gh.llkk.cc / gh.akass.cn
+        这些老代理全部超时或 404，所以把它们放到末尾做兜底。"""
+        urls = [
+            # 直连（实测国内可通）
+            f'https://raw.githubusercontent.com/{repo}/{sha}/{path}',
+            # jsDelivr 三个节点，国内基本稳定
+            f'https://cdn.jsdelivr.net/gh/{repo}@{sha}/{path}',
+            f'https://fastly.jsdelivr.net/gh/{repo}@{sha}/{path}',
+            f'https://gcore.jsdelivr.net/gh/{repo}@{sha}/{path}',
+            # 现役可用代理
+            f'https://gh-proxy.com/https://raw.githubusercontent.com/{repo}/{sha}/{path}',
+            f'https://ghps.cc/https://github.com/{repo}/{sha}/{path}',
+            f'https://ghproxy.cn/https://raw.githubusercontent.com/{repo}/{sha}/{path}',
+            f'https://ghproxy.net/https://raw.githubusercontent.com/{repo}/{sha}/{path}',
+            # 兜底（可能已失效）
+            f'https://gh-proxy.org/https://github.com/{repo}/{sha}/{path}',
+            f'https://edgeone.gh-proxy.org/https://github.com/{repo}/{sha}/{path}',
+            f'https://cdn.gh-proxy.org/https://github.com/{repo}/{sha}/{path}',
+        ]
+        last_error = ''
         for url in urls:
             try:
                 r = await self.client.get(url, timeout=30)
                 if r.status_code == 200:
                     self.log.info(f'下载成功: {path} (来自 {url.split("/")[2]})')
                     return r.content
-                self.log.error(f'下载失败: {path} (来自 {url.split("/")[2]}) - 状态码: {r.status_code}')
+                last_error = f'状态码: {r.status_code}'
+                self.log.error(f'下载失败: {path} (来自 {url.split("/")[2]}) - {last_error}')
             except httpx.RequestError as e:
-                self.log.error(f'下载失败: {path} (来自 {url.split("/")[2]}) - 错误: {e}')
-        raise Exception(f'尝试所有镜像后仍无法下载文件: {path}')
+                last_error = f'错误: {type(e).__name__}'
+                self.log.error(f'下载失败: {path} (来自 {url.split("/")[2]}) - {last_error}')
+        raise Exception(f'尝试所有镜像后仍无法下载文件: {path}（最后错误 {last_error}）')
 
     async def greenluma_add(self, depot_id_list: list) -> bool:
         app_list_path = self.steam_path / 'AppList'

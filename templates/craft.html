@@ -34,6 +34,7 @@
             <a class="nav-item" href="/manager"><span class="material-icons">library_books</span><span>入库管理</span></a>
             <a class="nav-item active" href="/craft"><span class="material-icons">auto_fix_high</span><span>手搓</span></a>
             <a class="nav-item" href="/free"><span class="material-icons">card_giftcard</span><span>免费游戏</span></a>
+            <a class="nav-item" href="/recommend"><span class="material-icons">local_fire_department</span><span>推荐</span></a>
             <a class="nav-item" href="/settings"><span class="material-icons">settings</span><span>设置</span></a>
             <a class="nav-item" href="/about"><span class="material-icons">info</span><span>关于</span></a>
         </nav>
@@ -71,7 +72,7 @@
                             <span class="material-icons">download</span> 下载
                         </button>
                     </div>
-                    <textarea class="lua-preview" id="luaPreview" readonly placeholder="生成结果将显示在这里..." style="min-height: 320px;"></textarea>
+                    <textarea class="lua-preview" id="luaPreview" readonly placeholder="生成结果将显示在这里..."></textarea>
                 </div>
             </div>
 
@@ -104,6 +105,7 @@
 </div>
 
 <script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
+<script src="{{ url_for('static', filename='js/task-log.js') }}"></script>
 <script src="{{ url_for('static', filename='js/craft.js') }}"></script>
 <script src="{{ url_for('static', filename='js/background-manager.js') }}"></script>
 </body>

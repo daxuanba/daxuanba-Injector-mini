@@ -15,7 +15,10 @@ class DxbCraftPage {
             snackbarMessage: document.getElementById('snackbarMessage'),
             snackbarClose: document.getElementById('snackbarClose'),
         };
+        // 手搓日志走本地持久化：切到别的页面再回来，日志还在
+        this.store = window.DxbTaskLog ? window.DxbTaskLog.local('craft') : null;
         this.bind();
+        if (this.store) this.store.mount(this.elements.progressContainer);
     }
 
     bind() {
@@ -23,12 +26,14 @@ class DxbCraftPage {
         this.elements.luaImportBtn.addEventListener('click', () => this.importLua());
         this.elements.luaDownloadBtn.addEventListener('click', () => this.downloadLua());
         this.elements.clearLogBtn.addEventListener('click', () => {
+            if (this.store) { this.store.clear(); return; }
             this.elements.progressContainer.innerHTML = '<div class="progress-placeholder"><span class="material-icons">info</span><p>等待任务开始...</p></div>';
         });
         this.elements.snackbarClose.addEventListener('click', () => this.hideSnackbar());
     }
 
     log(type, msg) {
+        if (this.store) { this.store.append(type, msg); return; }
         const box = this.elements.progressContainer;
         const ph = box.querySelector('.progress-placeholder');
         if (ph) box.innerHTML = '';

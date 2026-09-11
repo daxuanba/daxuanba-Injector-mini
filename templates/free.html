@@ -40,6 +40,9 @@
             <a class="nav-item" href="/free">
                 <span class="material-icons">card_giftcard</span><span>免费游戏</span>
             </a>
+            <a class="nav-item" href="/recommend">
+                <span class="material-icons">local_fire_department</span><span>推荐</span>
+            </a>
             <a class="nav-item" href="/settings">
                 <span class="material-icons">settings</span><span>设置</span>
             </a>
@@ -68,12 +71,16 @@
                         <span id="accountBalance" class="account-balance"></span>
                     </div>
                     <div class="account-login" id="accountLogin">
-                        <input type="text" id="cookieInput" class="text-field" placeholder="粘贴 steamLoginSecure Cookie 以读取头像/余额">
-                        <button class="btn btn-primary" id="loginBtn"><span class="material-icons">login</span> 登录</button>
+                        <button class="btn btn-primary" id="loginBtn"><span class="material-icons">login</span> 用内置浏览器登录</button>
+                        <button class="btn btn-text" id="manualToggleBtn">手动粘贴</button>
                         <button class="btn btn-text" id="logoutBtn" style="display:none">退出</button>
                     </div>
                 </div>
-                <div class="input-helper">余额与头像需登录态。Cookie 仅保存在本地 config.json，请自行保管，关闭应用即清除登录态。</div>
+                <div class="account-manual" id="cookieManual">
+                    <input type="text" id="cookieInput" class="text-field" placeholder="粘贴 steamLoginSecure Cookie">
+                    <button class="btn btn-secondary" id="cookieSubmitBtn"><span class="material-icons">sync</span> 读取</button>
+                </div>
+                <div class="input-helper" id="loginHelper">点“用内置浏览器登录”会在应用内置窗口打开 Steam 登录页，登录后自动读取账号名/头像/余额；登录态只存在本机。</div>
             </div>
 
             <div class="card manager-card">

@@ -12,7 +12,7 @@ from pathlib import Path
 import json as standard_json
 import winreg
 import shutil
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 from flask_socketio import SocketIO, emit
 
 import tkinter as tk
@@ -132,6 +132,63 @@ def patch_log_for_socketio(logger):
     logger.info, logger.warning, logger.error, logger.debug = create_handler(original_info, "info"), create_handler(original_warning, "warning"), create_handler(original_error, "error"), create_handler(original_debug, "debug")
     setattr(logger, '_is_patched_by_web', True)
 
+
+def _quick_backend():
+    """轻量后端：只读配置 + 日志，不做完整 initialize（给不需要异步初始化的接口用）。"""
+    b = DxbBackend()
+    b.log = logging.getLogger(' 大轩巴入库器mini')
+    try:
+        b.config = b._load_config_sync() or {}
+    except Exception:
+        b.config = {}
+    return b
+
+
+# ---------------- 沉默浏览器登录 Steam ----------------
+# 桌面壳（dxb_desktop.py）启动时注入 launcher；无 GUI 环境则降级为手动粘贴 Cookie。
+STEAM_LOGIN = {
+    "available": False,   # 桌面壳是否注入内置浏览器登录
+    "status": "idle",     # idle | waiting | success | error
+    "message": "",
+    "account": None,
+}
+_steam_login_launcher = None
+
+
+def register_steam_login_launcher(fn):
+    """由桌面壳在启动时注入。fn() 负责打开内置浏览器登录窗口（非阻塞）。"""
+    global _steam_login_launcher
+    _steam_login_launcher = fn if callable(fn) else None
+    STEAM_LOGIN["available"] = _steam_login_launcher is not None
+
+
+def steam_login_failed(message: str):
+    STEAM_LOGIN["status"] = "error"
+    STEAM_LOGIN["message"] = message or "登录失败。"
+
+
+def steam_login_succeeded(cookie: str):
+    """桌面壳抓到 steamLoginSecure 后回调：落盘 Cookie 并读取账号信息。"""
+    cookie = (cookie or '').strip()
+    if not cookie or 'steamLoginSecure' not in cookie:
+        steam_login_failed('未能从内置浏览器读到登录态，请重新登录。')
+        return {"success": False, "message": STEAM_LOGIN["message"]}
+    account = _quick_backend().free_account_info(cookie)
+    if not account.get('success'):
+        steam_login_failed(account.get('message') or 'Cookie 无效或已过期。')
+        return {"success": False, "message": STEAM_LOGIN["message"]}
+    try:
+        b = _quick_backend()
+        cfg = b._load_config_sync() or {}
+        cfg['steam_cookie'] = cookie
+        b._save_config_sync(cfg)
+    except Exception:
+        pass
+    STEAM_LOGIN["account"] = account
+    STEAM_LOGIN["status"] = "success"
+    STEAM_LOGIN["message"] = "已登录：" + (account.get('name') or 'Steam 账号')
+    return {"success": True, "account": account}
+
 # --- HTML Page Routes ---
 @app.route('/')
 def index(): return render_template('index.html')
@@ -148,6 +205,10 @@ def manager_page():
     return render_template('manager.html')
 
 # NEW: 手搓独立页面
+@app.route('/recommend')
+def recommend_page():
+    return render_template('recommend.html')
+
 @app.route('/craft')
 def craft_page():
     return render_template('craft.html')
@@ -684,7 +745,10 @@ def start_workshop_task():
 
 @app.route('/api/task_status')
 def get_task_status():
-    return jsonify({"status": TASK_STATE["status"], "progress": TASK_STATE["progress"][-20:], "result": TASK_STATE["result"]})
+    """任务状态 + 完整日志缓冲（切换页面回来后据此还原日志与进度，不重跑任务）。"""
+    return jsonify({"status": TASK_STATE["status"],
+                    "progress": TASK_STATE["progress"][-400:],
+                    "result": TASK_STATE["result"]})
 
 # --- NEW: File Manager API ---
 @app.route('/api/manager/files', methods=['GET'])
@@ -721,6 +785,45 @@ def get_installed_games():
                         "games": [], "others": [], "total": 0, "dlc_total": 0})
 
 # --- 免费游戏页 API ---
+@app.route('/api/steam/login/start', methods=['POST'])
+def steam_login_start():
+    """拉起内置（沉默）浏览器登录 Steam。"""
+    if _steam_login_launcher is None:
+        STEAM_LOGIN["available"] = False
+        return jsonify({"success": False, "available": False,
+                        "message": "当前环境没有内置浏览器，请手动粘贴 Cookie 登录。"})
+    STEAM_LOGIN["status"] = "waiting"
+    STEAM_LOGIN["message"] = "已打开登录窗口，请在窗口里完成 Steam 登录。"
+    STEAM_LOGIN["account"] = None
+    try:
+        _steam_login_launcher()
+    except Exception as e:
+        steam_login_failed(f"打开登录窗口失败: {e}")
+        return jsonify({"success": False, "available": True, "message": STEAM_LOGIN["message"]})
+    return jsonify({"success": True, "available": True, "message": STEAM_LOGIN["message"]})
+
+
+@app.route('/api/steam/login/status')
+def steam_login_status():
+    return jsonify({"success": True, "available": STEAM_LOGIN["available"],
+                    "status": STEAM_LOGIN["status"], "message": STEAM_LOGIN["message"],
+                    "account": STEAM_LOGIN["account"]})
+
+
+@app.route('/api/steam/img/<appid>')
+def steam_image(appid):
+    """封面图本地代理：多 CDN 回退 + 落盘缓存，解决 webview 直连 CDN 空白。"""
+    try:
+        data = _quick_backend().fetch_steam_image(appid)
+    except Exception:
+        data = None
+    if not data:
+        return Response(status=404)
+    resp = Response(data, mimetype='image/jpeg')
+    resp.headers['Cache-Control'] = 'public, max-age=604800'
+    return resp
+
+
 @app.route('/api/free/games', methods=['GET'])
 def free_games():
     query = request.args.get('q', '').strip()
