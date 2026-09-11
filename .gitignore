@@ -14,4 +14,6 @@ _wheels/
 *.spec
 config.json
 build_log.txt
+build_v*_log.txt
+build_v*/
 push_log.txt
