@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.10"  # 当前版本号
+CURRENT_VERSION = "2.11"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -637,18 +637,38 @@ class DxbBackend:
             f.write(json.dumps(config, ensure_ascii=False, indent=2))
 
     def get_steam_path(self) -> Path | None:
+        """定位 Steam 安装目录。多路探测，任一命中即可：
+        自定义路径 → 注册表(HKCU/HKLM 32+64) → 常见默认位置。
+        单一来源失败就整体“识别不出来”，所以必须逐个兜底。"""
+        # 1) 用户手工指定的路径优先（存在才用，否则继续自动探测）
         try:
-            custom_steam_path = self.config.get("Custom_Steam_Path", "").strip()
-            if custom_steam_path:
-                self.log.info(f"正使用配置文件中的自定义Steam路径: {custom_steam_path}")
-                return Path(custom_steam_path)
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Valve\Steam')
-            steam_path, _ = winreg.QueryValueEx(key, 'SteamPath')
-            winreg.CloseKey(key)
-            return Path(steam_path)
+            custom = str(self.config.get("Custom_Steam_Path") or "").strip()
+            if custom:
+                p = Path(custom)
+                if p.exists():
+                    return p
+                self.log.warning(f"配置里的 Steam 路径不存在：{custom}，继续自动探测。")
         except Exception:
-            self.log.error(f'获取Steam路径失败。请检查Steam是否正确安装，或在config.json中设置Custom_Steam_Path。')
-            return None
+            pass
+        # 2) 注册表
+        for cand in self._steam_registry_paths():
+            try:
+                p = Path(cand)
+                if p.exists():
+                    return p
+            except Exception:
+                continue
+        # 3) 常见安装位置兜底（注册表被清过、绿色版 Steam 都靠这一步救回来）
+        for cand in (r'C:\Program Files (x86)\Steam', r'C:\Program Files\Steam',
+                     r'D:\Steam', r'E:\Steam', r'D:\Program Files (x86)\Steam'):
+            try:
+                p = Path(cand)
+                if (p / 'steam.exe').exists():
+                    return p
+            except Exception:
+                continue
+        self.log.error('获取Steam路径失败。请检查Steam是否正确安装，或在设置页手动指定 Steam 路径。')
+        return None
 
     def get_steam_status(self) -> Dict:
         """检测 Steam 路径与已安装内核，供首页状态条显示。
@@ -775,12 +795,21 @@ class DxbBackend:
         返回 {games:[{appid,name,dlcs:[{appid,name}]}], others:[...], total, dlc_total}。"""
         sp = self.get_steam_path()
         if not sp or not sp.exists():
-            return {"success": False, "message": "未找到 Steam 路径，请在设置中配置。",
-                    "games": [], "others": [], "total": 0, "dlc_total": 0}
+            return {"success": False, "message": "未找到 Steam 路径，请在设置里指定 Steam 目录。",
+                    "games": [], "others": [], "total": 0, "dlc_total": 0,
+                    "libraries": self._steam_registry_paths(),
+                    "hint": "自动探测没找到 Steam。请到「设置」页填写 Steam 安装目录（例如 D:\\Steam）。"}
+        roots = self._steam_library_roots(sp)
         installed = self._scan_installed_manifests(sp)
         if not installed:
             return {"success": True, "games": [], "others": [], "total": 0, "dlc_total": 0,
-                    "message": "未检测到已安装的应用。", "steam_path": str(sp)}
+                    "message": "未检测到已安装的应用。", "steam_path": str(sp),
+                    "libraries": [str(r) for r in roots],
+                    "hint": ("已扫描的库目录：" + "；".join(str(r) for r in roots) +
+                             "。如果 Steam 里明明装了游戏，请检查：① 游戏是否装在别的盘"
+                             "（正常情况下本程序会自动读取 libraryfolders.vdf）；"
+                             "② 是否有权限读取（试试用管理员身份运行）；"
+                             "③ 到「设置」页手动指定 Steam 路径。")}
 
         # ⚠️ appdetails 一次传多个 appid（逗号）会返回 HTTP 400（2026-09 实测），
         #    必须逐个查；用线程池并发，避免装了几十个游戏时串行卡死。
@@ -835,7 +864,462 @@ class DxbBackend:
         others.sort(key=lambda x: x['name'].lower())
         return {"success": True, "games": games, "others": others,
                 "total": len(games), "dlc_total": dlc_count,
-                "steam_path": str(sp)}
+                "steam_path": str(sp), "libraries": [str(r) for r in roots]}
+
+    # ---------------- Steam 下载管理 ----------------
+    # Steam 的下载 / 更新状态全在 appmanifest_*.acf 的 StateFlags 位里（EAppState）：
+    #   1=未安装  2=需要更新  4=已完整安装  8=排队待更新  32=文件缺失  128=文件损坏
+    #   256=更新中  512=已暂停  1024=更新已开始  2048=卸载中  32768=校验中
+    #   65536=写入文件  131072=预分配  262144=下载中  524288=落盘(staging)
+    _ACF_ACTIVE_BITS = (256 | 1024 | 2048 | 32768 | 65536 | 131072 | 262144 | 524288 | 1048576)
+    # 顺序即优先级：越靠前越是“正在进行中”，最后才轮到已安装/未安装
+    _ACF_STATE_TEXT = [
+        (2048, '正在卸载'), (262144, '正在下载'), (524288, '正在安装'),
+        (65536, '正在写入文件'), (131072, '正在预分配'), (32768, '正在校验文件'),
+        (1048576, '正在提交'), (256, '正在更新'), (2, '等待更新'),
+        (128, '文件损坏，需校验'), (32, '文件缺失，需校验'),
+        (4, '已安装'), (1, '未安装'),
+    ]
+
+    def _read_acf(self, path: Path) -> Dict:
+        try:
+            data = vdf.loads(path.read_text(encoding='utf-8', errors='ignore'))
+            return data.get('AppState', {}) or {}
+        except Exception as e:
+            self.log.warning(f"解析 {path.name} 失败: {e}")
+            return {}
+
+    def _state_text(self, flags: int) -> str:
+        for bit, text in self._ACF_STATE_TEXT:
+            if flags & bit:
+                return text
+        return '未知状态'
+
+    @staticmethod
+    def _to_int(v) -> int:
+        try:
+            return int(str(v or 0).strip() or 0)
+        except Exception:
+            return 0
+
+    def steam_downloads(self) -> Dict:
+        """下载管理：汇总所有 Steam 库的下载 / 更新 / 已安装条目。
+
+        权威数据源是 steamapps/appmanifest_*.acf（含状态位和已下载字节数），
+        再用 steamapps/downloading/<appid>/ 目录是否还在来佐证“正在下载”。
+        """
+        sp = self.get_steam_path()
+        if not sp or not sp.exists():
+            return {"success": False, "message": "未找到 Steam 路径，请在设置里指定。",
+                    "active": [], "done": [], "total": 0, "active_total": 0}
+        items: List[Dict] = []
+        seen = set()
+        for root in self._steam_library_roots(sp):
+            sa = root / 'steamapps'
+            if not sa.is_dir():
+                continue
+            downloading = set()
+            dl_dir = sa / 'downloading'
+            if dl_dir.is_dir():
+                try:
+                    downloading = {p.name for p in dl_dir.iterdir() if p.is_dir() and p.name.isdigit()}
+                except Exception:
+                    downloading = set()
+            for f in sa.glob('appmanifest_*.acf'):
+                data = self._read_acf(f)
+                appid = str(data.get('appid') or '').strip()
+                if not appid.isdigit() or appid in seen:
+                    continue
+                seen.add(appid)
+                flags = self._to_int(data.get('StateFlags'))
+                done_b = self._to_int(data.get('BytesDownloaded'))
+                total_b = self._to_int(data.get('BytesToDownload'))
+                staged = self._to_int(data.get('BytesStaged'))
+                to_stage = self._to_int(data.get('BytesToStage'))
+                size_disk = self._to_int(data.get('SizeOnDisk'))
+                installed = bool(flags & 4)
+                is_active = bool(flags & self._ACF_ACTIVE_BITS) \
+                    or (bool(flags & 2) and not installed) \
+                    or (appid in downloading)
+                # 落盘阶段看 staged，下载阶段看 BytesDownloaded；都没有就退回磁盘占用
+                if flags & 524288 and to_stage > 0:
+                    cur, tot = staged, to_stage
+                else:
+                    cur, tot = done_b, total_b
+                if tot <= 0:
+                    tot = size_disk
+                    cur = size_disk if installed else 0
+                if installed and not is_active:
+                    percent = 100.0
+                    cur = tot = max(tot, size_disk)
+                else:
+                    percent = round(cur * 100.0 / tot, 1) if tot > 0 else 0.0
+                items.append({
+                    "appid": appid,
+                    "name": (data.get('name') or f'App {appid}').strip() or f'App {appid}',
+                    "library": str(root),
+                    "installdir": (data.get('installdir') or '').strip(),
+                    "state_flags": flags,
+                    "state_text": self._state_text(flags),
+                    "active": is_active,
+                    "installed": installed,
+                    "bytes_done": cur,
+                    "bytes_total": tot,
+                    "size_on_disk": size_disk,
+                    "percent": percent,
+                    "in_downloading": appid in downloading,
+                })
+        active = sorted([i for i in items if i['active']], key=lambda x: x['name'].lower())
+        done_all = [i for i in items if not i['active']]
+        # 运行库类（Steamworks Redistributable 之类）单独归一组，不污染游戏列表
+        runtime = sorted([i for i in done_all if i['appid'] in self._NON_GAME_APPIDS],
+                         key=lambda x: x['name'].lower())
+        done = sorted([i for i in done_all if i['appid'] not in self._NON_GAME_APPIDS],
+                      key=lambda x: (-x['size_on_disk'], x['name'].lower()))
+        return {"success": True, "active": active, "done": done[:300], "runtime": runtime,
+                "total": len(items), "active_total": len(active), "steam_path": str(sp)}
+
+    def steam_discard_download(self, appid: str) -> Dict:
+        """移除一个下载任务：备份 acf → 删半成品缓存 → 删 acf。
+
+        只动「下载中的半成品」（steamapps/downloading/<appid> 与对应 manifest），
+        不碰任何已安装的游戏文件；被删的 acf 会备份到 userdata/download_backup/
+        以便回退。要彻底取消建议优先用 Steam 自带的取消按钮。
+        """
+        appid = str(appid or '').strip()
+        if not appid.isdigit():
+            return {"success": False, "message": "无效的 AppID。"}
+        sp = self.get_steam_path()
+        if not sp or not sp.exists():
+            return {"success": False, "message": "未找到 Steam 路径。"}
+        backup_dir = self.project_root / 'userdata' / 'download_backup'
+        removed_files, removed_dirs = [], []
+        for root in self._steam_library_roots(sp):
+            sa = root / 'steamapps'
+            if not sa.is_dir():
+                continue
+            dl = sa / 'downloading' / appid
+            if dl.is_dir():
+                try:
+                    shutil.rmtree(dl)
+                    removed_dirs.append(str(dl))
+                except Exception as e:
+                    self.log.warning(f"删除下载缓存失败 {dl}: {e}")
+            acf = sa / f'appmanifest_{appid}.acf'
+            if acf.exists():
+                try:
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(acf, backup_dir / f'appmanifest_{appid}.acf')
+                    acf.unlink()
+                    removed_files.append(str(acf))
+                except Exception as e:
+                    self.log.warning(f"移除 {acf.name} 失败: {e}")
+        if not removed_files and not removed_dirs:
+            return {"success": False, "message": "没找到该任务的下载缓存或清单，可能 Steam 已经处理过了。"}
+        return {"success": True,
+                "message": "已移除下载任务。回到 Steam 下载页刷新即可（清单已备份，可回退）。",
+                "removed_files": removed_files, "removed_dirs": removed_dirs,
+                "backup_dir": str(backup_dir)}
+
+    # ---------------- Steam 环境诊断 / 一键修复 ----------------
+    def _steam_registry_paths(self) -> List[str]:
+        """从注册表挖 Steam 安装路径（HKCU 主 + HKLM 32/64 位兜底）。"""
+        out: List[str] = []
+        probes = [
+            (winreg.HKEY_CURRENT_USER, r'Software\Valve\Steam', 'SteamPath'),
+            (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\WOW6432Node\Valve\Steam', 'InstallPath'),
+            (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\Valve\Steam', 'InstallPath'),
+        ]
+        for hive, sub, name in probes:
+            try:
+                k = winreg.OpenKey(hive, sub)
+                v, _ = winreg.QueryValueEx(k, name)
+                winreg.CloseKey(k)
+                if v and str(v) not in out:
+                    out.append(str(v))
+            except Exception:
+                continue
+        return out
+
+    def _steam_running(self) -> bool:
+        """Steam 客户端进程是否在跑。"""
+        if sys.platform != 'win32':
+            return False
+        try:
+            kw = {'creationflags': 0x08000000} if hasattr(subprocess, 'CREATE_NO_WINDOW') else {}
+            # 中文 Windows 的 tasklist 输出是 GBK，用UTF-8解会直接 UnicodeDecodeError
+            r = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq steam.exe', '/NH'],
+                               capture_output=True, text=True, timeout=15,
+                               encoding='gbk', errors='ignore', **kw)
+            return 'steam.exe' in (r.stdout or '').lower()
+        except Exception:
+            return False
+
+    @staticmethod
+    def fmt_size(n: int) -> str:
+        try:
+            n = float(n)
+        except Exception:
+            return '0 B'
+        for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+            if n < 1024 or unit == 'TB':
+                return f'{n:.1f} {unit}' if unit != 'B' else f'{int(n)} B'
+            n /= 1024.0
+        return f'{n:.1f} TB'
+
+    @staticmethod
+    def _dir_size(path: Path, budget: float = 1.2) -> int:
+        """统计目录体积，带时间预算，避免大目录卡住接口。"""
+        total = 0
+        deadline = time.time() + budget
+        try:
+            for p in path.rglob('*'):
+                if time.time() > deadline:
+                    break
+                try:
+                    if p.is_file():
+                        total += p.stat().st_size
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return total
+
+    def _hosts_steam_entries(self) -> List[str]:
+        """找 hosts 里屏蔽 Steam 域名的行（加速器/管家改过就会命中）。"""
+        p = Path(r'C:\Windows\System32\drivers\etc\hosts')
+        hits: List[str] = []
+        if not p.exists():
+            return hits
+        try:
+            for line in p.read_text(encoding='utf-8', errors='ignore').splitlines():
+                s = line.strip()
+                if not s or s.startswith('#'):
+                    continue
+                if 'steam' in s.lower():
+                    hits.append(s)
+        except Exception:
+            pass
+        return hits
+
+    def _net_probe(self, url: str, timeout: float = 6.0) -> bool:
+        try:
+            import httpx as _httpx
+            with _httpx.Client(verify=False, timeout=timeout, trust_env=True) as c:
+                r = c.get(url)
+                return r.status_code < 500
+        except Exception:
+            return False
+
+    def steam_diagnose(self) -> Dict:
+        """体检 Steam 环境：返回逐项检查结果，同时给出可执行的修复动作。"""
+        checks: List[Dict] = []
+        fixes: List[Dict] = []
+
+        def add(cid, name, ok, detail, level=None, fix=None):
+            item = {"id": cid, "name": name, "ok": bool(ok), "detail": detail,
+                    "level": level or ("ok" if ok else "error")}
+            checks.append(item)
+            if fix:
+                fixes.append(fix)
+
+        # 1) 安装路径
+        sp = self.get_steam_path()
+        sp_ok = bool(sp and sp.exists())
+        detail = str(sp) if sp_ok else '找不到 Steam 目录'
+        if not sp_ok:
+            reg = self._steam_registry_paths()
+            detail += ('（注册表候选：' + ' / '.join(reg) + '）') if reg else '（注册表里也没有记录，请手动指定）'
+        add('steam_path', 'Steam 安装路径', sp_ok, detail)
+
+        # 2) 进程
+        running = self._steam_running()
+        add('steam_running', 'Steam 客户端进程', True,
+            '正在运行' if running else '未运行（新入库的清单要重启 Steam 才生效）',
+            level='info' if running else 'warn')
+        if running:
+            fixes.append({"id": "restart_steam", "name": "重启 Steam",
+                          "desc": "清掉旧缓存状态，让新入库的清单立即生效"})
+
+        # 3) 目录写权限
+        if sp_ok:
+            writable = False
+            probe = sp / '.dxb_write_test'
+            try:
+                probe.write_text('ok', encoding='utf-8')
+                writable = True
+            except Exception:
+                pass
+            finally:
+                try:
+                    probe.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            add('write_perm', 'Steam 目录写权限', writable,
+                '可写入，入库不受影响' if writable
+                else '不可写入 —— 请用管理员身份运行本程序，或把 Steam 装到非系统盘')
+
+        # 4) 磁盘空间
+        if sp_ok:
+            try:
+                du = shutil.disk_usage(str(sp))
+                free_gb = du.free / (1024 ** 3)
+                ok = free_gb >= 5
+                add('disk_space', '磁盘剩余空间', ok,
+                    f'{free_gb:.1f} GB 可用' + ('' if ok else ' —— 空间不足会导致下载/更新失败（Steam 报 磁盘写入错误）'),
+                    level='ok' if ok else 'warn')
+            except Exception:
+                pass
+
+        # 5) 内核（入库方式）
+        try:
+            st = self.get_steam_status()
+            kernel = st.get('kernel', 'none')
+            kn = {'steamtools': 'SteamTools', 'opensteamtool': 'OpenSteamTool / GreenLuma'}.get(kernel, '')
+            add('kernel', '入库内核', kernel != 'none',
+                f'已检测到 {kn}' if kernel != 'none' else '未检测到内核（SteamTools / OpenSteamTool 均未安装）',
+                level='ok' if kernel != 'none' else 'warn')
+        except Exception:
+            pass
+
+        # 6) hosts 屏蔽
+        hosts_hits = self._hosts_steam_entries()
+        add('hosts', 'hosts 屏蔽检查', not hosts_hits,
+            '未发现屏蔽 Steam 的记录' if not hosts_hits
+            else f'发现 {len(hosts_hits)} 条 Steam 相关记录（可能被加速器/管家改写，会导致商店打不开）：' + '；'.join(hosts_hits[:3]),
+            level='ok' if not hosts_hits else 'warn')
+        if hosts_hits:
+            fixes.append({"id": "fix_hosts", "name": "注释掉 hosts 里的 Steam 记录",
+                          "desc": "改写前会备份 hosts 到 userdata，可随时还原"})
+
+        # 7) 下载缓存体积
+        if sp_ok:
+            hc = sp / 'appcache' / 'httpcache'
+            if hc.is_dir():
+                sz = self._dir_size(hc)
+                big = sz > 400 * 1024 * 1024
+                add('httpcache', 'Steam 网页缓存', not big,
+                    f'{self.fmt_size(sz)}' + (' —— 偏大，容易导致商店/登录页异常，建议清理' if big else '，正常'),
+                    level='ok' if not big else 'warn')
+                if big:
+                    fixes.append({"id": "clean_httpcache", "name": "清理 Steam 网页缓存",
+                                  "desc": "删除 appcache/httpcache，Steam 会自动重建（安全，需先关掉 Steam）"})
+
+        # 8) 下载残留
+        if sp_ok:
+            residue = []
+            for root in self._steam_library_roots(sp):
+                dld = root / 'steamapps' / 'downloading'
+                if not dld.is_dir():
+                    continue
+                try:
+                    for p in dld.iterdir():
+                        if p.is_dir() and not (root / 'steamapps' / f'appmanifest_{p.name}.acf').exists():
+                            residue.append(str(p))
+                except Exception:
+                    continue
+            add('downloading_residue', '下载残留清理', not residue,
+                '没有残留' if not residue else f'发现 {len(residue)} 个没有对应清单的下载残留目录（会让 Steam 反复校验/卡更新）',
+                level='ok' if not residue else 'warn')
+            if residue:
+                fixes.append({"id": "clean_downloading", "name": "清理下载残留",
+                              "desc": f'删除 {len(residue)} 个孤儿下载缓存目录（不碰已安装的游戏）'})
+
+        # 9) 网络连通性
+        store_ok = self._net_probe('https://store.steampowered.com/login/')
+        api_ok = self._net_probe('https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/')
+        add('network', 'Steam 服务连通性', store_ok or api_ok,
+            f'商店：{"通" if store_ok else "不通"}，API：{"通" if api_ok else "不通"}'
+            + ('' if (store_ok or api_ok) else ' —— 检查网络/代理/加速器，或先修复 hosts'),
+            level='ok' if (store_ok or api_ok) else 'error')
+
+        bad = [c for c in checks if c['level'] == 'error']
+        warn = [c for c in checks if c['level'] == 'warn']
+        summary = ('一切正常' if not bad and not warn
+                   else f'{len(bad)} 项异常、{len(warn)} 项提醒')
+        return {"success": True, "checks": checks, "fixes": fixes,
+                "summary": summary, "issues": len(bad), "warnings": len(warn),
+                "steam_path": str(sp) if sp else None}
+
+    def steam_repair(self, actions: List[str]) -> Dict:
+        """执行诊断里给出的修复动作。每步独立，单步失败不影响其它。"""
+        actions = [str(a) for a in (actions or [])]
+        results: List[Dict] = []
+        sp = self.get_steam_path()
+        self.steam_path = sp          # restart_steam 依赖这个属性
+
+        def rec(action, ok, message):
+            results.append({"action": action, "success": bool(ok), "message": message})
+
+        if 'fix_hosts' in actions:
+            hp = Path(r'C:\Windows\System32\drivers\etc\hosts')
+            try:
+                backup_dir = self.project_root / 'userdata' / 'hosts_backup'
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                if hp.exists():
+                    shutil.copy2(hp, backup_dir / f'hosts_{time.strftime("%Y%m%d_%H%M%S")}.bak')
+                lines = hp.read_text(encoding='utf-8', errors='ignore').splitlines() if hp.exists() else []
+                kept, n = [], 0
+                for line in lines:
+                    s = line.strip()
+                    if s and not s.startswith('#') and 'steam' in s.lower():
+                        kept.append('# [大轩巴已注释] ' + line)
+                        n += 1
+                    else:
+                        kept.append(line)
+                hp.write_text('\n'.join(kept) + '\n', encoding='utf-8')
+                rec('fix_hosts', True, f'已注释 {n} 条 Steam 记录（原文件已备份）')
+            except PermissionError:
+                rec('fix_hosts', False, '没有权限写 hosts —— 请用管理员身份运行本程序')
+            except Exception as e:
+                rec('fix_hosts', False, f'修复 hosts 失败：{e}')
+
+        if 'clean_httpcache' in actions:
+            if not sp or not sp.exists():
+                rec('clean_httpcache', False, '未找到 Steam 目录')
+            else:
+                hc = sp / 'appcache' / 'httpcache'
+                if not hc.exists():
+                    rec('clean_httpcache', True, '网页缓存目录不存在，无需清理')
+                else:
+                    freed = self._dir_size(hc, 3.0)
+                    try:
+                        shutil.rmtree(hc, ignore_errors=True)
+                        rec('clean_httpcache', not hc.exists(),
+                            f'已清理网页缓存（约 {self.fmt_size(freed)}）' if not hc.exists()
+                            else '部分文件被占用未能删除，请先完全退出 Steam 再试')
+                    except Exception as e:
+                        rec('clean_httpcache', False, f'清理失败：{e}')
+
+        if 'clean_downloading' in actions:
+            if not sp or not sp.exists():
+                rec('clean_downloading', False, '未找到 Steam 目录')
+            else:
+                n = 0
+                for root in self._steam_library_roots(sp):
+                    dld = root / 'steamapps' / 'downloading'
+                    if not dld.is_dir():
+                        continue
+                    try:
+                        for p in list(dld.iterdir()):
+                            if p.is_dir() and not (root / 'steamapps' / f'appmanifest_{p.name}.acf').exists():
+                                shutil.rmtree(p, ignore_errors=True)
+                                if not p.exists():
+                                    n += 1
+                    except Exception:
+                        continue
+                rec('clean_downloading', True, f'已清理 {n} 个孤儿下载目录' if n else '没有需要清理的残留')
+
+        if 'restart_steam' in actions:
+            try:
+                ok = self.restart_steam()
+                rec('restart_steam', ok, '已重启 Steam' if ok else '重启 Steam 失败，请检查 Steam 路径')
+            except Exception as e:
+                rec('restart_steam', False, f'重启 Steam 失败：{e}')
+
+        ok_all = all(r['success'] for r in results) if results else False
+        return {"success": ok_all, "results": results,
+                "message": '修复完成。' if ok_all else '部分修复项未成功，请看下面的明细。'}
 
     # --- 免费游戏页 ---
     def free_games_list(self, query: str = "", max_items: int = 400) -> Dict:
@@ -2813,7 +3297,8 @@ class DxbBackend:
             return False
         try:
             self.log.info("正在尝试关闭正在运行的 Steam 进程...")
-            result = subprocess.run(["taskkill", "/F", "/IM", "steam.exe"], capture_output=True, text=True, check=False)
+            result = subprocess.run(["taskkill", "/F", "/IM", "steam.exe"], capture_output=True,
+                                    text=True, encoding='gbk', errors='ignore', check=False)
             if result.returncode == 0: self.log.info("成功关闭 Steam 进程。")
             elif result.returncode == 128: self.log.info("未找到正在运行的 Steam 进程，将直接启动。")
             else: self.log.warning(f"关闭 Steam 时遇到问题 (返回码: {result.returncode})。错误信息: {result.stderr.strip()}")

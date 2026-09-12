@@ -334,28 +334,80 @@ class DxbWindow(QMainWindow):
 # ---------- 沉默（内置）浏览器登录 Steam ----------
 class DxbLoginBridge(QObject):
     """住在主线程的桥。Flask 线程调用 launcher 时，通过 QueuedConnection
-    把“打开登录窗口”派发到主线程执行（Qt 控件只能在主线程创建/显示）。"""
-    def __init__(self, flask_mod):
-        super().__init__()
+    把“打开登录窗口”派发到主线程执行（Qt 控件只能在主线程创建/显示）。
+
+    ⚠️ 这里刻意继承 QObject 而不是 QWidget：它只负责“派活”，不做界面。
+    因此绝对不能把 self 当作登录窗口的 parent —— QMainWindow(parent=QObject)
+    会抛 TypeError，而异常发生在 Qt 槽内部会被直接吞掉（只打 stderr），
+    用户那边表现为「点了按钮毫无反应」。窗口引用必须由 _login_win 持有防 GC。
+    """
+    def __init__(self, flask_mod, parent=None):
+        super().__init__(parent)
         self.flask_mod = flask_mod
         self._login_win = None
+        self._profile = None
+
+    def _profile_ref(self):
+        """登录专用持久 profile：Steam 登录态跨启动保留，整个进程只建一次。
+        （同名 profile 重复 new 会让 Qt 报警并可能共用失败）"""
+        if self._profile is None:
+            p = QWebEngineProfile('dxb_steam_profile')
+            try:
+                p.setPersistentStoragePath(str(USER_DIR / 'steambrowser_profile'))
+                p.setStoragePath(str(USER_DIR / 'steambrowser_profile'))
+            except Exception:
+                pass
+            self._profile = p
+        return self._profile
 
     @Slot()
     def open_login(self):
-        if self._login_win is None or not self._login_win.isVisible():
-            self._login_win = DxbLoginWindow(self.flask_mod, self)
-            self._login_win.show()
-        else:
-            self._login_win.raise_()
-            self._login_win.activateWindow()
+        """只在 GUI 线程执行。任何异常都必须回传 Flask —— 静默失败是最坏的结果。"""
+        try:
+            self._open()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._fallback(str(e))
+
+    def _open(self):
+        win = self._login_win
+        if win is not None:
+            try:
+                win.isVisible()          # 触碰底层 C++ 对象，已销毁会抛 RuntimeError
+            except RuntimeError:
+                win = None
+                self._login_win = None
+        if win is None:
+            win = DxbLoginWindow(self.flask_mod, self._profile_ref())
+            self._login_win = win
+            win.show()
+            return
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _fallback(self, reason: str):
+        """内置窗口起不来时退到系统浏览器 + 提示手动粘贴 Cookie，别让用户卡死。"""
+        try:
+            self.flask_mod.steam_login_failed(
+                f'内置登录窗口创建失败（{reason}）。已改用系统浏览器打开 Steam 登录页，'
+                f'登录后请把 Cookie 手动粘贴进来。')
+        except Exception:
+            pass
+        try:
+            webbrowser.open_new('https://store.steampowered.com/login/')
+        except Exception:
+            pass
 
 
 class DxbLoginWindow(QMainWindow):
     """用持久 profile 的独立窗口加载 Steam 登录页。登录成功后从 cookieStore
     抓取 steamLoginSecure 回调 app.steam_login_succeeded；失败回调 steam_login_failed。"""
-    def __init__(self, flask_mod, parent=None):
+    def __init__(self, flask_mod, profile, parent=None):
         super().__init__(parent)
         self.flask_mod = flask_mod
+        self.profile = profile
         self._cookies = {}
         self._done = False
         self.setWindowTitle('大轩巴 · 登录 Steam')
@@ -370,12 +422,7 @@ class DxbLoginWindow(QMainWindow):
             'QToolButton:hover{background:#262626;}'
         )
 
-        # 专用持久 profile：Steam 登录态跨启动保留，不必每次重登
-        self.profile = QWebEngineProfile('dxb_steam_profile')
-        try:
-            self.profile.setStoragePath(str(USER_DIR / 'steambrowser_profile'))
-        except Exception:
-            pass
+        # profile 由 bridge 持有并复用（登录态跨启动持久），这里只负责挂页面
         self.page = QWebEnginePage(self.profile, self)
         self.view = QWebEngineView()
         self.view.setPage(self.page)
@@ -431,6 +478,15 @@ class DxbLoginWindow(QMainWindow):
             self._status.setText('登录态无效或读取账号失败，请重试，或改用“手动粘贴 Cookie”。')
             self._done = False  # 允许再次捕获
 
+    def showEvent(self, event):
+        # 窗口被再次唤起时允许重新捕获登录态（上次可能已收口）
+        super().showEvent(event)
+        self._done = False
+        try:
+            self._status.setText('请在大轩巴内置浏览器中登录 Steam，登录成功后会自动返回主程序。')
+        except Exception:
+            pass
+
     def closeEvent(self, event):
         event.accept()
 
@@ -481,12 +537,24 @@ def main():
     win = DxbWindow(url)
     win.show()
 
-    # 注入“沉默浏览器登录 Steam”launcher：由主线程的桥在 GUI 线程打开登录窗口
+    # 注入“沉默浏览器登录 Steam”launcher：由主线程的桥在 GUI 线程打开登录窗口。
+    # QueuedConnection 负责把 Flask 线程的请求投递到 GUI 线程；
+    # 返回 False 说明投递被拒（槽不匹配 / 对象已销毁），要回传前端提示，不能装作成功。
     if hasattr(mod, 'register_steam_login_launcher'):
-        bridge = DxbLoginBridge(mod)
-        mod.register_steam_login_launcher(
-            lambda: QMetaObject.invokeMethod(bridge, 'open_login', Qt.QueuedConnection)
-        )
+        bridge = DxbLoginBridge(mod, app)   # parent=QApplication，生命周期跟随进程
+        app._dxb_login_bridge = bridge      # 再持一份强引用，防止 GC 后静默失效
+
+        def _launch_login():
+            try:
+                ok = QMetaObject.invokeMethod(bridge, 'open_login', Qt.QueuedConnection)
+            except Exception as e:
+                print('[大轩巴] 派发登录窗口失败:', e)
+                return False
+            if ok is False:
+                print('[大轩巴] 登录窗口派发被拒绝（槽未匹配或对象已销毁）')
+            return bool(ok)
+
+        mod.register_steam_login_launcher(_launch_login)
 
     app.exec()
     shutdown_server(url)

@@ -152,6 +152,13 @@ class RecommendApp {
                 this.log('warn', '当前环境没有内置浏览器，无法弹出登录窗口。');
                 return false;
             }
+            // 桌面壳派发失败时如实报错，不要白等 5 分钟
+            if (!d.success) {
+                const msg = d.message || '打开登录窗口失败，请到「免费游戏」页手动粘贴 Cookie。';
+                this.showSnackbar(msg, 'error');
+                this.log('error', msg);
+                return false;
+            }
             this.showSnackbar('已打开登录窗口，请在窗口中完成 Steam 登录…', 'info');
             this.log('info', '已打开内置浏览器登录窗口，等待登录…');
             return await this.pollLogin();

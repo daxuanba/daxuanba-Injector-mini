@@ -150,6 +150,14 @@ class FreeGamesApp {
                 window.open('https://store.steampowered.com/login/', '_blank');
                 return false;
             }
+            // 桌面壳派发失败：必须立刻报错并亮出手动粘贴，不能假装成功去白等
+            if (!d.success) {
+                const msg = d.message || '打开登录窗口失败，请改用手动粘贴 Cookie。';
+                this.showSnackbar(msg, 'error');
+                this.log('error', msg);
+                if (this.elements.cookieManual) this.elements.cookieManual.style.display = 'flex';
+                return false;
+            }
             this.showSnackbar('已打开登录窗口，请在窗口中完成 Steam 登录（会自动读取登录态）…', 'info');
             this.log('info', '已打开内置浏览器登录窗口，等待登录…');
             return await this.pollLogin();

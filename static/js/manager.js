@@ -230,12 +230,23 @@ class FileManagerApp {
         else { this.renderGrid(); }
     }
 
+    /** 空状态提示：主文案 + 可选排查建议（统一转义，避免 XSS） */
+    showScanMessage(message, hint) {
+        const esc = s => String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const el = this.elements.noResultsMessage;
+        el.innerHTML = hint
+            ? `${esc(message)}<br><span style="font-size:12px;opacity:.72;line-height:1.8">${esc(hint)}</span>`
+            : esc(message);
+        el.style.display = 'block';
+    }
+
     renderInstalled() {
         const result = this.installedData;
         const container = this.elements.gridContainer;
         if (!result || !result.success) {
-            this.elements.noResultsMessage.textContent = (result && result.message) || '扫描失败';
-            this.elements.noResultsMessage.style.display = 'block';
+            this.showScanMessage((result && result.message) || '扫描失败', result && result.hint);
             container.innerHTML = '';
             return;
         }
@@ -245,8 +256,12 @@ class FileManagerApp {
             (g.dlcs || []).some(d => (d.name || '').toLowerCase().includes(term) || d.appid.includes(term))
         );
         if (games.length === 0) {
-            this.elements.noResultsMessage.textContent = result.games.length === 0 ? '未检测到已安装的游戏。' : '没有匹配的搜索结果。';
-            this.elements.noResultsMessage.style.display = 'block';
+            if (result.games.length === 0) {
+                this.showScanMessage('未检测到已安装的游戏。', result.hint);
+            } else {
+                this.elements.noResultsMessage.textContent = '没有匹配的搜索结果。';
+                this.elements.noResultsMessage.style.display = 'block';
+            }
             container.innerHTML = '';
             this.updateSelectionState();
             return;

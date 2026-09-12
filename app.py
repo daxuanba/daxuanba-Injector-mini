@@ -235,6 +235,11 @@ def craft_page():
 def free_page():
     return render_template('free.html')
 
+@app.route('/tools')
+def tools_page():
+    """工具箱：Steam 错误诊断修复 + 下载管理。"""
+    return render_template('tools.html')
+
 
 # --- Core API Routes ---
 def background_install_unlocker():
@@ -814,9 +819,14 @@ def steam_login_start():
     STEAM_LOGIN["message"] = "已打开登录窗口，请在窗口里完成 Steam 登录。"
     STEAM_LOGIN["account"] = None
     try:
-        _steam_login_launcher()
+        ok = _steam_login_launcher()
     except Exception as e:
         steam_login_failed(f"打开登录窗口失败: {e}")
+        return jsonify({"success": False, "available": True, "message": STEAM_LOGIN["message"]})
+    # 桌面壳投递失败（槽未匹配 / 桥已销毁）时必须如实上报，
+    # 否则前端会显示“已打开登录窗口”然后白等 5 分钟 —— 就是用户报的“点了打不开”。
+    if ok is False:
+        steam_login_failed("无法唤醒内置登录窗口，请改用“手动粘贴”Cookie 登录。")
         return jsonify({"success": False, "available": True, "message": STEAM_LOGIN["message"]})
     return jsonify({"success": True, "available": True, "message": STEAM_LOGIN["message"]})
 
@@ -1128,21 +1138,75 @@ def steam_launch():
     data = request.get_json(silent=True) or {}
     action = str(data.get('action') or '').strip().lower()
     appid = str(data.get('appid') or '').strip()
-    if not appid.isdigit():
-        return jsonify({"success": False, "message": "无效的 AppID。"})
-    if action not in ('install', 'run'):
+    # 固定入口（无需 appid）：只白名单这几个，避免变成任意 steam:// 转发器
+    fixed = {
+        'open_downloads': 'steam://open/downloads',
+        'open_settings': 'steam://open/settings',
+        'open_store': 'steam://store',
+        'open_library': 'steam://open/games',
+    }
+    if action in fixed:
+        url = fixed[action]
+    elif action in ('install', 'run'):
+        if not appid.isdigit():
+            return jsonify({"success": False, "message": "无效的 AppID。"})
+        url = f'steam://{action}/{appid}'
+    else:
         return jsonify({"success": False, "message": "无效的操作。"})
-    url = f'steam://{action}/{appid}'
     try:
         if hasattr(os, 'startfile'):
             os.startfile(url)          # Windows：交给系统协议处理器
         else:
             webbrowser.open(url)
-        return jsonify({"success": True, "url": url,
-                        "message": "已请求 Steam 安装，请在 Steam 客户端确认。" if action == 'install'
-                                   else "已请求 Steam 启动。"})
+        msg = {
+            'install': "已请求 Steam 安装，请在 Steam 客户端确认。",
+            'run': "已请求 Steam 启动。",
+        }.get(action, "已打开 Steam。")
+        return jsonify({"success": True, "url": url, "message": msg})
     except Exception as e:
         return jsonify({"success": False, "message": f"调用 Steam 失败: {e}", "url": url})
+
+
+@app.route('/api/steam/downloads', methods=['GET'])
+def steam_downloads():
+    """下载管理：列出各 Steam 库里正在下载/更新与已安装的条目。"""
+    try:
+        return jsonify(_quick_backend().steam_downloads())
+    except Exception as e:
+        return jsonify({"success": False, "message": f"读取下载列表失败: {e}",
+                        "active": [], "done": [], "total": 0, "active_total": 0})
+
+
+@app.route('/api/steam/downloads/discard', methods=['POST'])
+def steam_discard_download():
+    """移除某个下载任务（半成品缓存 + 清单，清单会先备份）。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(_quick_backend().steam_discard_download(data.get('appid')))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"移除下载任务失败: {e}"})
+
+
+@app.route('/api/steam/diagnose', methods=['GET'])
+def steam_diagnose():
+    """Steam 环境体检：路径/进程/权限/空间/hosts/缓存/残留/网络。"""
+    try:
+        return jsonify(_quick_backend().steam_diagnose())
+    except Exception as e:
+        return jsonify({"success": False, "message": f"诊断失败: {e}", "checks": [], "fixes": []})
+
+
+@app.route('/api/steam/repair', methods=['POST'])
+def steam_repair():
+    """执行诊断给出的修复动作（可多选）。"""
+    data = request.get_json(silent=True) or {}
+    actions = data.get('actions') or []
+    if not isinstance(actions, list):
+        return jsonify({"success": False, "message": "无效的修复项。", "results": []})
+    try:
+        return jsonify(_quick_backend().steam_repair(actions))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"修复失败: {e}", "results": []})
 
 
 @app.route('/api/steam/restart', methods=['POST'])
