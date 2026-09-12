@@ -556,6 +556,34 @@ def main():
 
         mod.register_steam_login_launcher(_launch_login)
 
+    # 注入“以管理员身份重启”launcher：写 hosts 做 Steam 加速时需要管理员权限。
+    # 用 ShellExecuteW 的 runas 动词拉起新实例（会弹 UAC），然后关掉当前实例。
+    # 端口是动态找的，所以新实例不会和旧实例抢端口，无需等待。
+    if hasattr(mod, 'register_elevated_restart'):
+        def _relaunch_elevated():
+            import ctypes
+            if IS_FROZEN:
+                exe = sys.executable
+                params = ' '.join(f'"{a}"' for a in sys.argv[1:])
+            else:
+                exe = sys.executable
+                files = [os.path.abspath(sys.argv[0])] + list(sys.argv[1:])
+                params = ' '.join(f'"{p}"' for p in files)
+            try:
+                rc = ctypes.windll.shell32.ShellExecuteW(
+                    None, 'runas', exe, params, str(Path(exe).resolve().parent), 1)
+            except Exception as e:
+                print('[大轩巴] 提权失败:', e)
+                return False
+            # ShellExecuteW <= 32 表示失败；尤其 5 = ERROR_ACCESS_DENIED（用户点了「否」）
+            if int(rc) <= 32:
+                print('[大轩巴] 提权被拒绝（ShellExecuteW 返回 %s）' % rc)
+                return False
+            threading.Timer(0.8, lambda: shutdown_server(url)).start()
+            return True
+
+        mod.register_elevated_restart(_relaunch_elevated)
+
     app.exec()
     shutdown_server(url)
     os._exit(0)

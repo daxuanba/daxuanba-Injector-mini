@@ -50,6 +50,24 @@
         .sec-title{font-size:13px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;
             color:var(--md-sys-color-on-surface-variant);margin:16px 0 8px;}
         .sec-title:first-child{margin-top:0;}
+
+        /* --- Steam 加速 --- */
+        .accel-row{display:flex;align-items:center;gap:12px;padding:11px 14px;border-radius:12px;
+            background:var(--md-sys-color-surface-container-high);margin-bottom:8px;flex-wrap:wrap;}
+        .accel-row > input[type=checkbox]{width:16px;height:16px;flex:0 0 auto;accent-color:var(--dx-yellow);cursor:pointer;}
+        .accel-domain{font-weight:600;min-width:235px;flex:0 0 auto;font-size:13px;color:var(--md-sys-color-on-surface);}
+        .accel-group{font-size:11px;padding:2px 8px;border-radius:999px;flex:0 0 auto;
+            background:var(--md-sys-color-surface-variant);color:var(--md-sys-color-on-surface-variant);}
+        .accel-ip{font-family:Consolas,Menlo,monospace;font-size:12.5px;color:var(--md-sys-color-on-surface);}
+        .accel-lat{font-size:12px;font-weight:700;}
+        .accel-lat.good{color:var(--md-sys-color-success);}
+        .accel-lat.mid{color:var(--md-sys-color-warning);}
+        .accel-lat.bad{color:var(--md-sys-color-error);}
+        .accel-meta{font-size:11.5px;color:var(--md-sys-color-on-surface-variant);word-break:break-all;}
+        .accel-warn{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 14px;border-radius:12px;
+            background:var(--md-sys-color-warning-container);color:var(--md-sys-color-on-warning-container);
+            font-size:13px;margin-bottom:12px;}
+        .accel-warn .btn{margin-left:auto;}
     </style>
 </head>
 <body>
@@ -96,6 +114,23 @@
             <h1 class="app-title">工具箱</h1>
         </header>
         <main class="manager-main-content">
+
+            <div class="card manager-card">
+                <div class="card-header">
+                    <h2>Steam 加速（hosts 优选）</h2>
+                    <div class="card-actions">
+                        <button class="btn btn-secondary" id="accelScanBtn"><span class="material-icons">speed</span> 测速选优</button>
+                        <button class="btn btn-primary" id="accelApplyBtn"><span class="material-icons">bolt</span> 一键加速</button>
+                        <button class="btn btn-secondary" id="accelRestoreBtn"><span class="material-icons">restart_alt</span> 一键还原</button>
+                    </div>
+                </div>
+                <div id="accelSummary" style="margin-bottom:12px;"></div>
+                <div id="accelAdminBar"></div>
+                <div id="accelList">
+                    <div class="empty-hint">点「测速选优」：并发解析各 Steam 域名（走多个国内 DoH，绕开被污染的系统 DNS），
+                        再对候选 IP 做 TCP + TLS + HTTP 三段实测，自动挑最快的那条写进 hosts。</div>
+                </div>
+            </div>
 
             <div class="card manager-card">
                 <div class="card-header">

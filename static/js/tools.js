@@ -12,6 +12,12 @@ class ToolsApp {
             dlActive: document.getElementById('dlActive'),
             dlDone: document.getElementById('dlDone'),
             dlDoneTitle: document.getElementById('dlDoneTitle'),
+            accelScanBtn: document.getElementById('accelScanBtn'),
+            accelApplyBtn: document.getElementById('accelApplyBtn'),
+            accelRestoreBtn: document.getElementById('accelRestoreBtn'),
+            accelSummary: document.getElementById('accelSummary'),
+            accelAdminBar: document.getElementById('accelAdminBar'),
+            accelList: document.getElementById('accelList'),
             log: document.getElementById('toolsLog'),
             logClear: document.getElementById('toolsLogClear'),
             snackbar: document.getElementById('snackbar'),
@@ -19,6 +25,8 @@ class ToolsApp {
             snackbarClose: document.getElementById('snackbarClose'),
         };
         this.diag = null;
+        this.accel = null;        // 最近一次测速结果
+        this.accelStatus = null;  // hosts 加速块状态
         this.store = window.DxbTaskLog ? window.DxbTaskLog.local('tools') : null;
         this.initialize();
     }
@@ -33,8 +41,12 @@ class ToolsApp {
         this.elements.dlRefreshBtn.addEventListener('click', () => this.loadDownloads());
         this.elements.dlOpenSteamBtn.addEventListener('click', () => this.openSteamDownloads());
         this.elements.snackbarClose.addEventListener('click', () => this.hideSnackbar());
+        this.elements.accelScanBtn.addEventListener('click', () => this.accelScan());
+        this.elements.accelApplyBtn.addEventListener('click', () => this.accelApply());
+        this.elements.accelRestoreBtn.addEventListener('click', () => this.accelRestore());
         if (this.store) this.store.mount(this.elements.log);
         if (this.elements.logClear) this.elements.logClear.addEventListener('click', () => this.store && this.store.clear());
+        this.loadAccelStatus();
         this.diagnose();
         this.loadDownloads();
     }
@@ -281,6 +293,236 @@ class ToolsApp {
             this.log(d.success ? 'info' : 'error', d.message || '');
         } catch (e) {
             this.showSnackbar(`打开 Steam 失败：${e.message}`, 'error');
+        }
+    }
+
+    /* ---------- Steam 加速（hosts 优选） ---------- */
+
+    static latClass(ms) {
+        if (ms == null) return 'bad';
+        if (ms <= 80) return 'good';
+        if (ms <= 200) return 'mid';
+        return 'bad';
+    }
+
+    async loadAccelStatus() {
+        try {
+            const r = await fetch('/api/steam/accel/status');
+            const d = await r.json();
+            if (!d.success) throw new Error(d.message || '读取失败');
+            this.accelStatus = d;
+            this.renderAccelSummary(d);
+        } catch (e) {
+            this.elements.accelSummary.innerHTML = '<span class="summary-chip bad">加速状态读取失败</span>';
+        }
+    }
+
+    renderAccelSummary(s) {
+        this.elements.accelSummary.innerHTML =
+            `<span class="summary-chip ${s.enabled ? '' : 'warn'}">` +
+            `${s.enabled ? `加速已开启（${s.count} 个域名）` : '加速未开启'}</span>`;
+
+        const bar = this.elements.accelAdminBar;
+        bar.innerHTML = '';
+
+        // 本机已有本地反代型加速器（Steam 社区 302 / Steam++ / Watt Toolkit）时会互相覆盖
+        const la = s.local_accel;
+        if (la && la.active) {
+            const w = document.createElement('div');
+            w.className = 'accel-warn';
+            const ic = document.createElement('span');
+            ic.className = 'material-icons';
+            ic.textContent = 'report_problem';
+            const tx = document.createElement('span');
+            const who = `${la.process || '本地加速器'}${la.pid ? `（PID ${la.pid}）` : ''}`;
+            tx.textContent =
+                `检测到 ${who} 正在接管 Steam 域名（${(la.domains || []).length} 个解析到 127.0.0.1）。` +
+                '它和这里的 hosts 优选是互相覆盖的两套方案，建议二选一：' +
+                '要么关掉它、用本工具；要么继续用它、不要开这里的加速。';
+            w.append(ic, tx);
+            bar.appendChild(w);
+        }
+
+        if (!s.writable) {
+            const w = document.createElement('div');
+            w.className = 'accel-warn';
+            const ic = document.createElement('span');
+            ic.className = 'material-icons';
+            ic.textContent = 'admin_panel_settings';
+            const tx = document.createElement('span');
+            tx.textContent = '写 hosts 需要管理员权限，当前不是管理员，加速 / 还原会失败。';
+            const b = document.createElement('button');
+            b.className = 'btn btn-primary';
+            b.innerHTML = '<span class="material-icons">rocket_launch</span> 以管理员身份重启';
+            b.addEventListener('click', () => this.restartElevated());
+            w.append(ic, tx, b);
+            bar.appendChild(w);
+        }
+    }
+
+    async accelScan() {
+        this.elements.accelScanBtn.disabled = true;
+        this.elements.accelList.innerHTML =
+            '<div class="empty-hint">正在并发解析 + 实测各域名候选 IP，大约 5~15 秒…</div>';
+        this.log('info', '开始测速选优：多源 DoH 解析 + TCP/TLS/HTTP 三段实测…');
+        try {
+            const r = await fetch('/api/steam/accel/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}),
+            });
+            const d = await r.json();
+            if (!d.success) throw new Error(d.message || '测速失败');
+            this.accel = d;
+            this.renderAccelScan(d);
+            const total = (d.domains || []).length;
+            const ok = (d.domains || []).filter(x => x.best).length;
+            this.log(ok ? 'success' : 'warn', `测速完成：${ok}/${total} 个域名找到可用 IP。`);
+        } catch (e) {
+            this.elements.accelList.innerHTML = `<div class="empty-hint">测速失败：${e.message}</div>`;
+            this.log('error', `测速失败：${e.message}`);
+            this.showSnackbar(`测速失败：${e.message}`, 'error');
+        } finally {
+            this.elements.accelScanBtn.disabled = false;
+        }
+    }
+
+    renderAccelScan(d) {
+        const list = this.elements.accelList;
+        const applied = d.applied || {};
+        list.innerHTML = '';
+        (d.domains || []).forEach(row => {
+            const el = document.createElement('div');
+            el.className = 'accel-row';
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.disabled = !row.best;
+            cb.checked = !!row.best;
+            cb.dataset.domain = row.domain;
+            if (row.best) cb.dataset.ip = row.best.ip;
+            el.appendChild(cb);
+
+            const dom = document.createElement('span');
+            dom.className = 'accel-domain';
+            dom.textContent = row.domain;
+            el.appendChild(dom);
+
+            const grp = document.createElement('span');
+            grp.className = 'accel-group';
+            grp.textContent = row.group;
+            el.appendChild(grp);
+
+            if (row.best) {
+                const ip = document.createElement('span');
+                ip.className = 'accel-ip';
+                ip.textContent = row.best.ip;
+                const lat = document.createElement('span');
+                lat.className = `accel-lat ${ToolsApp.latClass(row.best.total_ms)}`;
+                lat.textContent = `${Math.round(row.best.total_ms)} ms`;
+                el.append(ip, lat);
+            } else {
+                const bad = document.createElement('span');
+                bad.className = 'accel-lat bad';
+                bad.textContent = row.poisoned ? '解析被污染' : '无可用 IP';
+                el.appendChild(bad);
+            }
+
+            const meta = document.createElement('span');
+            meta.className = 'accel-meta';
+            const cands = row.candidates || [];
+            const okN = cands.filter(c => c.ok).length;
+            const bits = [`候选 ${cands.length} 个 / 可用 ${okN} 个`];
+            if (row.reason) bits.push(row.reason);
+            bits.push(applied[row.domain] ? `当前 hosts：${applied[row.domain]}` : '当前 hosts：未加速');
+            meta.textContent = bits.join('  ·  ');
+            el.appendChild(meta);
+
+            list.appendChild(el);
+        });
+    }
+
+    async accelApply() {
+        const entries = [];
+        this.elements.accelList.querySelectorAll('input[type=checkbox]').forEach(cb => {
+            if (cb.checked && cb.dataset.ip) entries.push({ domain: cb.dataset.domain, ip: cb.dataset.ip });
+        });
+        if (!entries.length) {
+            this.showSnackbar('没有可加速的条目，请先「测速选优」。', 'warning');
+            return;
+        }
+        const la = (this.accelStatus && this.accelStatus.local_accel) ||
+                   (this.accel && this.accel.local_accel);
+        if (la && la.active) {
+            const who = `${la.process || '本地加速器'}${la.pid ? `（PID ${la.pid}）` : ''}`;
+            if (!window.confirm(`检测到 ${who} 正在接管 Steam 域名。\n\n` +
+                `写 hosts 会覆盖它的效果（两套方案互相冲突）。\n\n` +
+                `建议先关掉它再加速。确定仍要继续？`)) return;
+        }
+        this.elements.accelApplyBtn.disabled = true;
+        this.log('info', `写入加速：${entries.length} 个域名…`);
+        try {
+            const r = await fetch('/api/steam/accel/apply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entries }),
+            });
+            const d = await r.json();
+            this.log(d.success ? 'success' : 'error', d.message || '');
+            this.showSnackbar(d.message || (d.success ? '加速已开启。' : '加速失败。'),
+                d.success ? 'success' : 'error');
+        } catch (e) {
+            this.log('error', `写入加速失败：${e.message}`);
+            this.showSnackbar(`写入加速失败：${e.message}`, 'error');
+        } finally {
+            this.elements.accelApplyBtn.disabled = false;
+        }
+        await this.loadAccelStatus();
+        await this.refreshAccelRows();
+    }
+
+    async accelRestore() {
+        if (!window.confirm('移除 hosts 里的「大轩巴 Steam 加速」记录？\n\n会先自动备份 hosts，随时可以再加速回来。')) return;
+        this.elements.accelRestoreBtn.disabled = true;
+        try {
+            const r = await fetch('/api/steam/accel/restore', { method: 'POST' });
+            const d = await r.json();
+            this.log(d.success ? 'success' : 'error', d.message || '');
+            this.showSnackbar(d.message || (d.success ? '已还原。' : '还原失败。'),
+                d.success ? 'success' : 'error');
+        } catch (e) {
+            this.log('error', `还原失败：${e.message}`);
+            this.showSnackbar(`还原失败：${e.message}`, 'error');
+        } finally {
+            this.elements.accelRestoreBtn.disabled = false;
+        }
+        await this.loadAccelStatus();
+        await this.refreshAccelRows();
+    }
+
+    async refreshAccelRows() {
+        if (!this.accel) return;
+        try {
+            const r = await fetch('/api/steam/accel/status');
+            const d = await r.json();
+            if (d.success) {
+                this.accel.applied = d.applied;
+                this.renderAccelScan(this.accel);
+            }
+        } catch (e) { /* 忽略 */ }
+    }
+
+    async restartElevated() {
+        if (!window.confirm('将以管理员身份重启本程序（会弹出 UAC 授权窗口）。\n\n' +
+            '当前窗口会关闭，请在新窗口里重新点「一键加速」。\n\n继续？')) return;
+        this.log('info', '请求以管理员身份重启…');
+        try {
+            const r = await fetch('/api/app/restart_elevated', { method: 'POST' });
+            const d = await r.json();
+            this.showSnackbar(d.message || '', d.success ? 'info' : 'warning');
+            this.log(d.success ? 'info' : 'warn', d.message || '');
+        } catch (e) {
+            // 程序正在退出，连接被中断属正常现象
         }
     }
 }

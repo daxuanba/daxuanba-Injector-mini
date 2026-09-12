@@ -19,11 +19,14 @@ import shutil
 import struct
 import zlib
 import io  # For workshop manifest processing
+import socket
+import ssl
+import locale
 from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.11"  # 当前版本号
+CURRENT_VERSION = "2.12"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -94,6 +97,35 @@ class STConverter:
         lua_content = decompressed_data[512:].decode('utf-8')
         metadata = {'original_xorkey': xorkey, 'size': size, 'xorkeyverify': xorkeyverify}
         return lua_content, metadata
+
+
+# ---------------- Steam 加速（hosts 优选，模块级配置） ----------------
+# (域名, 分组, 说明) —— 只收录国内直连容易抽风、走 hosts 优选有效的关键域名
+STEAM_ACCEL_DOMAINS = [
+    ('store.steampowered.com',           '商店', 'Steam 商店主站'),
+    ('checkout.steampowered.com',        '商店', '购物车 / 结算'),
+    ('api.steampowered.com',             '商店', '商店 API 接口'),
+    ('help.steampowered.com',            '商店', '客服 / 帮助'),
+    ('login.steampowered.com',           '登录', '账号登录'),
+    ('steamcommunity.com',               '社区', '社区主站'),
+    ('www.steamcommunity.com',           '社区', '社区（www）'),
+    ('cdn.akamai.steamstatic.com',       'CDN',  '商店图片 / 脚本'),
+    ('community.akamai.steamstatic.com', 'CDN',  '社区静态资源'),
+    ('shared.akamai.steamstatic.com',    'CDN',  '通用静态资源'),
+    ('steamcdn-a.akamaihd.net',          'CDN',  'Steam CDN（老域名）'),
+]
+
+# 国内可直连的 DoH（DNS over HTTPS）源，用标准 dns-json 格式拿真实 IP
+STEAM_ACCEL_DOH = [
+    'https://dns.alidns.com/resolve',
+    'https://doh.pub/dns-query',
+    'https://doh.360.cn/resolve',
+    'https://223.5.5.5/resolve',
+]
+
+HOSTS_ACCEL_BEGIN = '# ==== 大轩巴 Steam 加速 BEGIN ===='
+HOSTS_ACCEL_END = '# ==== 大轩巴 Steam 加速 END ===='
+
 
 class DxbBackend:
     def __init__(self):
@@ -1111,6 +1143,365 @@ class DxbBackend:
         except Exception:
             return False
 
+    # ================= Steam 加速（hosts 优选） =================
+
+    @property
+    def _hosts_file(self) -> Path:
+        return Path(r'C:\Windows\System32\drivers\etc\hosts')
+
+    @staticmethod
+    def is_admin() -> bool:
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+
+    def _read_hosts(self) -> str:
+        """surrogateescape 保证读→写能字节级还原，不会弄坏 hosts 里原有的中文注释。"""
+        try:
+            return self._hosts_file.read_text(encoding='utf-8', errors='surrogateescape')
+        except Exception:
+            return ''
+
+    def _write_hosts(self, text: str) -> None:
+        self._hosts_file.write_text(text, encoding='utf-8', errors='surrogateescape')
+
+    def _hosts_writable(self) -> bool:
+        try:
+            with open(self._hosts_file, 'a', encoding='utf-8', errors='surrogateescape'):
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _hosts_accel_block(self) -> Dict[str, str]:
+        """读 hosts 里「大轩巴 Steam 加速」块 → {domain: ip}。"""
+        out: Dict[str, str] = {}
+        inside = False
+        try:
+            for line in self._read_hosts().splitlines():
+                s = line.strip()
+                if s == HOSTS_ACCEL_BEGIN:
+                    inside = True
+                    continue
+                if s == HOSTS_ACCEL_END:
+                    inside = False
+                    continue
+                if not inside or not s or s.startswith('#'):
+                    continue
+                parts = s.split()
+                if len(parts) >= 2:
+                    for d in parts[1:]:
+                        out[d.lower()] = parts[0]
+        except Exception:
+            pass
+        return out
+
+    def _drop_accel_block(self, text: str) -> str:
+        kept, inside = [], False
+        for line in text.splitlines():
+            s = line.strip()
+            if s == HOSTS_ACCEL_BEGIN:
+                inside = True
+                continue
+            if s == HOSTS_ACCEL_END:
+                inside = False
+                continue
+            if not inside:
+                kept.append(line)
+        return '\n'.join(kept).rstrip('\r\n') + '\n'
+
+    def _flush_dns(self) -> bool:
+        try:
+            r = subprocess.run(['ipconfig', '/flushdns'], capture_output=True, timeout=20,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _doh_query(self, provider: str, domain: str, timeout: float = 4.0) -> List[str]:
+        """DoH（dns-json）查 A 记录，绕开被污染的系统 DNS。"""
+        try:
+            with httpx.Client(verify=False, timeout=timeout, trust_env=True) as c:
+                r = c.get(provider, params={'name': domain, 'type': 'A'},
+                          headers={'accept': 'application/dns-json'})
+                if r.status_code != 200:
+                    return []
+                out = []
+                for a in (r.json().get('Answer') or []):
+                    try:
+                        if int(a.get('type', 0)) != 1:
+                            continue
+                    except Exception:
+                        continue
+                    ip = str(a.get('data') or '').strip()
+                    if ip.count('.') == 3 and all(x.isdigit() for x in ip.split('.')):
+                        out.append(ip)
+                return out
+        except Exception:
+            return []
+
+    @staticmethod
+    def _system_resolve(domain: str) -> List[str]:
+        try:
+            infos = socket.getaddrinfo(domain, 443, proto=socket.IPPROTO_TCP)
+            return sorted({i[4][0] for i in infos if ':' not in i[4][0]})
+        except Exception:
+            return []
+
+    @staticmethod
+    def _is_local_ip(ip: str) -> bool:
+        """回环 / 内网 / 链路本地地址。这类解析结果说明域名被本地反代接管了，
+        不能当加速目标写进 hosts（写进去等于把流量导回本机，绕死）。"""
+        ip = (ip or '').strip()
+        if not ip:
+            return True
+        if ':' in ip:                      # IPv6 一律不处理
+            return True
+        p = ip.split('.')
+        if len(p) != 4:
+            return True
+        try:
+            a, b = int(p[0]), int(p[1])
+        except Exception:
+            return True
+        return (a == 127 or a == 0 or a == 10 or a == 169 and b == 254
+                or a == 192 and b == 168
+                or a == 172 and 16 <= b <= 31)
+
+    def _detect_local_accel(self) -> Dict:
+        """检测本机是否已有「本地反代型」Steam 加速器在跑（Steam 社区 302 / Steam++ / Watt Toolkit 等）。
+        它们把 Steam 域名解析到 127.0.0.1 并在本地 443 监听，与 hosts 优选方案互斥。"""
+        info = {'active': False, 'process': None, 'pid': None, 'domains': []}
+        for d, _, _ in STEAM_ACCEL_DOMAINS:
+            try:
+                ips = {i[4][0] for i in socket.getaddrinfo(d, 443, proto=socket.IPPROTO_TCP)}
+            except Exception:
+                continue
+            if any(self._is_local_ip(x) for x in ips):
+                info['domains'].append(d)
+        info['active'] = bool(info['domains'])
+        if not info['active']:
+            return info
+
+        enc = locale.getpreferredencoding(False)
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        try:
+            r = subprocess.run(['netstat', '-ano'], capture_output=True, timeout=20,
+                               encoding=enc, errors='ignore', creationflags=flags)
+            pid = None
+            for line in (r.stdout or '').splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[0].upper().startswith('TCP') \
+                        and parts[1].startswith('127.0.0.1:443') and parts[3] == 'LISTENING':
+                    pid = parts[4]
+                    break
+            if pid:
+                info['pid'] = pid
+                r2 = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/NH'],
+                                    capture_output=True, timeout=20, encoding=enc,
+                                    errors='ignore', creationflags=flags)
+                txt = (r2.stdout or '').strip()
+                if txt and 'No tasks' not in txt:
+                    info['process'] = txt.split()[0]
+        except Exception:
+            pass
+        return info
+
+    @staticmethod
+    def _probe_steam_ip(ip: str, domain: str, timeout: float = 3.0, port: int = 443) -> Dict:
+        """TCP → TLS → HTTP 三段实测，返回毫秒耗时与综合得分。
+
+        TLS 阶段**强校验证书必须匹配域名**：这一步同时承担「筛掉 DNS 污染」的职责 ——
+        被污染的域名会解析到别人的 IP（例如 steamcommunity.com 被解析到 Facebook 段），
+        那些 IP 的证书跟目标域名对不上，直接判死，绝不允许写进 hosts。
+        """
+        t0 = time.perf_counter()
+        sock = ss = None
+        try:
+            sock = socket.create_connection((ip, port), timeout=timeout)
+            tcp_ms = (time.perf_counter() - t0) * 1000
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            try:
+                ss = ctx.wrap_socket(sock, server_hostname=domain)
+            except ssl.SSLCertVerificationError:
+                return {'ip': ip, 'ok': False, 'error': 'cert_mismatch'}
+            tls_ms = (time.perf_counter() - t0) * 1000
+            ss.settimeout(timeout)
+            ss.sendall(
+                f'HEAD / HTTP/1.1\r\nHost: {domain}\r\n'
+                'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n'
+                'Accept: */*\r\nConnection: close\r\n\r\n'.encode())
+            ss.recv(64)
+            total_ms = (time.perf_counter() - t0) * 1000
+            return {'ip': ip, 'ok': True,
+                    'tcp_ms': round(tcp_ms, 1), 'tls_ms': round(tls_ms, 1),
+                    'total_ms': round(total_ms, 1),
+                    'score': round(tcp_ms * 0.35 + total_ms * 0.65, 1)}
+        except Exception as e:
+            return {'ip': ip, 'ok': False, 'error': type(e).__name__}
+        finally:
+            for s in (ss, sock):
+                try:
+                    if s:
+                        s.close()
+                except Exception:
+                    pass
+
+    def steam_accel_status(self) -> Dict:
+        applied = self._hosts_accel_block()
+        return {'success': True, 'enabled': bool(applied), 'applied': applied,
+                'count': len(applied), 'admin': self.is_admin(),
+                'writable': self._hosts_writable(),
+                'local_accel': self._detect_local_accel(),
+                'hosts_path': str(self._hosts_file)}
+
+    def steam_accel_scan(self, domains: List[str] | None = None,
+                         max_ip_per_domain: int = 8) -> Dict:
+        """并发 DoH 解析 + 真实测速，为每个域名挑最快 IP。"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        want = set(domains or [])
+        targets = [t for t in STEAM_ACCEL_DOMAINS if not want or t[0] in want] or list(STEAM_ACCEL_DOMAINS)
+
+        # 1) 并发查多个 DoH 源，合并候选池
+        pool: Dict[str, List[str]] = {}
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            futs = {ex.submit(self._doh_query, p, d): d
+                    for d, _, _ in targets for p in STEAM_ACCEL_DOH}
+            for f in as_completed(futs):
+                d = futs[f]
+                try:
+                    ips = f.result() or []
+                except Exception:
+                    ips = []
+                bucket = pool.setdefault(d, [])
+                for ip in ips:
+                    if ip not in bucket:
+                        bucket.append(ip)
+
+        # 系统解析兜底：保证候选池里至少有当前在用的 IP，结果不会比现状更差
+        for d, _, _ in targets:
+            bucket = pool.setdefault(d, [])
+            for ip in self._system_resolve(d):
+                if ip not in bucket:
+                    bucket.append(ip)
+
+        # 剔除回环 / 内网地址：那是本地反代（Steam 社区 302 / Steam++）留下的产物，
+        # 测起来最快，但写进 hosts 等于把流量导回本机，反而绕死。
+        local_accel = self._detect_local_accel()
+        for d in list(pool):
+            pool[d] = [ip for ip in pool[d] if not self._is_local_ip(ip)]
+
+        # 2) 并发测速
+        probed: Dict[str, List[Dict]] = {d: [] for d, _, _ in targets}
+        with ThreadPoolExecutor(max_workers=32) as ex:
+            job = {}
+            for d, _, _ in targets:
+                for ip in pool.get(d, [])[:max_ip_per_domain]:
+                    job[ex.submit(self._probe_steam_ip, ip, d)] = d
+            for f in as_completed(job):
+                d = job[f]
+                try:
+                    r = f.result()
+                except Exception:
+                    r = None
+                if r:
+                    probed[d].append(r)
+
+        applied = self._hosts_accel_block()
+        rows = []
+        for d, group, desc in targets:
+            cands = sorted(probed.get(d, []),
+                           key=lambda x: (not x.get('ok'), x.get('score', 1e9)))
+            alive = [c for c in cands if c.get('ok')]
+            # 全部候选都是「证书对不上」→ 这个域名被 DNS 污染了，hosts 优选救不了它
+            poisoned = bool(cands) and not alive and all(
+                c.get('error') == 'cert_mismatch' for c in cands)
+            if alive:
+                reason = ''
+            elif poisoned:
+                reason = '解析被污染（候选 IP 的证书都不是这个域名）—— hosts 优选救不了，要用本地反代型加速器'
+            elif not cands:
+                reason = '没拿到任何候选 IP —— 本机 DNS 解析异常'
+            else:
+                reason = '候选 IP 全部连不上（该域名多半被污染 / 被墙）—— hosts 优选无效，要用本地反代型加速器'
+            rows.append({'domain': d, 'group': group, 'desc': desc,
+                         'candidates': cands[:8],
+                         'best': alive[0] if alive else None,
+                         'poisoned': poisoned, 'reason': reason,
+                         'current': applied.get(d)})
+        return {'success': True, 'domains': rows, 'admin': self.is_admin(),
+                'writable': self._hosts_writable(), 'local_accel': local_accel,
+                'applied': applied, 'hosts_path': str(self._hosts_file)}
+
+    def steam_accel_apply(self, entries: List[Dict]) -> Dict:
+        """把优选 IP 写进 hosts 加速块（先备份，再整体替换旧块）。"""
+        pairs = []
+        for e in (entries or []):
+            d = str(e.get('domain') or '').strip().lower()
+            ip = str(e.get('ip') or '').strip()
+            if not d or ip.count('.') != 3 or not all(x.isdigit() for x in ip.split('.')):
+                continue
+            pairs.append((d, ip))
+        if not pairs:
+            return {'success': False, 'message': '没有可写入的加速条目。'}
+
+        backup_path = None
+        try:
+            backup_dir = self.project_root / 'userdata' / 'hosts_backup'
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            if self._hosts_file.exists():
+                backup_path = backup_dir / f'hosts_{time.strftime("%Y%m%d_%H%M%S")}.bak'
+                shutil.copy2(self._hosts_file, backup_path)
+        except Exception:
+            pass
+
+        try:
+            text = self._drop_accel_block(self._read_hosts())
+            block = [HOSTS_ACCEL_BEGIN,
+                     f'# 由 大轩巴入库器mini v{CURRENT_VERSION} 生成 · {time.strftime("%Y-%m-%d %H:%M:%S")}',
+                     '# 还原：工具箱 → Steam 加速 → 一键还原']
+            block += [f'{ip}\t{d}' for d, ip in pairs]
+            block.append(HOSTS_ACCEL_END)
+            self._write_hosts(text.rstrip('\r\n') + '\n\n' + '\n'.join(block) + '\n')
+        except PermissionError:
+            return {'success': False, 'need_admin': True,
+                    'message': '写入 hosts 需要管理员权限 —— 请点「以管理员身份重启」后重试。'}
+        except Exception as e:
+            return {'success': False, 'message': f'写入 hosts 失败：{e}'}
+
+        flushed = self._flush_dns()
+        return {'success': True, 'count': len(pairs), 'domains': [d for d, _ in pairs],
+                'backup': str(backup_path) if backup_path else None, 'dns_flushed': flushed,
+                'message': f'已为 {len(pairs)} 个域名写入优选 IP' + ('，DNS 缓存已刷新' if flushed else '')}
+
+    def steam_accel_restore(self) -> Dict:
+        """移除 hosts 里的加速块（先备份）。"""
+        try:
+            backup_dir = self.project_root / 'userdata' / 'hosts_backup'
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            if self._hosts_file.exists():
+                shutil.copy2(self._hosts_file, backup_dir / f'hosts_{time.strftime("%Y%m%d_%H%M%S")}.bak')
+        except Exception:
+            pass
+
+        n = len(self._hosts_accel_block())
+        try:
+            self._write_hosts(self._drop_accel_block(self._read_hosts()))
+        except PermissionError:
+            return {'success': False, 'need_admin': True,
+                    'message': '修改 hosts 需要管理员权限 —— 请点「以管理员身份重启」后重试。'}
+        except Exception as e:
+            return {'success': False, 'message': f'还原失败：{e}'}
+
+        flushed = self._flush_dns()
+        return {'success': True, 'removed': n, 'dns_flushed': flushed,
+                'message': f'已移除加速记录（{n} 条）' + ('，DNS 缓存已刷新' if flushed else '')}
+
     def steam_diagnose(self) -> Dict:
         """体检 Steam 环境：返回逐项检查结果，同时给出可执行的修复动作。"""
         checks: List[Dict] = []
@@ -1191,6 +1582,18 @@ class DxbBackend:
         if hosts_hits:
             fixes.append({"id": "fix_hosts", "name": "注释掉 hosts 里的 Steam 记录",
                           "desc": "改写前会备份 hosts 到 userdata，可随时还原"})
+
+        # 6.5) 本地反代型加速器（Steam 社区 302 / Steam++ / Watt Toolkit）
+        #      这类工具把域名解析到 127.0.0.1 并在本地 443 监听，与 hosts 优选互斥。
+        la = self._detect_local_accel()
+        la_proc = la.get('process') or '本地加速器'
+        la_pid = f'（PID {la["pid"]}）' if la.get('pid') else ''
+        add('local_accel', '本地加速器占用', not la['active'],
+            '未检测到本地反代型加速器' if not la['active']
+            else (f'检测到 {la_proc}{la_pid} 正在接管 Steam 域名'
+                  f'（{len(la["domains"])} 个解析到 127.0.0.1）。'
+                  '它和「Steam 加速」的 hosts 优选会互相覆盖，建议二选一。'),
+            level='ok' if not la['active'] else 'warn')
 
         # 7) 下载缓存体积
         if sp_ok:

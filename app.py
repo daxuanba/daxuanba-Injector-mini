@@ -190,6 +190,16 @@ def steam_login_succeeded(cookie: str):
     return {"success": True, "account": account}
 
 
+# ---------------- 以管理员身份重启（写 hosts 加速要用） ----------------
+_elevated_restart = None
+
+
+def register_elevated_restart(fn):
+    """由桌面壳注入：fn() 负责以管理员身份重新拉起本程序（非阻塞，随后自杀）。"""
+    global _elevated_restart
+    _elevated_restart = fn if callable(fn) else None
+
+
 def _is_steam_logged_in() -> bool:
     """入库前的登录态判定：内置浏览器登录成功，或配置里已存过 Cookie。"""
     if STEAM_LOGIN.get("status") == "success" and STEAM_LOGIN.get("account"):
@@ -1207,6 +1217,71 @@ def steam_repair():
         return jsonify(_quick_backend().steam_repair(actions))
     except Exception as e:
         return jsonify({"success": False, "message": f"修复失败: {e}", "results": []})
+
+
+# --- Steam 加速（hosts 优选） ---
+@app.route('/api/steam/accel/status', methods=['GET'])
+def steam_accel_status():
+    """加速状态：hosts 里是否已有加速块、是否管理员、hosts 是否可写。"""
+    try:
+        return jsonify(_quick_backend().steam_accel_status())
+    except Exception as e:
+        return jsonify({"success": False, "enabled": False, "applied": {}, "count": 0,
+                        "admin": False, "writable": False, "message": f"读取加速状态失败: {e}"})
+
+
+@app.route('/api/steam/accel/scan', methods=['POST'])
+def steam_accel_scan():
+    """并发 DoH 解析 + 真实测速，给出每个域名的最优 IP。"""
+    data = request.get_json(silent=True) or {}
+    domains = data.get('domains')
+    if domains is not None and not isinstance(domains, list):
+        domains = None
+    try:
+        return jsonify(_quick_backend().steam_accel_scan(domains or None))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"测速失败: {e}", "domains": []})
+
+
+@app.route('/api/steam/accel/apply', methods=['POST'])
+def steam_accel_apply():
+    """把选中的优选 IP 写入 hosts（先备份，可一键还原）。"""
+    data = request.get_json(silent=True) or {}
+    entries = data.get('entries') or []
+    if not isinstance(entries, list):
+        return jsonify({"success": False, "message": "无效的加速条目。"})
+    try:
+        return jsonify(_quick_backend().steam_accel_apply(entries))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"写入加速失败: {e}"})
+
+
+@app.route('/api/steam/accel/restore', methods=['POST'])
+def steam_accel_restore():
+    """移除 hosts 里的加速块。"""
+    try:
+        return jsonify(_quick_backend().steam_accel_restore())
+    except Exception as e:
+        return jsonify({"success": False, "message": f"还原失败: {e}"})
+
+
+@app.route('/api/app/restart_elevated', methods=['POST'])
+def app_restart_elevated():
+    """以管理员身份重启本程序（仅桌面壳可用）。"""
+    if _elevated_restart is None:
+        return jsonify({"success": False, "available": False,
+                        "message": "当前环境不支持自动提权，请手动右键 exe → 以管理员身份运行。"})
+    if DxbBackend.is_admin():
+        return jsonify({"success": True, "already": True, "message": "当前已经是管理员权限。"})
+    def _go():
+        time.sleep(0.8)          # 先把响应吐出去，再提权
+        try:
+            _elevated_restart()
+        except Exception:
+            pass
+    threading.Thread(target=_go, daemon=True).start()
+    return jsonify({"success": True, "available": True,
+                    "message": "正在请求管理员权限，请在弹窗中点「是」，程序会以管理员身份重启。"})
 
 
 @app.route('/api/steam/restart', methods=['POST'])
