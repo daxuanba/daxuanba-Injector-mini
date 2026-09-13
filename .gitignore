@@ -18,3 +18,13 @@ build_log.txt
 build_v*_log.txt
 build_v*/
 push_log.txt
+
+# 源码加密产物（Cython 编译的 .pyd）与临时构建目录：二进制，不入库
+*.pyd
+_encrypted/
+_encstage*/
+_enctest/
+dist_enc/
+_obf/
+backup/
+_enctest/

@@ -113,11 +113,13 @@
     z-index: 10;
     opacity: 0;
     visibility: hidden;
+    pointer-events: none;   /* 隐藏时不拦截点击，避免盖住下载按钮 */
     transition: opacity 0.3s ease, visibility 0.3s ease;
 }
 .loading-overlay.visible {
     opacity: 1;
     visibility: visible;
+    pointer-events: auto;
 }
 
 .file-grid {

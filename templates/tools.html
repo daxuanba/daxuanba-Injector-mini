@@ -68,6 +68,21 @@
             background:var(--md-sys-color-warning-container);color:var(--md-sys-color-on-warning-container);
             font-size:13px;margin-bottom:12px;}
         .accel-warn .btn{margin-left:auto;}
+
+        /* --- 加速分类标签页 --- */
+        .accel-tabs{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;}
+        .accel-tab{border:1px solid var(--md-sys-color-outline-variant);background:transparent;color:var(--md-sys-color-on-surface-variant);
+            padding:7px 18px;border-radius:999px;font-size:13px;font-weight:600;cursor:pointer;transition:.18s;}
+        .accel-tab:hover{border-color:var(--dx-yellow);color:var(--md-sys-color-on-surface);}
+        .accel-tab.active{background:var(--dx-yellow);border-color:var(--dx-yellow);color:#1a1a1a;}
+
+        /* --- 加速方式切换（hosts / 免hosts） --- */
+        .accel-mode-bar{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;}
+        .accel-mode-label{font-size:12.5px;color:var(--md-sys-color-on-surface-variant);}
+        .accel-mode{border:1px solid var(--md-sys-color-outline-variant);background:transparent;color:var(--md-sys-color-on-surface-variant);
+            padding:6px 14px;border-radius:10px;font-size:12.5px;cursor:pointer;transition:.18s;}
+        .accel-mode:hover{border-color:var(--dx-yellow);color:var(--md-sys-color-on-surface);}
+        .accel-mode.active{background:var(--dx-yellow);border-color:var(--dx-yellow);color:#1a1a1a;font-weight:700;}
     </style>
 </head>
 <body>
@@ -117,18 +132,30 @@
 
             <div class="card manager-card">
                 <div class="card-header">
-                    <h2>Steam 加速（hosts 优选）</h2>
+                    <h2>网络加速</h2>
                     <div class="card-actions">
                         <button class="btn btn-secondary" id="accelScanBtn"><span class="material-icons">speed</span> 测速选优</button>
                         <button class="btn btn-primary" id="accelApplyBtn"><span class="material-icons">bolt</span> 一键加速</button>
                         <button class="btn btn-secondary" id="accelRestoreBtn"><span class="material-icons">restart_alt</span> 一键还原</button>
                     </div>
                 </div>
+                <div class="accel-tabs" id="accelTabs">
+                    <button class="accel-tab active" data-cat="steam">Steam</button>
+                    <button class="accel-tab" data-cat="browser">浏览器</button>
+                    <button class="accel-tab" data-cat="github">GitHub</button>
+                </div>
+                <div class="accel-mode-bar" id="accelMode">
+                    <span class="accel-mode-label">加速方式：</span>
+                    <button class="accel-mode active" data-mode="hosts">hosts 优选（需管理员）</button>
+                    <button class="accel-mode" data-mode="free">免hosts 代理（推荐·免改系统）</button>
+                </div>
                 <div id="accelSummary" style="margin-bottom:12px;"></div>
                 <div id="accelAdminBar"></div>
+                <div id="accelFreeBar"></div>
                 <div id="accelList">
-                    <div class="empty-hint">点「测速选优」：并发解析各 Steam 域名（走多个国内 DoH，绕开被污染的系统 DNS），
-                        再对候选 IP 做 TCP + TLS + HTTP 三段实测，自动挑最快的那条写进 hosts。</div>
+                    <div class="empty-hint">选择上方分类，点「测速选优」：并发解析各域名（走多个国内 DoH，绕开被污染的系统 DNS），
+                        再对候选 IP 做 TCP + TLS + HTTP 三段实测，自动挑最快的那条。
+                        然后选加速方式：「hosts 优选」写系统 hosts（需管理员）；「免hosts 代理」只改内置浏览器解析（免管理员、重启应用生效）。</div>
                 </div>
             </div>
 

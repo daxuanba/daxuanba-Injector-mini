@@ -99,3 +99,16 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
+
+// --- 加载遮罩防卡死：万一某次请求异常导致遮罩没被隐藏，超时后自动隐藏，
+//     避免遮罩一直盖在页面上、拦截点击（表现为「点了没反应 / 下载按钮被挡住」）。---
+setInterval(() => {
+    document.querySelectorAll('.loading-overlay.visible').forEach(el => {
+        const since = parseInt(el.dataset.dxbShownAt || '0', 10) || 0;
+        if (!since) { el.dataset.dxbShownAt = String(Date.now()); return; }
+        if (Date.now() - since > 20000) {
+            el.classList.remove('visible');
+            delete el.dataset.dxbShownAt;
+        }
+    });
+}, 4000);

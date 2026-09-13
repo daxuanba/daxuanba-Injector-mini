@@ -16,9 +16,11 @@
 """
 import os
 import sys
+import json
 import time
 import threading
 import socket
+import subprocess
 import webbrowser
 import urllib.request
 import urllib.error
@@ -153,11 +155,21 @@ def wait_server_ready(url, timeout=60):
 
 
 def load_flask_module():
-    """从 app.py 加载 Flask 应用（不触发 __main__ 的自动开浏览器）"""
+    """从 app.pyd / app.py 加载 Flask 应用（不触发 __main__ 的自动开浏览器）
+
+    加密版优先：app.pyd 是 Cython 编译出的真实扩展模块（源码不可见），
+    扩展模块的初始化函数必须与模块名匹配（PyInit_app），故这里模块名固定为 'app'。
+    没有 .pyd 时回退到明文 app.py，保持开发/未加密构建可用。
+    """
     import importlib.util
-    app_py = RESOURCE_DIR / 'app.py'
-    spec = importlib.util.spec_from_file_location('dxb_flask_app', app_py)
+    app_pyd = RESOURCE_DIR / 'app.pyd'
+    if app_pyd.exists():
+        load_path, mod_name = app_pyd, 'app'
+    else:
+        load_path, mod_name = RESOURCE_DIR / 'app.py', 'dxb_flask_app'
+    spec = importlib.util.spec_from_file_location(mod_name, load_path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
     # 冻结环境下，app.py 是动态 importlib 加载的模块，Flask 的 get_root_path
     # 拿不到它的 __file__，会回退到当前工作目录，导致 templates/ 与 static/
@@ -199,6 +211,117 @@ def shutdown_server(url):
         urllib.request.urlopen(url + '/api/shutdown', timeout=2)
     except Exception:
         pass
+
+
+def load_accel_rules():
+    """从 config.json 读免hosts加速映射，生成 Chromium --host-resolver-rules 字符串。
+    仅重定向已启用分类的域名→IP，结尾 MAP * * 让其余域名走系统默认解析。"""
+    try:
+        cfg_path = USER_DIR / 'config.json'
+        if not cfg_path.exists():
+            return ''
+        cfg = json.load(open(cfg_path, encoding='utf-8'))
+        hf = cfg.get('accel_hostsfree', {}) or {}
+        rules = []
+        for cat, pairs in hf.items():
+            for d, ip in (pairs or {}).items():
+                rules.append(f'MAP {d} {ip}')
+        if not rules:
+            return ''
+        rules.append('MAP * *')
+        return ','.join(rules)
+    except Exception:
+        return ''
+
+
+def find_chromium_browser():
+    """找一个 Chromium 系浏览器（支持 --host-resolver-rules 免hosts加速）。
+    优先大轩巴浏览器，其次 Edge / Chrome / Brave。返回 exe 路径或 None。"""
+    env = os.environ
+    bases = [env.get('PROGRAMFILES'), env.get('PROGRAMFILES(X86)'), env.get('LOCALAPPDATA')]
+    cands = []
+    for base in bases:
+        if not base:
+            continue
+        cands += [
+            Path(base) / '大轩巴浏览器' / '大轩巴浏览器.exe',
+            Path(base) / 'Microsoft' / 'Edge' / 'Application' / 'msedge.exe',
+            Path(base) / 'Google' / 'Chrome' / 'Application' / 'chrome.exe',
+            Path(base) / 'BraveSoftware' / 'Brave-Browser' / 'Application' / 'brave.exe',
+        ]
+    for p in cands:
+        try:
+            if p.exists():
+                return p
+        except Exception:
+            pass
+    return None
+
+
+def open_in_system_browser(url, rules=''):
+    """用系统浏览器打开应用页面。
+    - 有加速规则时优先用 Chromium 系浏览器带 --host-resolver-rules 启动（免hosts加速）；
+      用独立 profile 目录保证参数必定生效（浏览器已在运行时新窗口会复用旧进程而忽略参数）。
+    - 找不到 Chromium 系浏览器 / 启动失败 → 回退系统默认浏览器（无加速）。"""
+    if rules:
+        exe = find_chromium_browser()
+        if exe:
+            try:
+                profile = USER_DIR / 'accel_browser_profile'
+                profile.mkdir(parents=True, exist_ok=True)
+                subprocess.Popen([
+                    str(exe),
+                    f'--user-data-dir={profile}',
+                    f'--host-resolver-rules={rules}',
+                    '--no-first-run',
+                    '--new-window', url,
+                ])
+                print('[大轩巴] 已用系统浏览器 + 免hosts加速打开页面。')
+                return True
+            except Exception as e:
+                print('[大轩巴] 带加速参数启动浏览器失败，回退默认浏览器：', e)
+    try:
+        webbrowser.open_new(url)
+        return True
+    except Exception:
+        return False
+
+
+def _register_restart_launchers(mod, url):
+    """注册提权重启 + 普通重启 launcher（与打开模式无关，两种模式都需要）。"""
+    if hasattr(mod, 'register_elevated_restart'):
+        def _relaunch_elevated():
+            import ctypes
+            if IS_FROZEN:
+                exe = sys.executable
+                params = ' '.join(f'"{a}"' for a in sys.argv[1:])
+            else:
+                exe = sys.executable
+                files = [os.path.abspath(sys.argv[0])] + list(sys.argv[1:])
+                params = ' '.join(f'"{p}"' for p in files)
+            try:
+                rc = ctypes.windll.shell32.ShellExecuteW(
+                    None, 'runas', exe, params, str(Path(exe).resolve().parent), 1)
+            except Exception as e:
+                print('[大轩巴] 提权失败:', e)
+                return False
+            if int(rc) <= 32:
+                print('[大轩巴] 提权被拒绝（ShellExecuteW 返回 %s）' % rc)
+                return False
+            threading.Timer(0.8, lambda: shutdown_server(url)).start()
+            return True
+        mod.register_elevated_restart(_relaunch_elevated)
+
+    if hasattr(mod, 'register_app_restart'):
+        def _relaunch_normal():
+            try:
+                subprocess.Popen([sys.executable] + list(sys.argv[1:]))
+            except Exception as e:
+                print('[大轩巴] 重启失败:', e)
+                return False
+            threading.Timer(0.5, lambda: shutdown_server(url)).start()
+            return True
+        mod.register_app_restart(_relaunch_normal)
 
 
 # ---------- QT6 绑定（优先 PySide6，其次 PyQt6） ----------
@@ -517,11 +640,20 @@ def main():
     server_thread = threading.Thread(target=start_flask_server, args=(port, mod), daemon=True)
     server_thread.start()
 
-    if HAVE_QT is None:
-        print('[大轩巴] 未检测到 PySide6 / PyQt6，改用系统默认浏览器打开网页。')
+    _rules = load_accel_rules()
+
+    # 注册提权重启 + 普通重启 launcher（两种打开模式都需要）
+    _register_restart_launchers(mod, url)
+
+    # 系统浏览器模式：打包时已排除 PySide6（去掉整包 Qt WebEngine，体积大幅瘦身），
+    # 或显式设置 DXB_FORCE_SYSTEM_BROWSER=1 时，一律用系统浏览器打开。
+    _use_system_browser = HAVE_QT is None or os.environ.get('DXB_FORCE_SYSTEM_BROWSER') == '1'
+    if _use_system_browser:
+        why = '未检测到 PySide6 / PyQt6' if HAVE_QT is None else '已指定 DXB_FORCE_SYSTEM_BROWSER'
+        print(f'[大轩巴] 使用系统浏览器打开网页（{why}）。')
         print(f'[大轩巴] 本地服务地址：{url}')
         wait_server_ready(url)
-        webbrowser.open_new(url)
+        open_in_system_browser(url, _rules)
         try:
             while True:
                 time.sleep(1)
@@ -531,6 +663,12 @@ def main():
 
     print(f'[大轩巴] 使用 {HAVE_QT} 桌面窗口打开网页。')
     wait_server_ready(url)
+
+    # 免hosts 加速（内置窗口模式）：把已保存的「域名→优选IP」映射注入 Chromium 解析阶段，
+    # 不改动系统 hosts、不需管理员、不影响本机回环。
+    if _rules:
+        sys.argv = list(sys.argv) + [f'--host-resolver-rules={_rules}']
+        print(f'[大轩巴] 已启用免hosts加速，注入 host-resolver-rules（{len(_rules.split(","))-1} 条映射）')
 
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
@@ -556,33 +694,7 @@ def main():
 
         mod.register_steam_login_launcher(_launch_login)
 
-    # 注入“以管理员身份重启”launcher：写 hosts 做 Steam 加速时需要管理员权限。
-    # 用 ShellExecuteW 的 runas 动词拉起新实例（会弹 UAC），然后关掉当前实例。
-    # 端口是动态找的，所以新实例不会和旧实例抢端口，无需等待。
-    if hasattr(mod, 'register_elevated_restart'):
-        def _relaunch_elevated():
-            import ctypes
-            if IS_FROZEN:
-                exe = sys.executable
-                params = ' '.join(f'"{a}"' for a in sys.argv[1:])
-            else:
-                exe = sys.executable
-                files = [os.path.abspath(sys.argv[0])] + list(sys.argv[1:])
-                params = ' '.join(f'"{p}"' for p in files)
-            try:
-                rc = ctypes.windll.shell32.ShellExecuteW(
-                    None, 'runas', exe, params, str(Path(exe).resolve().parent), 1)
-            except Exception as e:
-                print('[大轩巴] 提权失败:', e)
-                return False
-            # ShellExecuteW <= 32 表示失败；尤其 5 = ERROR_ACCESS_DENIED（用户点了「否」）
-            if int(rc) <= 32:
-                print('[大轩巴] 提权被拒绝（ShellExecuteW 返回 %s）' % rc)
-                return False
-            threading.Timer(0.8, lambda: shutdown_server(url)).start()
-            return True
-
-        mod.register_elevated_restart(_relaunch_elevated)
+    # 提权重启 / 普通重启 launcher 已在 main() 前段统一注册（_register_restart_launchers）
 
     app.exec()
     shutdown_server(url)

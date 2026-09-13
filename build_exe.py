@@ -57,21 +57,19 @@ excludes = [
     'numpy',
     'pytest',
     'PIL',
+    # 改用系统浏览器打开页面：整包排除 Qt / WebEngine，exe 从 ~250MB 瘦身到几十 MB。
+    # 冻结后 dxb_desktop 检测不到 PySide6 会走「系统浏览器」分支；开发时可用
+    # 环境变量 DXB_FORCE_SYSTEM_BROWSER=1 强制同款行为。
+    'PySide6',
+    'PyQt6',
+    'PyQt5',
+    'PySide2',
+    'shiboken6',
+    'shiboken2',
 ]
 
 
 def main():
-    # 把 PySide6 的 plugins 目录（含 platforms/qwindows.dll 窗口平台插件）打进包，
-    # 否则冻结后创建 QApplication 会因找不到 qwindows 平台插件而崩溃。
-    try:
-        import PySide6  # noqa
-        _ps_dir = os.path.dirname(PySide6.__file__)
-        _plug = os.path.join(_ps_dir, 'plugins')
-        if os.path.isdir(_plug):
-            datas.append((_plug, 'PySide6/plugins'))
-    except Exception:
-        pass
-
     import PyInstaller.__main__
 
     args = [

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.12"  # 当前版本号
+CURRENT_VERSION = "2.14"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -125,6 +125,55 @@ STEAM_ACCEL_DOH = [
 
 HOSTS_ACCEL_BEGIN = '# ==== 大轩巴 Steam 加速 BEGIN ===='
 HOSTS_ACCEL_END = '# ==== 大轩巴 Steam 加速 END ===='
+
+# 浏览器加速：开发者常用的公共 CDN / 字体 / 包源（hosts 优选能改善国内访问）
+BROWSER_ACCEL_DOMAINS = [
+    ('cdn.jsdelivr.net',            'CDN',  'jsDelivr 公共库（npm/CDN）'),
+    ('fastly.jsdelivr.net',         'CDN',  'jsDelivr Fastly 节点'),
+    ('fonts.googleapis.com',        '字体', 'Google Fonts 样式表'),
+    ('fonts.gstatic.com',           '字体', 'Google Fonts 字体文件'),
+    ('ajax.googleapis.com',         'CDN',  'Google 前端库'),
+    ('cdnjs.cloudflare.com',       'CDN',  'cdnjs 静态资源'),
+    ('unpkg.com',                  'CDN',  'npm 前端包'),
+    ('registry.npmjs.org',         'npm',  'npm 官方源'),
+]
+
+# GitHub 加速：github 全量子域（raw/gist/avatar/release/对象存储等）
+GITHUB_ACCEL_DOMAINS = [
+    ('github.com',                  '主站', 'GitHub 网站'),
+    ('api.github.com',             'API',  'REST / GraphQL 接口'),
+    ('raw.githubusercontent.com',   'Raw',  '原始文件 / 脚本'),
+    ('gist.githubusercontent.com',  'Gist', 'Gist 片段'),
+    ('avatars.githubusercontent.com', '头像', '用户头像'),
+    ('github.githubassets.com',     '静态', 'GitHub 静态资源 / 图片'),
+    ('objects.githubusercontent.com', '对象存储', 'Release / LFS 大文件'),
+    ('releases.githubusercontent.com', 'Release', '发布附件下载'),
+    ('codeload.github.com',         '源码', 'zip/tar.gz 源码下载'),
+    ('uploads.github.com',          '上传', '上传接口'),
+]
+
+# 加速分类表：每个分类有独立的 hosts 块标记，互不干扰
+ACCEL_CATEGORIES = {
+    'steam': {
+        'label': 'Steam',
+        'begin': HOSTS_ACCEL_BEGIN,
+        'end': HOSTS_ACCEL_END,
+        'domains': STEAM_ACCEL_DOMAINS,
+    },
+    'browser': {
+        'label': '浏览器',
+        'begin': '# ==== 大轩巴 浏览器加速 BEGIN ====',
+        'end': '# ==== 大轩巴 浏览器加速 END ====',
+        'domains': BROWSER_ACCEL_DOMAINS,
+    },
+    'github': {
+        'label': 'GitHub',
+        'begin': '# ==== 大轩巴 GitHub 加速 BEGIN ====',
+        'end': '# ==== 大轩巴 GitHub 加速 END ====',
+        'domains': GITHUB_ACCEL_DOMAINS,
+    },
+}
+ACCEL_CATEGORY_NAMES = list(ACCEL_CATEGORIES.keys())
 
 
 class DxbBackend:
@@ -1175,17 +1224,19 @@ class DxbBackend:
         except Exception:
             return False
 
-    def _hosts_accel_block(self) -> Dict[str, str]:
-        """读 hosts 里「大轩巴 Steam 加速」块 → {domain: ip}。"""
+    def _hosts_accel_block(self, begin: str = None, end: str = None) -> Dict[str, str]:
+        """读 hosts 里某分类的加速块 → {domain: ip}。begin/end 传分类专属标记。"""
+        begin = begin or HOSTS_ACCEL_BEGIN
+        end = end or HOSTS_ACCEL_END
         out: Dict[str, str] = {}
         inside = False
         try:
             for line in self._read_hosts().splitlines():
                 s = line.strip()
-                if s == HOSTS_ACCEL_BEGIN:
+                if s == begin:
                     inside = True
                     continue
-                if s == HOSTS_ACCEL_END:
+                if s == end:
                     inside = False
                     continue
                 if not inside or not s or s.startswith('#'):
@@ -1198,14 +1249,16 @@ class DxbBackend:
             pass
         return out
 
-    def _drop_accel_block(self, text: str) -> str:
+    def _drop_accel_block(self, text: str, begin: str = None, end: str = None) -> str:
+        begin = begin or HOSTS_ACCEL_BEGIN
+        end = end or HOSTS_ACCEL_END
         kept, inside = [], False
         for line in text.splitlines():
             s = line.strip()
-            if s == HOSTS_ACCEL_BEGIN:
+            if s == begin:
                 inside = True
                 continue
-            if s == HOSTS_ACCEL_END:
+            if s == end:
                 inside = False
                 continue
             if not inside:
@@ -1274,7 +1327,10 @@ class DxbBackend:
         """检测本机是否已有「本地反代型」Steam 加速器在跑（Steam 社区 302 / Steam++ / Watt Toolkit 等）。
         它们把 Steam 域名解析到 127.0.0.1 并在本地 443 监听，与 hosts 优选方案互斥。"""
         info = {'active': False, 'process': None, 'pid': None, 'domains': []}
-        for d, _, _ in STEAM_ACCEL_DOMAINS:
+        all_domains = []
+        for cat in ACCEL_CATEGORIES.values():
+            all_domains += [t[0] for t in cat['domains']]
+        for d in all_domains:
             try:
                 ips = {i[4][0] for i in socket.getaddrinfo(d, 443, proto=socket.IPPROTO_TCP)}
             except Exception:
@@ -1352,20 +1408,30 @@ class DxbBackend:
                     pass
 
     def steam_accel_status(self) -> Dict:
-        applied = self._hosts_accel_block()
-        return {'success': True, 'enabled': bool(applied), 'applied': applied,
-                'count': len(applied), 'admin': self.is_admin(),
-                'writable': self._hosts_writable(),
+        return self.accel_status('steam')
+
+    def accel_status(self, category: str = 'steam') -> Dict:
+        cat = ACCEL_CATEGORIES.get(category, ACCEL_CATEGORIES['steam'])
+        applied = self._hosts_accel_block(cat['begin'], cat['end'])
+        return {'success': True, 'category': category, 'label': cat['label'],
+                'enabled': bool(applied), 'applied': applied, 'count': len(applied),
+                'admin': self.is_admin(), 'writable': self._hosts_writable(),
                 'local_accel': self._detect_local_accel(),
                 'hosts_path': str(self._hosts_file)}
 
     def steam_accel_scan(self, domains: List[str] | None = None,
                          max_ip_per_domain: int = 8) -> Dict:
+        return self.accel_scan('steam', domains, max_ip_per_domain)
+
+    def accel_scan(self, category: str = 'steam',
+                   domains: List[str] | None = None,
+                   max_ip_per_domain: int = 8) -> Dict:
         """并发 DoH 解析 + 真实测速，为每个域名挑最快 IP。"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        cat = ACCEL_CATEGORIES.get(category, ACCEL_CATEGORIES['steam'])
         want = set(domains or [])
-        targets = [t for t in STEAM_ACCEL_DOMAINS if not want or t[0] in want] or list(STEAM_ACCEL_DOMAINS)
+        targets = [t for t in cat['domains'] if not want or t[0] in want] or list(cat['domains'])
 
         # 1) 并发查多个 DoH 源，合并候选池
         pool: Dict[str, List[str]] = {}
@@ -1412,7 +1478,7 @@ class DxbBackend:
                 if r:
                     probed[d].append(r)
 
-        applied = self._hosts_accel_block()
+        applied = self._hosts_accel_block(cat['begin'], cat['end'])
         rows = []
         for d, group, desc in targets:
             cands = sorted(probed.get(d, []),
@@ -1434,12 +1500,17 @@ class DxbBackend:
                          'best': alive[0] if alive else None,
                          'poisoned': poisoned, 'reason': reason,
                          'current': applied.get(d)})
-        return {'success': True, 'domains': rows, 'admin': self.is_admin(),
-                'writable': self._hosts_writable(), 'local_accel': local_accel,
-                'applied': applied, 'hosts_path': str(self._hosts_file)}
+        return {'success': True, 'category': category, 'label': cat['label'], 'domains': rows,
+                'admin': self.is_admin(), 'writable': self._hosts_writable(),
+                'local_accel': local_accel, 'applied': applied,
+                'hosts_path': str(self._hosts_file)}
 
     def steam_accel_apply(self, entries: List[Dict]) -> Dict:
-        """把优选 IP 写进 hosts 加速块（先备份，再整体替换旧块）。"""
+        return self.accel_apply('steam', entries)
+
+    def accel_apply(self, category: str, entries: List[Dict]) -> Dict:
+        """把优选 IP 写进指定分类的 hosts 加速块（先备份，再整体替换旧块）。"""
+        cat = ACCEL_CATEGORIES.get(category, ACCEL_CATEGORIES['steam'])
         pairs = []
         for e in (entries or []):
             d = str(e.get('domain') or '').strip().lower()
@@ -1461,12 +1532,12 @@ class DxbBackend:
             pass
 
         try:
-            text = self._drop_accel_block(self._read_hosts())
-            block = [HOSTS_ACCEL_BEGIN,
+            text = self._drop_accel_block(self._read_hosts(), cat['begin'], cat['end'])
+            block = [cat['begin'],
                      f'# 由 大轩巴入库器mini v{CURRENT_VERSION} 生成 · {time.strftime("%Y-%m-%d %H:%M:%S")}',
-                     '# 还原：工具箱 → Steam 加速 → 一键还原']
+                     f'# 还原：工具箱 → {cat["label"]}加速 → 一键还原']
             block += [f'{ip}\t{d}' for d, ip in pairs]
-            block.append(HOSTS_ACCEL_END)
+            block.append(cat['end'])
             self._write_hosts(text.rstrip('\r\n') + '\n\n' + '\n'.join(block) + '\n')
         except PermissionError:
             return {'success': False, 'need_admin': True,
@@ -1475,12 +1546,17 @@ class DxbBackend:
             return {'success': False, 'message': f'写入 hosts 失败：{e}'}
 
         flushed = self._flush_dns()
-        return {'success': True, 'count': len(pairs), 'domains': [d for d, _ in pairs],
+        return {'success': True, 'category': category, 'count': len(pairs),
+                'domains': [d for d, _ in pairs],
                 'backup': str(backup_path) if backup_path else None, 'dns_flushed': flushed,
                 'message': f'已为 {len(pairs)} 个域名写入优选 IP' + ('，DNS 缓存已刷新' if flushed else '')}
 
     def steam_accel_restore(self) -> Dict:
-        """移除 hosts 里的加速块（先备份）。"""
+        return self.accel_restore('steam')
+
+    def accel_restore(self, category: str) -> Dict:
+        """移除指定分类 hosts 里的加速块（先备份）。"""
+        cat = ACCEL_CATEGORIES.get(category, ACCEL_CATEGORIES['steam'])
         try:
             backup_dir = self.project_root / 'userdata' / 'hosts_backup'
             backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1489,9 +1565,9 @@ class DxbBackend:
         except Exception:
             pass
 
-        n = len(self._hosts_accel_block())
+        n = len(self._hosts_accel_block(cat['begin'], cat['end']))
         try:
-            self._write_hosts(self._drop_accel_block(self._read_hosts()))
+            self._write_hosts(self._drop_accel_block(self._read_hosts(), cat['begin'], cat['end']))
         except PermissionError:
             return {'success': False, 'need_admin': True,
                     'message': '修改 hosts 需要管理员权限 —— 请点「以管理员身份重启」后重试。'}
@@ -1499,8 +1575,63 @@ class DxbBackend:
             return {'success': False, 'message': f'还原失败：{e}'}
 
         flushed = self._flush_dns()
-        return {'success': True, 'removed': n, 'dns_flushed': flushed,
+        return {'success': True, 'category': category, 'removed': n, 'dns_flushed': flushed,
                 'message': f'已移除加速记录（{n} 条）' + ('，DNS 缓存已刷新' if flushed else '')}
+
+    # ---------------- 免hosts 加速（Chromium host-resolver-rules） ----------------
+    # 不改系统 hosts、不需管理员：把每个域名 MAP 到优选 IP，由内置浏览器(Chromium)
+    # 在解析阶段直接走优选 IP。其余域名 MAP * * 走系统默认解析，不影响本机回环。
+    def accel_hostsfree_apply(self, category: str, entries: List[Dict]) -> Dict:
+        """保存某分类的「域名→IP」映射到 config，供启动时注入 Chromium --host-resolver-rules。"""
+        cat = ACCEL_CATEGORIES.get(category, ACCEL_CATEGORIES['steam'])
+        pairs = {}
+        for e in (entries or []):
+            d = str(e.get('domain') or '').strip().lower()
+            ip = str(e.get('ip') or '').strip()
+            if not d or ip.count('.') != 3 or not all(x.isdigit() for x in ip.split('.')):
+                continue
+            pairs[d] = ip
+        if not pairs:
+            return {'success': False, 'message': '没有可写入的加速条目。'}
+        cfg = self._load_config_sync() or {}
+        hf = cfg.setdefault('accel_hostsfree', {})
+        hf[category] = pairs
+        self._save_config_sync(cfg)
+        self.config = cfg
+        return {'success': True, 'category': category, 'count': len(pairs),
+                'message': '已保存免hosts加速映射，重启应用后内置浏览器即走优选IP（不改动系统hosts）。',
+                'need_restart': True}
+
+    def accel_hostsfree_restore(self, category: str) -> Dict:
+        cfg = self._load_config_sync() or {}
+        hf = cfg.get('accel_hostsfree', {}) or {}
+        removed = category in hf
+        if removed:
+            del hf[category]
+            self._save_config_sync(cfg)
+            self.config = cfg
+        return {'success': True, 'category': category, 'removed': removed,
+                'message': '已移除该分类免hosts加速映射，重启应用后生效。', 'need_restart': True}
+
+    def accel_hostsfree_status(self) -> Dict:
+        cfg = self._load_config_sync() or {}
+        hf = cfg.get('accel_hostsfree', {}) or {}
+        total = sum(len(v) for v in hf.values())
+        return {'success': True, 'enabled': bool(hf), 'categories': list(hf.keys()),
+                'count': total, 'maps': hf}
+
+    def build_hostsfree_rules(self) -> str:
+        """生成 Chromium --host-resolver-rules 字符串（仅重定向已启用分类的域名→IP）。"""
+        cfg = self._load_config_sync() or {}
+        hf = cfg.get('accel_hostsfree', {}) or {}
+        rules = []
+        for cat, pairs in hf.items():
+            for d, ip in pairs.items():
+                rules.append(f'MAP {d} {ip}')
+        if not rules:
+            return ''
+        rules.append('MAP * *')  # 其余域名走系统默认解析
+        return ','.join(rules)
 
     def steam_diagnose(self) -> Dict:
         """体检 Steam 环境：返回逐项检查结果，同时给出可执行的修复动作。"""
@@ -2270,7 +2401,7 @@ class DxbBackend:
                 if '{app_id}' in repo['url']:
                     validated_repos.append(repo)
                 else:
-                    self.log.warning(f"自定义ZIP仓库URL缺少{app_id}占位符: {repo}")
+                    self.log.warning(f"自定义ZIP仓库URL缺少{{app_id}}占位符: {repo}")
             else:
                 self.log.warning(f"无效的自定义ZIP仓库配置: {repo}")
         

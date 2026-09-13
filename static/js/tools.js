@@ -17,6 +17,8 @@ class ToolsApp {
             accelRestoreBtn: document.getElementById('accelRestoreBtn'),
             accelSummary: document.getElementById('accelSummary'),
             accelAdminBar: document.getElementById('accelAdminBar'),
+            accelFreeBar: document.getElementById('accelFreeBar'),
+            accelModeBar: document.getElementById('accelMode'),
             accelList: document.getElementById('accelList'),
             log: document.getElementById('toolsLog'),
             logClear: document.getElementById('toolsLogClear'),
@@ -25,8 +27,11 @@ class ToolsApp {
             snackbarClose: document.getElementById('snackbarClose'),
         };
         this.diag = null;
-        this.accel = null;        // 最近一次测速结果
+        this.accelCategory = 'steam';  // 当前加速分类：steam / browser / github
+        this.accelMode = 'hosts';      // 加速方式：hosts（写系统hosts，需管理员）/ free（免hosts，改浏览器解析）
+        this.accel = null;        // 最近一次测速结果（按当前分类）
         this.accelStatus = null;  // hosts 加速块状态
+        this.accelFree = null;    // 免hosts加速状态
         this.store = window.DxbTaskLog ? window.DxbTaskLog.local('tools') : null;
         this.initialize();
     }
@@ -44,6 +49,8 @@ class ToolsApp {
         this.elements.accelScanBtn.addEventListener('click', () => this.accelScan());
         this.elements.accelApplyBtn.addEventListener('click', () => this.accelApply());
         this.elements.accelRestoreBtn.addEventListener('click', () => this.accelRestore());
+        this.bindAccelTabs();
+        this.bindAccelMode();
         if (this.store) this.store.mount(this.elements.log);
         if (this.elements.logClear) this.elements.logClear.addEventListener('click', () => this.store && this.store.clear());
         this.loadAccelStatus();
@@ -305,12 +312,63 @@ class ToolsApp {
         return 'bad';
     }
 
+    bindAccelTabs() {
+        const tabs = document.querySelectorAll('#accelTabs .accel-tab');
+        tabs.forEach(t => t.addEventListener('click', () => {
+            const cat = t.dataset.cat;
+            if (cat === this.accelCategory) return;
+            this.accelCategory = cat;
+            tabs.forEach(x => x.classList.toggle('active', x === t));
+            this.accel = null;            // 切分类清空已有测速结果
+            this.accelStatus = null;
+            this.elements.accelList.innerHTML =
+                '<div class="empty-hint">已切换到「' + t.textContent +
+                '」，点「测速选优」开始为这批域名选最优 IP。</div>';
+            this.loadAccelStatus();
+        }));
+    }
+
+    bindAccelMode() {
+        const btns = document.querySelectorAll('#accelMode .accel-mode');
+        btns.forEach(b => b.addEventListener('click', () => {
+            if (b.dataset.mode === this.accelMode) return;
+            this.accelMode = b.dataset.mode;
+            btns.forEach(x => x.classList.toggle('active', x === b));
+            this.updateAccelModeUI();
+            this.loadAccelStatus();
+        }));
+        this.updateAccelModeUI();
+    }
+
+    updateAccelModeUI() {
+        const free = this.accelMode === 'free';
+        if (this.elements.accelApplyBtn) {
+            this.elements.accelApplyBtn.innerHTML = free
+                ? '<span class="material-icons">bolt</span> 免hosts加速'
+                : '<span class="material-icons">bolt</span> 一键加速';
+            this.elements.accelApplyBtn.title = free
+                ? '保存优选IP映射，只改内置/系统浏览器解析，不改系统hosts（重启生效）'
+                : '把优选IP写进系统 hosts（需管理员）';
+        }
+        if (this.elements.accelRestoreBtn) {
+            this.elements.accelRestoreBtn.title = free ? '移除免hosts加速映射' : '移除 hosts 加速记录';
+        }
+        // 免hosts 模式提示条
+        const fb = this.elements.accelFreeBar;
+        if (fb) fb.innerHTML = '';
+    }
+
     async loadAccelStatus() {
         try {
-            const r = await fetch('/api/steam/accel/status');
+            const r = await fetch(`/api/accel/${this.accelCategory}/status`);
             const d = await r.json();
             if (!d.success) throw new Error(d.message || '读取失败');
             this.accelStatus = d;
+            try {
+                const r2 = await fetch('/api/accel/hostsfree/status');
+                const d2 = await r2.json();
+                if (d2.success) this.accelFree = d2;
+            } catch (e) { /* 忽略 */ }
             this.renderAccelSummary(d);
         } catch (e) {
             this.elements.accelSummary.innerHTML = '<span class="summary-chip bad">加速状态读取失败</span>';
@@ -318,9 +376,13 @@ class ToolsApp {
     }
 
     renderAccelSummary(s) {
+        const free = this.accelFree || {};
+        const freeOnCat = !!(free.maps && free.maps[this.accelCategory]);
         this.elements.accelSummary.innerHTML =
             `<span class="summary-chip ${s.enabled ? '' : 'warn'}">` +
-            `${s.enabled ? `加速已开启（${s.count} 个域名）` : '加速未开启'}</span>`;
+            `hosts：${s.enabled ? `已开启（${s.count} 域名）` : '未开启'}</span>` +
+            `<span class="summary-chip ${freeOnCat ? '' : 'warn'}">` +
+            `免hosts：${freeOnCat ? `已开启（${Object.keys(free.maps[this.accelCategory] || {}).length} 域名）` : '未开启'}</span>`;
 
         const bar = this.elements.accelAdminBar;
         bar.innerHTML = '';
@@ -336,14 +398,14 @@ class ToolsApp {
             const tx = document.createElement('span');
             const who = `${la.process || '本地加速器'}${la.pid ? `（PID ${la.pid}）` : ''}`;
             tx.textContent =
-                `检测到 ${who} 正在接管 Steam 域名（${(la.domains || []).length} 个解析到 127.0.0.1）。` +
+                `检测到 ${who} 正在接管加速域名（${(la.domains || []).length} 个解析到 127.0.0.1）。` +
                 '它和这里的 hosts 优选是互相覆盖的两套方案，建议二选一：' +
                 '要么关掉它、用本工具；要么继续用它、不要开这里的加速。';
             w.append(ic, tx);
             bar.appendChild(w);
         }
 
-        if (!s.writable) {
+        if (this.accelMode === 'hosts' && !s.writable) {
             const w = document.createElement('div');
             w.className = 'accel-warn';
             const ic = document.createElement('span');
@@ -358,6 +420,23 @@ class ToolsApp {
             w.append(ic, tx, b);
             bar.appendChild(w);
         }
+
+        if (this.accelMode === 'free') {
+            const w = document.createElement('div');
+            w.className = 'accel-warn';
+            const ic = document.createElement('span');
+            ic.className = 'material-icons';
+            ic.textContent = 'info';
+            const tx = document.createElement('span');
+            tx.textContent = '免hosts加速：只改浏览器解析（MAP 域名到优选IP），不写系统 hosts、无需管理员。'
+                + '保存后需「重启应用」生效；启动时会自动用加速参数打开系统浏览器。';
+            const b = document.createElement('button');
+            b.className = 'btn btn-primary';
+            b.innerHTML = '<span class="material-icons">restart_alt</span> 重启应用生效';
+            b.addEventListener('click', () => this.restartApp());
+            w.append(ic, tx, b);
+            bar.appendChild(w);
+        }
     }
 
     async accelScan() {
@@ -366,7 +445,7 @@ class ToolsApp {
             '<div class="empty-hint">正在并发解析 + 实测各域名候选 IP，大约 5~15 秒…</div>';
         this.log('info', '开始测速选优：多源 DoH 解析 + TCP/TLS/HTTP 三段实测…');
         try {
-            const r = await fetch('/api/steam/accel/scan', {
+            const r = await fetch(`/api/accel/${this.accelCategory}/scan`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({}),
@@ -451,18 +530,24 @@ class ToolsApp {
             this.showSnackbar('没有可加速的条目，请先「测速选优」。', 'warning');
             return;
         }
+
+        const free = this.accelMode === 'free';
         const la = (this.accelStatus && this.accelStatus.local_accel) ||
                    (this.accel && this.accel.local_accel);
-        if (la && la.active) {
+        if (!free && la && la.active) {
             const who = `${la.process || '本地加速器'}${la.pid ? `（PID ${la.pid}）` : ''}`;
             if (!window.confirm(`检测到 ${who} 正在接管 Steam 域名。\n\n` +
                 `写 hosts 会覆盖它的效果（两套方案互相冲突）。\n\n` +
                 `建议先关掉它再加速。确定仍要继续？`)) return;
         }
+
+        const endpoint = free
+            ? `/api/accel/${this.accelCategory}/hostsfree/apply`
+            : `/api/accel/${this.accelCategory}/apply`;
         this.elements.accelApplyBtn.disabled = true;
-        this.log('info', `写入加速：${entries.length} 个域名…`);
+        this.log('info', (free ? '保存免hosts加速：' : '写入 hosts 加速：') + `${entries.length} 个域名…`);
         try {
-            const r = await fetch('/api/steam/accel/apply', {
+            const r = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ entries }),
@@ -472,8 +557,8 @@ class ToolsApp {
             this.showSnackbar(d.message || (d.success ? '加速已开启。' : '加速失败。'),
                 d.success ? 'success' : 'error');
         } catch (e) {
-            this.log('error', `写入加速失败：${e.message}`);
-            this.showSnackbar(`写入加速失败：${e.message}`, 'error');
+            this.log('error', `加速失败：${e.message}`);
+            this.showSnackbar(`加速失败：${e.message}`, 'error');
         } finally {
             this.elements.accelApplyBtn.disabled = false;
         }
@@ -481,11 +566,28 @@ class ToolsApp {
         await this.refreshAccelRows();
     }
 
-    async accelRestore() {
-        if (!window.confirm('移除 hosts 里的「大轩巴 Steam 加速」记录？\n\n会先自动备份 hosts，随时可以再加速回来。')) return;
-        this.elements.accelRestoreBtn.disabled = true;
+    async restartApp() {
+        if (!window.confirm('重启应用以让免hosts加速生效？\n\n当前页面会断开，应用会自动重新打开。')) return;
         try {
-            const r = await fetch('/api/steam/accel/restore', { method: 'POST' });
+            await fetch('/api/app/restart', { method: 'POST' });
+            this.showSnackbar('正在重启应用…', 'info');
+        } catch (e) {
+            this.showSnackbar(`重启失败：${e.message}`, 'error');
+        }
+    }
+
+    async accelRestore() {
+        const free = this.accelMode === 'free';
+        const tip = free
+            ? `移除「大轩巴 ${this.accelCategory.toUpperCase()} 免hosts加速」映射？\n\n只影响内置/系统浏览器解析，不动系统 hosts。`
+            : `移除 hosts 里的「大轩巴 ${this.accelCategory.toUpperCase()} 加速」记录？\n\n会先自动备份 hosts，随时可以再加速回来。`;
+        if (!window.confirm(tip)) return;
+        this.elements.accelRestoreBtn.disabled = true;
+        const endpoint = free
+            ? `/api/accel/${this.accelCategory}/hostsfree/restore`
+            : `/api/accel/${this.accelCategory}/restore`;
+        try {
+            const r = await fetch(endpoint, { method: 'POST' });
             const d = await r.json();
             this.log(d.success ? 'success' : 'error', d.message || '');
             this.showSnackbar(d.message || (d.success ? '已还原。' : '还原失败。'),
@@ -503,7 +605,7 @@ class ToolsApp {
     async refreshAccelRows() {
         if (!this.accel) return;
         try {
-            const r = await fetch('/api/steam/accel/status');
+            const r = await fetch(`/api/accel/${this.accelCategory}/status`);
             const d = await r.json();
             if (d.success) {
                 this.accel.applied = d.applied;

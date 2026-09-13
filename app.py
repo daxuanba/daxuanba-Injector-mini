@@ -200,6 +200,16 @@ def register_elevated_restart(fn):
     _elevated_restart = fn if callable(fn) else None
 
 
+# ---------------- 普通重启（免hosts加速等需重启生效的功能用） ----------------
+_normal_restart = None
+
+
+def register_app_restart(fn):
+    """由桌面壳注入：fn() 负责正常重新拉起本程序（非阻塞，随后自杀）。"""
+    global _normal_restart
+    _normal_restart = fn if callable(fn) else None
+
+
 def _is_steam_logged_in() -> bool:
     """入库前的登录态判定：内置浏览器登录成功，或配置里已存过 Cookie。"""
     if STEAM_LOGIN.get("status") == "success" and STEAM_LOGIN.get("account"):
@@ -1263,6 +1273,104 @@ def steam_accel_restore():
         return jsonify(_quick_backend().steam_accel_restore())
     except Exception as e:
         return jsonify({"success": False, "message": f"还原失败: {e}"})
+
+
+@app.route('/api/accel/categories', methods=['GET'])
+def accel_categories():
+    """返回所有加速分类及其域名，供前端渲染标签页。"""
+    try:
+        from backend import ACCEL_CATEGORIES
+        out = {k: {'label': v['label'],
+                   'domains': [{'domain': d, 'group': g, 'desc': desc}
+                               for d, g, desc in v['domains']]}
+               for k, v in ACCEL_CATEGORIES.items()}
+        return jsonify({"success": True, "categories": out})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"读取加速分类失败: {e}"})
+
+
+@app.route('/api/accel/<category>/status', methods=['GET'])
+def accel_status_route(category):
+    try:
+        return jsonify(_quick_backend().accel_status(category))
+    except Exception as e:
+        return jsonify({"success": False, "enabled": False, "applied": {}, "count": 0,
+                        "admin": False, "writable": False, "message": f"读取加速状态失败: {e}"})
+
+
+@app.route('/api/accel/<category>/scan', methods=['POST'])
+def accel_scan_route(category):
+    data = request.get_json(silent=True) or {}
+    domains = data.get('domains')
+    if domains is not None and not isinstance(domains, list):
+        domains = None
+    try:
+        return jsonify(_quick_backend().accel_scan(category, domains or None))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"测速失败: {e}", "domains": []})
+
+
+@app.route('/api/accel/<category>/apply', methods=['POST'])
+def accel_apply_route(category):
+    data = request.get_json(silent=True) or {}
+    entries = data.get('entries') or []
+    if not isinstance(entries, list):
+        return jsonify({"success": False, "message": "无效的加速条目。"})
+    try:
+        return jsonify(_quick_backend().accel_apply(category, entries))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"写入加速失败: {e}"})
+
+
+@app.route('/api/accel/<category>/restore', methods=['POST'])
+def accel_restore_route(category):
+    try:
+        return jsonify(_quick_backend().accel_restore(category))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"还原失败: {e}"})
+
+
+# ---------------- 免hosts 加速（Chromium host-resolver-rules，免管理员/不改系统hosts） ----------------
+@app.route('/api/accel/<category>/hostsfree/apply', methods=['POST'])
+def accel_hostsfree_apply_route(category):
+    try:
+        data = request.get_json(silent=True) or {}
+        entries = data.get('entries', [])
+        return jsonify(_quick_backend().accel_hostsfree_apply(category, entries))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"保存失败: {e}"})
+
+
+@app.route('/api/accel/<category>/hostsfree/restore', methods=['POST'])
+def accel_hostsfree_restore_route(category):
+    try:
+        return jsonify(_quick_backend().accel_hostsfree_restore(category))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"还原失败: {e}"})
+
+
+@app.route('/api/accel/hostsfree/status', methods=['GET'])
+def accel_hostsfree_status_route():
+    try:
+        return jsonify(_quick_backend().accel_hostsfree_status())
+    except Exception as e:
+        return jsonify({"success": False, "message": f"读取失败: {e}"})
+
+
+@app.route('/api/app/restart', methods=['POST'])
+def app_restart():
+    """普通重启本程序（免hosts加速等需重启生效的功能用）。"""
+    if _normal_restart is None:
+        return jsonify({"success": False, "available": False,
+                        "message": "当前环境不支持自动重启，请手动重启应用。"})
+    def _go():
+        time.sleep(0.6)
+        try:
+            _normal_restart()
+        except Exception:
+            pass
+    threading.Thread(target=_go, daemon=True).start()
+    return jsonify({"success": True, "message": "正在重启应用…"})
 
 
 @app.route('/api/app/restart_elevated', methods=['POST'])
