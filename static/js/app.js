@@ -373,6 +373,7 @@ class DxbWebApp {
             const kernelMap = {
                 'opensteamtool': { t: '内核: OpenSteamTool（清单导入）', c: 'ok' },
                 'steamtools': { t: '内核: SteamTools（稳定入库）', c: 'ok' },
+                'greenluma': { t: '内核: GreenLuma（DLL 注入）', c: 'ok' },
                 'none': { t: '内核: 未安装', c: 'warn' },
             };
             const k = kernelMap[st.kernel] || kernelMap['none'];

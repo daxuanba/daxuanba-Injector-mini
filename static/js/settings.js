@@ -28,6 +28,10 @@ class SettingsManager {
             ostInstallBtn: document.getElementById('ostInstallBtn'),
             stoolsStatus: document.getElementById('stoolsStatus'),
             stoolsInstallBtn: document.getElementById('stoolsInstallBtn'),
+            glumaStatus: document.getElementById('glumaStatus'),
+            glumaInstallBtn: document.getElementById('glumaInstallBtn'),
+            glumaRecheckBtn: document.getElementById('glumaRecheckBtn'),
+            glumaOfficialBtn: document.getElementById('glumaOfficialBtn'),
             // NEW: 自定义清单库相关元素
             checkUpdatesBtn: document.getElementById('checkUpdatesBtn'),
             addGithubRepoBtn: document.getElementById('addGithubRepoBtn'),
@@ -97,8 +101,15 @@ class SettingsManager {
         this.setupCategoryTabs();
 
         // 依赖模块安装
-        this.elements.ostInstallBtn.addEventListener('click', () => this.installDependency('opensteamtool'));
-        this.elements.stoolsInstallBtn.addEventListener('click', () => this.installDependency('steamtools'));
+        if (this.elements.ostInstallBtn) this.elements.ostInstallBtn.addEventListener('click', () => this.installDependency('opensteamtool'));
+        if (this.elements.stoolsInstallBtn) this.elements.stoolsInstallBtn.addEventListener('click', () => this.installDependency('steamtools'));
+        if (this.elements.glumaInstallBtn) this.elements.glumaInstallBtn.addEventListener('click', () => this.installDependency('greenluma'));
+        if (this.elements.glumaRecheckBtn) this.elements.glumaRecheckBtn.addEventListener('click', () => {
+            this.loadDependencyStatus();
+            this.showSnackbar('已重新检测三个内核的安装状态。', 'info');
+        });
+        if (this.elements.glumaOfficialBtn) this.elements.glumaOfficialBtn.addEventListener('click', () => this.openExternal(
+            'https://cs.rin.ru/forum/viewtopic.php?f=10&t=103709'));
 
         this.loadDependencyStatus();
     }
@@ -278,13 +289,37 @@ class SettingsManager {
             };
             render(this.elements.ostStatus, data.opensteamtool);
             render(this.elements.stoolsStatus, data.steamtools);
+            // GreenLuma 单独渲染：额外显示 AppList 条数与「是否已配镜像仓库」
+            const gl = data.greenluma;
+            const glEl = this.elements.glumaStatus;
+            if (glEl) {
+                if (gl && gl.installed) {
+                    const ver = gl.version ? ` v${gl.version}` : '';
+                    const names = (gl.dlls || []).slice(0, 2).join(', ') || (gl.exe ? 'GreenLuma.exe' : '');
+                    glEl.innerHTML = `<span class="status-dot ok"></span><span class="status-text">已安装${ver}`
+                        + `　·　AppList ${gl.applist_count || 0} 个</span>`;
+                    glEl.title = `${names}\nAppList: ${gl.applist_dir || '未创建'}`
+                        + `\n仓库: ${gl.repo || '未配置（官方不在 GitHub）'}`;
+                } else if (gl) {
+                    glEl.innerHTML = `<span class="status-dot warn"></span><span class="status-text">未安装`
+                        + `${gl.manual_only ? '　·　未配镜像仓库，需手动安装（点「官方下载页」）' : ''}</span>`;
+                    glEl.title = `Steam 路径: ${gl.steam_path || '未检测到'}\n仓库: ${gl.repo || '未配置'}`;
+                } else {
+                    glEl.innerHTML = '<span class="status-text">检测中...</span>';
+                }
+            }
         } catch (e) {
             console.error('加载依赖状态失败', e);
         }
     }
 
     async installDependency(kind) {
-        const btn = kind === 'opensteamtool' ? this.elements.ostInstallBtn : this.elements.stoolsInstallBtn;
+        const btnMap = {
+            opensteamtool: this.elements.ostInstallBtn,
+            steamtools: this.elements.stoolsInstallBtn,
+            greenluma: this.elements.glumaInstallBtn,
+        };
+        const btn = btnMap[kind];
         if (!btn) return;
         const original = btn.innerHTML;
         btn.disabled = true;
@@ -296,6 +331,12 @@ class SettingsManager {
                 body: JSON.stringify({ kind, force: false })
             });
             const data = await response.json();
+            if (data.need_manual) {
+                // GreenLuma 官方不在 GitHub：如实告诉用户，并询问是否打开官方下载页
+                const go = window.confirm(`${data.message}\n\n现在用系统浏览器打开官方下载页？`);
+                if (go && data.official_url) await this.openExternal(data.official_url);
+                return;
+            }
             if (data.success) {
                 this.showSnackbar(data.message, 'info');
                 setTimeout(() => this.loadDependencyStatus(), 4000);
@@ -307,6 +348,21 @@ class SettingsManager {
             this.showSnackbar(`安装出错: ${e.message}`, 'error');
         } finally {
             setTimeout(() => { btn.disabled = false; btn.innerHTML = original; }, 1500);
+        }
+    }
+
+    // 用系统默认浏览器打开白名单外链（内置窗口不外跳，只有明确点按钮才走系统浏览器）
+    async openExternal(url) {
+        try {
+            const r = await fetch('/api/app/open_url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url }),
+            });
+            const d = await r.json();
+            this.showSnackbar(d.message || '', d.success ? 'info' : 'error');
+        } catch (e) {
+            this.showSnackbar(`打开失败: ${e.message}`, 'error');
         }
     }
 

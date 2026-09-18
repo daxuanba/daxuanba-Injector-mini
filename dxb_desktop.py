@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
-"""大轩巴入库器mini · QT6 桌面壳
-=================================
-把内嵌 Flask 本地服务器装进一个 QT6 窗口，直接加载网页。
-- 优先 PySide6，其次 PyQt6（都需 WebEngine 组件）
-- 若两者都没装，自动回退到系统默认浏览器打开网页
-- 不影响原版：原版 `python app.py` 仍可独立运行并自动开浏览器
+"""大轩巴入库器mini · 桌面壳（主窗口内嵌 WebView2）
+==================================================
+把内嵌 Flask 本地服务器装进**本程序自己的窗口**里显示，不跳外部浏览器。
+
+窗口引擎：pywebview + 系统 Microsoft Edge WebView2
+- 浏览器内核不打包进 exe（不再依赖 Qt WebEngine，体积从 250MB 降到 ~35MB）
+- 依赖 Windows 系统自带的 WebView2 Runtime；检测不到就弹原生提示并引导去微软官方安装
+- 免hosts加速：用 WebView2 官方支持的环境变量 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+  向内核注入 --host-resolver-rules（不改系统 hosts、不需管理员）
+- Steam 登录：开第二个内嵌窗口，从 WebView2 原生 CookieManager 读 steamLoginSecure
+  （该 Cookie 是 HttpOnly，只有原生接口能拿到）
 
 打包后（PyInstaller）行为：
 - RESOURCE_DIR（代码 / 模板 / 静态资源）取自 sys._MEIPASS
@@ -234,61 +239,8 @@ def load_accel_rules():
         return ''
 
 
-def find_chromium_browser():
-    """找一个 Chromium 系浏览器（支持 --host-resolver-rules 免hosts加速）。
-    优先大轩巴浏览器，其次 Edge / Chrome / Brave。返回 exe 路径或 None。"""
-    env = os.environ
-    bases = [env.get('PROGRAMFILES'), env.get('PROGRAMFILES(X86)'), env.get('LOCALAPPDATA')]
-    cands = []
-    for base in bases:
-        if not base:
-            continue
-        cands += [
-            Path(base) / '大轩巴浏览器' / '大轩巴浏览器.exe',
-            Path(base) / 'Microsoft' / 'Edge' / 'Application' / 'msedge.exe',
-            Path(base) / 'Google' / 'Chrome' / 'Application' / 'chrome.exe',
-            Path(base) / 'BraveSoftware' / 'Brave-Browser' / 'Application' / 'brave.exe',
-        ]
-    for p in cands:
-        try:
-            if p.exists():
-                return p
-        except Exception:
-            pass
-    return None
-
-
-def open_in_system_browser(url, rules=''):
-    """用系统浏览器打开应用页面。
-    - 有加速规则时优先用 Chromium 系浏览器带 --host-resolver-rules 启动（免hosts加速）；
-      用独立 profile 目录保证参数必定生效（浏览器已在运行时新窗口会复用旧进程而忽略参数）。
-    - 找不到 Chromium 系浏览器 / 启动失败 → 回退系统默认浏览器（无加速）。"""
-    if rules:
-        exe = find_chromium_browser()
-        if exe:
-            try:
-                profile = USER_DIR / 'accel_browser_profile'
-                profile.mkdir(parents=True, exist_ok=True)
-                subprocess.Popen([
-                    str(exe),
-                    f'--user-data-dir={profile}',
-                    f'--host-resolver-rules={rules}',
-                    '--no-first-run',
-                    '--new-window', url,
-                ])
-                print('[大轩巴] 已用系统浏览器 + 免hosts加速打开页面。')
-                return True
-            except Exception as e:
-                print('[大轩巴] 带加速参数启动浏览器失败，回退默认浏览器：', e)
-    try:
-        webbrowser.open_new(url)
-        return True
-    except Exception:
-        return False
-
-
 def _register_restart_launchers(mod, url):
-    """注册提权重启 + 普通重启 launcher（与打开模式无关，两种模式都需要）。"""
+    """注册提权重启 + 普通重启 launcher（与窗口引擎无关）。"""
     if hasattr(mod, 'register_elevated_restart'):
         def _relaunch_elevated():
             import ctypes
@@ -308,7 +260,8 @@ def _register_restart_launchers(mod, url):
             if int(rc) <= 32:
                 print('[大轩巴] 提权被拒绝（ShellExecuteW 返回 %s）' % rc)
                 return False
-            threading.Timer(0.8, lambda: shutdown_server(url)).start()
+            # 1.5s 后再关旧实例：给 Flask 把「提权成功」的响应吐回页面留足时间
+            threading.Timer(1.5, lambda: shutdown_server(url)).start()
             return True
         mod.register_elevated_restart(_relaunch_elevated)
 
@@ -324,309 +277,262 @@ def _register_restart_launchers(mod, url):
         mod.register_app_restart(_relaunch_normal)
 
 
-# ---------- QT6 绑定（优先 PySide6，其次 PyQt6） ----------
-HAVE_QT = None
-try:
-    from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QLabel,
-                                   QWidget, QVBoxLayout)
-    from PySide6.QtGui import QAction, QIcon
-    from PySide6.QtCore import (QUrl, Qt, QObject, QMetaObject, Slot, QTimer)
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-    HAVE_QT = 'PySide6'
-except ImportError as e:
-    import traceback
-    print('[大轩巴] PySide6 加载失败（将尝试 PyQt6）：', type(e).__name__, e)
-    traceback.print_exc()
-    try:
-        from PyQt6.QtWidgets import (QApplication, QMainWindow, QToolBar, QLabel,
-                                     QWidget, QVBoxLayout)
-        from PyQt6.QtGui import QAction, QIcon
-        from PyQt6.QtCore import (QUrl, Qt, QObject, QMetaObject, QTimer,
-                                  pyqtSlot as Slot)
-        from PyQt6.QtWebEngineWidgets import QWebEngineView
-        from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-        HAVE_QT = 'PyQt6'
-    except ImportError:
-        HAVE_QT = None
+# ------------------------------------------------------------------ WebView2 运行时
+# WebView2 Runtime 的 EdgeUpdate 客户端 GUID（微软固定值，Evergreen 版）
+WEBVIEW2_CLIENT_GUID = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+# 微软官方 Evergreen Bootstrapper 直链（约 2MB，装完系统所有 WebView2 程序共用）
+WEBVIEW2_DOWNLOAD_URL = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
 
 
-# 无 QT 环境时给占位，保证模块仍能 import（此时走浏览器回退分支，不会实例化窗口）
-if HAVE_QT is None:
-    QMainWindow = QWebEngineView = QToolBar = QLabel = QAction = QIcon = QUrl = \
-        QWebEnginePage = QWebEngineProfile = QObject = QMetaObject = QWidget = \
-        QVBoxLayout = QTimer = object
-    Slot = lambda *a, **k: (lambda f: f)  # 占位装饰器，无 QT 时不生效
+def webview2_runtime_version():
+    """返回系统已安装的 WebView2 Runtime 版本号；未安装返回 ''。
 
-
-class DxbWebPage(QWebEnginePage):
-    """target=_blank / window.open 弹出独立浏览窗口（带返回按钮）。
-    无法创建窗口时直接不打开。"""
-    def __init__(self, parent_view, win_ref=None):
-        super().__init__(parent_view)
-        self._win_ref = win_ref  # 用于拿到主窗口的弹窗容器
-
-    def createWindow(self, wintype):
-        host = self._win_ref() if callable(self._win_ref) else None
-        if host is None:
-            return None  # 打不开就不打开
-        return host.open_popup()
-
-
-class DxbPopup(QMainWindow):
-    """外链独立小窗口：返回 / 关闭"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle('大轩巴 · 浏览')
-        self.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
-        self.resize(1040, 720)
-        self.setStyleSheet(
-            'QMainWindow{background:#0b0b0b;}'
-            'QToolBar{background:#0b0b0b;border:none;spacing:6px;}'
-            'QToolButton{color:#f3f3f3;background:#1a1a1a;border:none;'
-            'padding:6px 12px;border-radius:8px;}'
-        )
-        self.view = QWebEngineView()
-        self.view.setPage(DxbWebPage(self.view, lambda: self.parent()))
-        self.setCentralWidget(self.view)
-        tb = QToolBar('导航')
-        tb.setMovable(False)
-        self.addToolBar(tb)
-        for text, slot in (('返回', self.view.back), ('刷新', self.view.reload), ('关闭', self.close)):
-            a = QAction(text, self)
-            a.triggered.connect(slot)
-            tb.addAction(a)
-
-    def load(self, qurl):
-        self.view.setUrl(qurl)
-
-
-class DxbWindow(QMainWindow):
-    def __init__(self, url):
-        super().__init__()
-        self.base_url = url
-        self.setWindowTitle('大轩巴入库器mini')
-        self.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
-        self.resize(1240, 820)
-        self.setStyleSheet(
-            'QMainWindow{background:#0b0b0b;}'
-            'QToolBar{background:#0b0b0b;border:none;spacing:6px;}'
-            'QLabel{color:#f1c40f;font-weight:700;font-size:15px;}'
-            'QToolButton{color:#f3f3f3;background:#1a1a1a;border:none;'
-            'padding:6px 12px;border-radius:8px;}'
-            'QToolButton:hover{background:#262626;}'
-        )
-
-        self.browser = QWebEngineView()
-        self.browser.setPage(DxbWebPage(self.browser, lambda: self))
-        self.setCentralWidget(self.browser)
-        self.popups = []
-
-        tb = QToolBar('导航')
-        tb.setMovable(False)
-        self.addToolBar(tb)
-
-        brand = QLabel('大轩巴')
-        tb.addWidget(brand)
-
-        self._add_action(tb, '返回', lambda: self.browser.back())
-        self._add_action(tb, '刷新', lambda: self.browser.reload())
-        self._add_action(tb, '首页', lambda: self.browser.setUrl(QUrl(self.base_url)))
-
-        self.browser.setUrl(QUrl(url))
-
-    def _add_action(self, tb, text, slot):
-        a = QAction(text, self)
-        a.triggered.connect(slot)
-        tb.addAction(a)
-
-    def open_popup(self):
-        """创建外链浏览小窗口（保持引用防 GC）"""
-        popup = DxbPopup(self)
-        popup.setAttribute(Qt.WA_DeleteOnClose, True)
-        popup.show()
-        self.popups.append(popup)
-        popup.destroyed.connect(lambda: self.popups.remove(popup) if popup in self.popups else None)
-        return popup.view.page()
-
-    def closeEvent(self, event):
-        shutdown_server(self.base_url)
-        event.accept()
-
-
-# ---------- 沉默（内置）浏览器登录 Steam ----------
-class DxbLoginBridge(QObject):
-    """住在主线程的桥。Flask 线程调用 launcher 时，通过 QueuedConnection
-    把“打开登录窗口”派发到主线程执行（Qt 控件只能在主线程创建/显示）。
-
-    ⚠️ 这里刻意继承 QObject 而不是 QWidget：它只负责“派活”，不做界面。
-    因此绝对不能把 self 当作登录窗口的 parent —— QMainWindow(parent=QObject)
-    会抛 TypeError，而异常发生在 Qt 槽内部会被直接吞掉（只打 stderr），
-    用户那边表现为「点了按钮毫无反应」。窗口引用必须由 _login_win 持有防 GC。
+    WebView2 Runtime 是 Windows 的系统组件（随 Edge 分发/更新），
+    正常 Win10 1803+ / Win11 都自带；精简版系统或老旧系统可能没有。
     """
-    def __init__(self, flask_mod, parent=None):
-        super().__init__(parent)
-        self.flask_mod = flask_mod
-        self._login_win = None
-        self._profile = None
-
-    def _profile_ref(self):
-        """登录专用持久 profile：Steam 登录态跨启动保留，整个进程只建一次。
-        （同名 profile 重复 new 会让 Qt 报警并可能共用失败）"""
-        if self._profile is None:
-            p = QWebEngineProfile('dxb_steam_profile')
+    # 1) 注册表（覆盖 64/32 位与“仅当前用户”安装三种情况）
+    try:
+        import winreg
+        paths = [
+            (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\\' + WEBVIEW2_CLIENT_GUID),
+            (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\Microsoft\EdgeUpdate\Clients\\' + WEBVIEW2_CLIENT_GUID),
+            (winreg.HKEY_CURRENT_USER, r'SOFTWARE\Microsoft\EdgeUpdate\Clients\\' + WEBVIEW2_CLIENT_GUID),
+        ]
+        for hive, sub in paths:
             try:
-                p.setPersistentStoragePath(str(USER_DIR / 'steambrowser_profile'))
-                p.setStoragePath(str(USER_DIR / 'steambrowser_profile'))
+                with winreg.OpenKey(hive, sub) as k:
+                    pv, _ = winreg.QueryValueEx(k, 'pv')
+                    pv = str(pv or '').strip()
+                    if pv and pv != '0.0.0.0':
+                        return pv
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # 2) 目录兜底（注册表被清理但文件还在的情况）
+    for base in (os.environ.get('PROGRAMFILES(X86)'), os.environ.get('PROGRAMFILES'),
+                 os.environ.get('LOCALAPPDATA')):
+        if not base:
+            continue
+        app_dir = Path(base) / 'Microsoft' / 'EdgeWebView' / 'Application'
+        try:
+            vers = [p.name for p in app_dir.iterdir()
+                    if p.is_dir() and p.name[:1].isdigit()]
+        except Exception:
+            continue
+        if vers:
+            return sorted(vers)[-1]
+    return ''
+
+
+def _message_box(text, title, flags):
+    """原生提示框（windowed 打包后没有控制台，只能靠系统弹窗告知用户）"""
+    try:
+        import ctypes
+        return int(ctypes.windll.user32.MessageBoxW(None, text, title, flags))
+    except Exception:
+        print('[大轩巴]', title, text)
+        return 0
+
+
+def prompt_install_webview2():
+    """提示用户安装 WebView2 Runtime（系统组件，不随本程序打包）。"""
+    text = (
+        '本程序需要「Microsoft Edge WebView2 运行时」才能在自己的窗口里显示界面。\n'
+        '当前系统未检测到该组件。\n\n'
+        '它是 Windows 的系统级组件（约 2MB，装一次本机所有同类软件共用），\n'
+        '所以不随本程序打包；装完重新打开本程序即可。\n\n'
+        '点「是」打开微软官方下载页，点「否」退出。'
+    )
+    ret = _message_box(text, '大轩巴入库器mini · 缺少 WebView2 运行组件', 0x04 | 0x30)  # MB_YESNO|MB_WARNING
+    if ret == 6:  # IDYES
+        try:
+            os.startfile(WEBVIEW2_DOWNLOAD_URL)
+        except Exception:
+            try:
+                webbrowser.open_new(WEBVIEW2_DOWNLOAD_URL)
             except Exception:
                 pass
-            self._profile = p
-        return self._profile
-
-    @Slot()
-    def open_login(self):
-        """只在 GUI 线程执行。任何异常都必须回传 Flask —— 静默失败是最坏的结果。"""
-        try:
-            self._open()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self._fallback(str(e))
-
-    def _open(self):
-        win = self._login_win
-        if win is not None:
-            try:
-                win.isVisible()          # 触碰底层 C++ 对象，已销毁会抛 RuntimeError
-            except RuntimeError:
-                win = None
-                self._login_win = None
-        if win is None:
-            win = DxbLoginWindow(self.flask_mod, self._profile_ref())
-            self._login_win = win
-            win.show()
-            return
-        win.show()
-        win.raise_()
-        win.activateWindow()
-
-    def _fallback(self, reason: str):
-        """内置窗口起不来时退到系统浏览器 + 提示手动粘贴 Cookie，别让用户卡死。"""
-        try:
-            self.flask_mod.steam_login_failed(
-                f'内置登录窗口创建失败（{reason}）。已改用系统浏览器打开 Steam 登录页，'
-                f'登录后请把 Cookie 手动粘贴进来。')
-        except Exception:
-            pass
-        try:
-            webbrowser.open_new('https://store.steampowered.com/login/')
-        except Exception:
-            pass
 
 
-class DxbLoginWindow(QMainWindow):
-    """用持久 profile 的独立窗口加载 Steam 登录页。登录成功后从 cookieStore
-    抓取 steamLoginSecure 回调 app.steam_login_succeeded；失败回调 steam_login_failed。"""
-    def __init__(self, flask_mod, profile, parent=None):
-        super().__init__(parent)
+def apply_accel_to_webview2(rules):
+    """免hosts加速：把「域名→优选IP」映射注入 WebView2 内核解析阶段。
+
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS 是 WebView2 官方支持的环境变量，
+    必须在内核初始化前设置（因此在 create_window 之前调用）。
+    """
+    if not rules:
+        return False
+    arg = f'--host-resolver-rules={rules}'
+    try:
+        prev = os.environ.get('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS', '').strip()
+        os.environ['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = (prev + ' ' + arg).strip()
+        n = len(rules.split(',')) - 1
+        print(f'[大轩巴] 免hosts加速已注入 WebView2 内核（{n} 条域名→IP 映射）')
+        return True
+    except Exception as e:
+        print('[大轩巴] 注入加速参数失败：', e)
+        return False
+
+
+# ------------------------------------------------------------------ 内置登录窗口
+class SteamLoginHelper:
+    """用第二个内嵌 WebView2 窗口登录 Steam，轮询原生 CookieManager 抓 steamLoginSecure。
+
+    - 登录态持久：与主窗口共用同一个 WebView2 用户数据目录（storage_path），
+      下次启动仍处于登录状态（store.steampowered.com 的 Cookie 直接可用）。
+    - 为什么轮询：pywebview 没暴露 cookie 变更事件，且 steamLoginSecure 是 HttpOnly，
+      页面里 document.cookie 读不到，只能走原生 CookieManager（pywebview 内部已做
+      主线程 marshal，可从后台线程安全调用）。
+    """
+
+    def __init__(self, webview_mod, flask_mod):
+        self.webview = webview_mod
         self.flask_mod = flask_mod
-        self.profile = profile
-        self._cookies = {}
+        self.win = None
         self._done = False
-        self.setWindowTitle('大轩巴 · 登录 Steam')
-        self.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
-        self.resize(1040, 720)
-        self.setStyleSheet(
-            'QMainWindow{background:#0b0b0b;}'
-            'QToolBar{background:#0b0b0b;border:none;spacing:6px;}'
-            'QLabel{color:#f1c40f;font-weight:700;font-size:14px;padding:6px 10px;}'
-            'QToolButton{color:#f3f3f3;background:#1a1a1a;border:none;'
-            'padding:6px 12px;border-radius:8px;}'
-            'QToolButton:hover{background:#262626;}'
-        )
+        self._lock = threading.Lock()
+        self._polling = False
 
-        # profile 由 bridge 持有并复用（登录态跨启动持久），这里只负责挂页面
-        self.page = QWebEnginePage(self.profile, self)
-        self.view = QWebEngineView()
-        self.view.setPage(self.page)
-        self.setCentralWidget(self.view)
-
-        tb = QToolBar('导航')
-        tb.setMovable(False)
-        self.addToolBar(tb)
-        self._add_action(tb, '刷新', lambda: self.view.reload())
-        self._add_action(tb, '关闭', self.close)
-        self._status = QLabel('请在大轩巴内置浏览器中登录 Steam，登录成功后会自动返回主程序。')
-        tb.addWidget(self._status)
-
-        # 捕获 Cookie：steamLoginSecure 出现即视为登录成功
-        store = self.profile.cookieStore()
-        store.cookieAdded.connect(self._on_cookie)
-        store.loadAllCookies()   # 把已存的 Cookie 重新派发出来（含持久化登录态）
-        self.view.setUrl(QUrl('https://store.steampowered.com/login/'))
-
-    def _add_action(self, tb, text, slot):
-        a = QAction(text, self)
-        a.triggered.connect(slot)
-        tb.addAction(a)
-
-    def _on_cookie(self, cookie):
-        try:
-            name = cookie.name().data().decode('utf-8', 'replace')
-            value = cookie.value().data().decode('utf-8', 'replace')
-        except Exception:
-            return
-        self._cookies[name] = value
-        if name == 'steamLoginSecure' and not self._done:
-            self._done = True
-            # 等一小会儿让同一批次的 sessionid 等一并到达，再收口
-            QTimer.singleShot(700, self._finish)
-
-    def _finish(self):
-        header = '; '.join(f'{k}={v}' for k, v in self._cookies.items())
-        ok = False
-        try:
-            res = self.flask_mod.steam_login_succeeded(header)
-            ok = bool(res and res.get('success'))
-        except Exception as e:
+    # ---- 供 Flask 线程调用（backend 请求登录时）----
+    def open(self):
+        """打开（或重新唤起）登录窗口。返回 False 让前端走「手动粘贴 Cookie」兜底。"""
+        with self._lock:
+            self._done = False
+            if self.win is not None:
+                try:
+                    self.win.show()
+                    self.win.restore()
+                    self._start_poll()
+                    return True
+                except Exception:
+                    self.win = None
             try:
-                self.flask_mod.steam_login_failed(str(e))
-            except Exception:
-                pass
-        if ok:
-            self._status.setText('登录成功，正在返回主程序…')
-            self.view.setEnabled(False)
-            QTimer.singleShot(1500, self.close)
-        else:
-            self._status.setText('登录态无效或读取账号失败，请重试，或改用“手动粘贴 Cookie”。')
-            self._done = False  # 允许再次捕获
+                self.win = self.webview.create_window(
+                    '大轩巴 · 登录 Steam',
+                    'https://store.steampowered.com/login/',
+                    width=1040, height=720, min_size=(760, 560),
+                )
+                self.win.events.closed += self._on_closed
+            except Exception as e:
+                print('[大轩巴] 登录窗口创建失败：', e)
+                self.win = None
+                return False
+        self._start_poll()
+        return True
 
-    def showEvent(self, event):
-        # 窗口被再次唤起时允许重新捕获登录态（上次可能已收口）
-        super().showEvent(event)
+    def _on_closed(self):
+        self.win = None
         self._done = False
+
+    def _start_poll(self):
+        if self._polling:
+            return
+        self._polling = True
+        threading.Thread(target=self._poll, daemon=True).start()
+
+    def _cookie_jar(self):
+        """读取当前窗口的全部 Cookie（含 HttpOnly）"""
+        w = self.win
+        if w is None:
+            return {}
         try:
-            self._status.setText('请在大轩巴内置浏览器中登录 Steam，登录成功后会自动返回主程序。')
+            raw = w.get_cookies() or []
+        except Exception:
+            return {}
+        jar = {}
+        for c in raw:
+            try:
+                name = getattr(c, 'name', None)
+                if name is None and isinstance(c, dict):
+                    name = c.get('name')
+                value = getattr(c, 'value', None)
+                if value is None and isinstance(c, dict):
+                    value = c.get('value')
+                if name:
+                    jar[str(name)] = '' if value is None else str(value)
+            except Exception:
+                continue
+        return jar
+
+    def _poll(self):
+        deadline = time.time() + 1800          # 最多等 30 分钟，超时自动停止轮询
+        try:
+            while time.time() < deadline:
+                time.sleep(1.5)
+                if self.win is None or self._done:
+                    return
+                jar = self._cookie_jar()
+                if 'steamLoginSecure' not in jar:
+                    continue
+                self._done = True
+                time.sleep(0.8)                # 等同批次的 sessionid 等到齐
+                jar.update(self._cookie_jar())
+                header = '; '.join(f'{k}={v}' for k, v in jar.items() if k)
+                ok = False
+                try:
+                    res = self.flask_mod.steam_login_succeeded(header)
+                    ok = bool(res and res.get('success'))
+                except Exception as e:
+                    print('[大轩巴] 登录态回传失败：', e)
+                    try:
+                        self.flask_mod.steam_login_failed(str(e))
+                    except Exception:
+                        pass
+                if ok:
+                    print('[大轩巴] Steam 登录成功，Cookie 已回传主程序。')
+                    self._close()
+                else:
+                    print('[大轩巴] 读取到的登录态无效，保持窗口等待重试。')
+                    self._done = False
+                return
+            print('[大轩巴] 登录窗口等待超时（30 分钟），停止轮询。')
+        finally:
+            self._polling = False
+
+    def _close(self):
+        w = self.win
+        self.win = None
+        try:
+            if w is not None:
+                w.destroy()
         except Exception:
             pass
 
-    def closeEvent(self, event):
-        event.accept()
+
+# ------------------------------------------------------------------ 入口
+def _import_webview():
+    try:
+        import webview
+        return webview
+    except Exception as e:
+        print('[大轩巴] pywebview 导入失败：', e)
+        return None
 
 
 def main():
     setup_logging()
-    # 冻结环境显式指向 QT 平台插件目录，避免找不到 qwindows 导致窗口创建失败
-    if IS_FROZEN:
-        _qt_plugins = RESOURCE_DIR / 'PySide6' / 'plugins'
-        if _qt_plugins.is_dir():
-            os.environ.setdefault('QT_PLUGIN_PATH', str(_qt_plugins))
-            os.environ.setdefault('QT_QPA_PLATFORM_PLUGIN_PATH', str(_qt_plugins / 'platforms'))
     port = find_free_port()
     url = f'http://127.0.0.1:{port}'
 
     print(f'[大轩巴] 数据目录：{USER_DIR}')
     print(f'[大轩巴] 资源目录：{RESOURCE_DIR}')
+
+    # 窗口内核依赖系统 WebView2 Runtime：先检查，缺了直接提示去装（不白启动服务器）
+    wv2 = webview2_runtime_version()
+    if not wv2:
+        print('[大轩巴] 未检测到 Microsoft Edge WebView2 Runtime，提示用户安装。')
+        prompt_install_webview2()
+        return
+    print(f'[大轩巴] WebView2 Runtime：{wv2}')
+
+    webview = _import_webview()
+    if webview is None:
+        _message_box(
+            '缺少 pywebview 组件，无法创建内嵌窗口。\n'
+            '请重新安装本程序，或联系作者。',
+            '大轩巴入库器mini · 组件缺失', 0x10 | 0x00)
+        return
 
     # 主线程先加载 Flask 模块，便于注入内置浏览器登录 launcher 与共享给后台线程
     try:
@@ -635,70 +541,58 @@ def main():
         print('[大轩巴] Flask 模块加载失败，无法启动：', e)
         import traceback
         traceback.print_exc()
+        _message_box(f'内部服务加载失败：\n{e}', '大轩巴入库器mini · 启动失败', 0x10)
         return
+
+    # 免hosts加速：必须在 WebView2 内核初始化前设置环境变量
+    apply_accel_to_webview2(load_accel_rules())
 
     server_thread = threading.Thread(target=start_flask_server, args=(port, mod), daemon=True)
     server_thread.start()
 
-    _rules = load_accel_rules()
-
-    # 注册提权重启 + 普通重启 launcher（两种打开模式都需要）
     _register_restart_launchers(mod, url)
 
-    # 系统浏览器模式：打包时已排除 PySide6（去掉整包 Qt WebEngine，体积大幅瘦身），
-    # 或显式设置 DXB_FORCE_SYSTEM_BROWSER=1 时，一律用系统浏览器打开。
-    _use_system_browser = HAVE_QT is None or os.environ.get('DXB_FORCE_SYSTEM_BROWSER') == '1'
-    if _use_system_browser:
-        why = '未检测到 PySide6 / PyQt6' if HAVE_QT is None else '已指定 DXB_FORCE_SYSTEM_BROWSER'
-        print(f'[大轩巴] 使用系统浏览器打开网页（{why}）。')
-        print(f'[大轩巴] 本地服务地址：{url}')
-        wait_server_ready(url)
-        open_in_system_browser(url, _rules)
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            shutdown_server(url)
-        return
-
-    print(f'[大轩巴] 使用 {HAVE_QT} 桌面窗口打开网页。')
+    print(f'[大轩巴] 本地服务地址：{url}')
     wait_server_ready(url)
 
-    # 免hosts 加速（内置窗口模式）：把已保存的「域名→优选IP」映射注入 Chromium 解析阶段，
-    # 不改动系统 hosts、不需管理员、不影响本机回环。
-    if _rules:
-        sys.argv = list(sys.argv) + [f'--host-resolver-rules={_rules}']
-        print(f'[大轩巴] 已启用免hosts加速，注入 host-resolver-rules（{len(_rules.split(","))-1} 条映射）')
+    # 窗口行为：允许下载（配合下载管理）、外链不外跳系统浏览器、隐藏默认菜单
+    try:
+        webview.settings['ALLOW_DOWNLOADS'] = True
+        webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER'] = False
+        webview.settings['SHOW_DEFAULT_MENUS'] = False
+    except Exception as e:
+        print('[大轩巴] 设置窗口选项失败：', e)
 
-    app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon(str(RESOURCE_DIR / 'assets' / 'icon.ico')))
-    win = DxbWindow(url)
-    win.show()
+    win = webview.create_window(
+        '大轩巴 入库器mini', url,
+        width=1320, height=900, min_size=(1024, 700),
+        text_select=True,
+    )
+    if win is None:
+        _message_box('主窗口创建失败。', '大轩巴入库器mini · 启动失败', 0x10)
+        return
 
-    # 注入“沉默浏览器登录 Steam”launcher：由主线程的桥在 GUI 线程打开登录窗口。
-    # QueuedConnection 负责把 Flask 线程的请求投递到 GUI 线程；
-    # 返回 False 说明投递被拒（槽不匹配 / 对象已销毁），要回传前端提示，不能装作成功。
+    # 登录 launcher：Flask 线程请求登录时开第二个内嵌窗口（仍在本程序内，不外跳）
+    helper = SteamLoginHelper(webview, mod)
     if hasattr(mod, 'register_steam_login_launcher'):
-        bridge = DxbLoginBridge(mod, app)   # parent=QApplication，生命周期跟随进程
-        app._dxb_login_bridge = bridge      # 再持一份强引用，防止 GC 后静默失效
+        mod.register_steam_login_launcher(helper.open)
 
-        def _launch_login():
-            try:
-                ok = QMetaObject.invokeMethod(bridge, 'open_login', Qt.QueuedConnection)
-            except Exception as e:
-                print('[大轩巴] 派发登录窗口失败:', e)
-                return False
-            if ok is False:
-                print('[大轩巴] 登录窗口派发被拒绝（槽未匹配或对象已销毁）')
-            return bool(ok)
+    # private_mode=False + storage_path：Cookie 持久化到用户目录，
+    # Steam 登录态跨启动保留（与登录窗口共用同一份用户数据目录）
+    profile_dir = USER_DIR / 'steambrowser_profile'
+    try:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
-        mod.register_steam_login_launcher(_launch_login)
-
-    # 提权重启 / 普通重启 launcher 已在 main() 前段统一注册（_register_restart_launchers）
-
-    app.exec()
+    print('[大轩巴] 使用内嵌 WebView2 窗口打开界面。')
+    webview.start(
+        gui='edgechromium',
+        private_mode=False,
+        storage_path=str(profile_dir),
+    )
+    print('[大轩巴] 窗口已关闭，进程退出。')
     shutdown_server(url)
-    os._exit(0)
 
 
 if __name__ == '__main__':

@@ -32,6 +32,7 @@ class ToolsApp {
         this.accel = null;        // 最近一次测速结果（按当前分类）
         this.accelStatus = null;  // hosts 加速块状态
         this.accelFree = null;    // 免hosts加速状态
+        this.privilege = null;    // 真实权限检测结果（/api/app/privilege）
         this.store = window.DxbTaskLog ? window.DxbTaskLog.local('tools') : null;
         this.initialize();
     }
@@ -369,10 +370,35 @@ class ToolsApp {
                 const d2 = await r2.json();
                 if (d2.success) this.accelFree = d2;
             } catch (e) { /* 忽略 */ }
+            await this.refreshPrivilege(false);
             this.renderAccelSummary(d);
         } catch (e) {
             this.elements.accelSummary.innerHTML = '<span class="summary-chip bad">加速状态读取失败</span>';
         }
+    }
+
+    // 真实权限检测：问后端当前进程到底是不是管理员（IsUserAnAdmin），不靠前端猜
+    async refreshPrivilege(verbose) {
+        try {
+            const r = await fetch('/api/app/privilege', { cache: 'no-store' });
+            const d = await r.json();
+            if (d && d.success) {
+                this.privilege = d;
+                if (verbose) {
+                    const msg = d.admin
+                        ? `检测结果：管理员权限（PID ${d.pid}），写 hosts 可用。`
+                        : `检测结果：普通用户（PID ${d.pid}），写 hosts 会被拒绝，需以管理员身份重启。`;
+                    this.showSnackbar(msg, d.admin ? 'success' : 'warning');
+                    this.log(d.admin ? 'success' : 'warn', msg);
+                }
+            }
+        } catch (e) {
+            if (verbose) {
+                this.showSnackbar(`权限检测失败：${e.message}`, 'error');
+                this.log('error', `权限检测失败：${e.message}`);
+            }
+        }
+        if (this.accelStatus) this.renderAccelSummary(this.accelStatus);
     }
 
     renderAccelSummary(s) {
@@ -405,19 +431,46 @@ class ToolsApp {
             bar.appendChild(w);
         }
 
-        if (this.accelMode === 'hosts' && !s.writable) {
+        // 真实权限检测条：始终显示后端真实返回的权限状态 + 重新检测 + 提权重启
+        const pv = this.privilege;
+        const perm = document.createElement('div');
+        perm.className = 'accel-warn' + ((pv && pv.admin) ? ' accel-ok' : '');
+        const pic = document.createElement('span');
+        pic.className = 'material-icons';
+        pic.textContent = (pv && pv.admin) ? 'verified_user' : (pv ? 'person' : 'hourglass_top');
+        const ptx = document.createElement('span');
+        if (!pv) {
+            ptx.textContent = '权限检测：检测中…';
+        } else if (pv.admin) {
+            ptx.textContent = `权限检测：管理员（PID ${pv.pid}）—— 可直接写 hosts 做系统级加速。`;
+        } else {
+            ptx.textContent = `权限检测：普通用户（PID ${pv.pid}）—— 写 hosts 会被系统拒绝，需管理员权限。`;
+        }
+        const recheckBtn = document.createElement('button');
+        recheckBtn.className = 'btn btn-secondary';
+        recheckBtn.innerHTML = '<span class="material-icons">refresh</span> 重新检测';
+        recheckBtn.addEventListener('click', () => this.refreshPrivilege(true));
+        perm.append(pic, ptx, recheckBtn);
+        if (pv && !pv.admin) {
+            const eb = document.createElement('button');
+            eb.className = 'btn btn-primary';
+            eb.innerHTML = '<span class="material-icons">rocket_launch</span> 以管理员身份重启';
+            eb.addEventListener('click', () => this.restartElevated());
+            perm.appendChild(eb);
+        }
+        bar.appendChild(perm);
+
+        // hosts 模式下即使是管理员也写不进 hosts：多半被安全软件/组策略锁了
+        if (this.accelMode === 'hosts' && !s.writable && pv && pv.admin) {
             const w = document.createElement('div');
             w.className = 'accel-warn';
             const ic = document.createElement('span');
             ic.className = 'material-icons';
-            ic.textContent = 'admin_panel_settings';
+            ic.textContent = 'report_problem';
             const tx = document.createElement('span');
-            tx.textContent = '写 hosts 需要管理员权限，当前不是管理员，加速 / 还原会失败。';
-            const b = document.createElement('button');
-            b.className = 'btn btn-primary';
-            b.innerHTML = '<span class="material-icons">rocket_launch</span> 以管理员身份重启';
-            b.addEventListener('click', () => this.restartElevated());
-            w.append(ic, tx, b);
+            tx.textContent = '当前已是管理员但 hosts 仍不可写（文件可能被安全软件/组策略锁定）。'
+                + '可改用上面的「免hosts加速」方式，无需管理员。';
+            w.append(ic, tx);
             bar.appendChild(w);
         }
 
@@ -615,17 +668,65 @@ class ToolsApp {
     }
 
     async restartElevated() {
-        if (!window.confirm('将以管理员身份重启本程序（会弹出 UAC 授权窗口）。\n\n' +
-            '当前窗口会关闭，请在新窗口里重新点「一键加速」。\n\n继续？')) return;
+        if (!window.confirm('将以管理员身份重启本程序（会弹出 Windows UAC 授权窗口）。\n\n' +
+            '· 点「是」→ 程序以管理员身份重启，当前窗口关闭，新窗口自动打开\n' +
+            '· 点「否」→ 会明确提示你「提权被拒绝」，不会假装成功\n\n继续？')) return;
         this.log('info', '请求以管理员身份重启…');
         try {
             const r = await fetch('/api/app/restart_elevated', { method: 'POST' });
             const d = await r.json();
-            this.showSnackbar(d.message || '', d.success ? 'info' : 'warning');
-            this.log(d.success ? 'info' : 'warn', d.message || '');
+            if (d.already) {
+                this.showSnackbar(d.message, 'info');
+                this.log('info', d.message);
+                await this.refreshPrivilege(false);
+                return;
+            }
+            if (!d.success) {
+                // 真实失败：UAC 被拒 / 没有提权通道
+                this.showSnackbar(d.message || '提权失败。', d.denied ? 'warning' : 'error');
+                this.log('warn', d.message || '提权失败');
+                await this.refreshPrivilege(false);
+                return;
+            }
+            // UAC 已通过：等管理员实例起来，轮询真实权限
+            this.showSnackbar(d.message || '已通过 UAC，正在以管理员身份重启…', 'success');
+            this.log('info', 'UAC 已通过，等待管理员实例启动…');
+            this.waitForElevatedRestart();
         } catch (e) {
-            // 程序正在退出，连接被中断属正常现象
+            // 旧实例正在关闭（连接被中断）属预期，转而轮询新实例
+            this.log('info', '当前窗口正在关闭，等待管理员实例…');
+            this.waitForElevatedRestart();
         }
+    }
+
+    // 重启后真实检测：轮询 /api/app/privilege 直到新实例报「管理员」
+    waitForElevatedRestart() {
+        const deadline = Date.now() + 60000;
+        let stop = false;
+        const tick = async () => {
+            if (stop) return;
+            try {
+                const r = await fetch('/api/app/privilege', { cache: 'no-store' });
+                const d = await r.json();
+                if (d && d.success) {
+                    this.privilege = d;
+                    if (d.admin) {
+                        stop = true;
+                        this.showSnackbar(`重启完成 · 实测权限：管理员（PID ${d.pid}）`, 'success');
+                        this.log('success', `已以管理员身份重启，实测 PID ${d.pid} 为管理员。`);
+                        this.renderAccelSummary(this.accelStatus || {});
+                        return;
+                    }
+                }
+            } catch (e) { /* 服务器还没起来，继续等 */ }
+            if (Date.now() < deadline) {
+                setTimeout(tick, 1500);
+            } else {
+                this.log('warn', '等待管理员实例超时：UAC 可能被系统策略拦截，或新实例启动失败。');
+                this.showSnackbar('等待管理员实例超时，请手动右键 exe →「以管理员身份运行」。', 'warning');
+            }
+        };
+        setTimeout(tick, 2000);
     }
 }
 

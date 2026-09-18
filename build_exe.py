@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-"""大轩巴入库器mini · 打包脚本
-================================
-用 PyInstaller 把 dxb_desktop.py（内嵌 Flask 服务器 + QT6 WebEngine 窗口）
-打包成单个 exe。
+"""大轩巴入库器mini · 打包脚本（标准版，源码为明文）
+====================================================
+用 PyInstaller 把 dxb_desktop.py（内嵌 Flask 服务器 + 主窗口内嵌 WebView2）打包成单个 exe。
 
 关键点：
 1. app.py 是用 importlib 动态加载的，PyInstaller 静态分析扫不到，
@@ -10,6 +9,10 @@
 2. templates / static / assets 作为 data 打包，运行时落在 sys._MEIPASS。
 3. backend 用 hidden-import 收集，其传递依赖会被自动分析。
 4. 排除 tkinter：运行时由 dxb_desktop.py 注入空壳，避免打包 tcl/tk 整套。
+5. 窗口引擎 = pywebview + 系统 WebView2：
+   - 不打进任何浏览器内核（Qt WebEngine 全系排除），exe 约 35MB
+   - 依赖系统自带的 Microsoft Edge WebView2 Runtime，缺失时程序会提示去微软官方装
+   - pywebview / pythonnet / bottle 必须显式收集（含 webview/lib 下的 WebView2 .NET DLL）
 
 用法：python build_exe.py
 """
@@ -48,8 +51,22 @@ hidden = [
     'ujson',
     'vdf',
     'requests',
+    # 窗口引擎（pywebview + 系统 WebView2）
+    'webview',
+    'webview.platforms.edgechromium',
+    'webview.platforms.winforms',
+    'clr',
+    'clr_loader',
+    'pythonnet',
+    'bottle',
+    'proxy_tools',
+    'typing_extensions',
     # backend 用标准库 winreg（Windows 自带），无需 pywin32
 ]
+
+# 需要按“整个包”收集的数据/二进制（hook 之外再兜一层，确保 DLL 与 JS 都在）
+collect_data = ['webview', 'pythonnet']
+collect_binaries = ['pythonnet']
 
 excludes = [
     'tkinter',      # 运行时空壳替代
@@ -57,9 +74,8 @@ excludes = [
     'numpy',
     'pytest',
     'PIL',
-    # 改用系统浏览器打开页面：整包排除 Qt / WebEngine，exe 从 ~250MB 瘦身到几十 MB。
-    # 冻结后 dxb_desktop 检测不到 PySide6 会走「系统浏览器」分支；开发时可用
-    # 环境变量 DXB_FORCE_SYSTEM_BROWSER=1 强制同款行为。
+    # 窗口改用系统 WebView2：整包排除 Qt / WebEngine，exe 从 ~250MB 瘦身到几十 MB。
+    # 浏览器内核不随包分发，依赖系统自带的 WebView2 Runtime（缺失会提示去装）。
     'PySide6',
     'PyQt6',
     'PyQt5',
@@ -96,6 +112,12 @@ def main():
 
     for h in hidden:
         args.append(f'--hidden-import={h}')
+
+    for c in collect_data:
+        args.append(f'--collect-data={c}')
+
+    for c in collect_binaries:
+        args.append(f'--collect-binaries={c}')
 
     for e in excludes:
         args.append(f'--exclude-module={e}')

@@ -58,7 +58,7 @@ project_root = Path.cwd()
 sys.path.insert(0, str(project_root))
 
 try:
-    from backend import DxbBackend, DEFAULT_CONFIG
+    from backend import DxbBackend, DEFAULT_CONFIG, GREENLUMA_OFFICIAL_URL
 except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
@@ -353,16 +353,18 @@ def steam_status():
         dummy.log.error(dummy.stack_error(e))
         return jsonify({"success": False, "message": str(e)})
 
-# NEW: 依赖模块状态（OpenSteamTool 内核 / SteamTools）
+# NEW: 依赖模块状态（OpenSteamTool 内核 / SteamTools / GreenLuma）
 @app.route('/api/dependency/status', methods=['GET'])
 def dependency_status():
     try:
         async def _st():
             async with DxbBackend() as backend:
                 await backend.initialize()
-                return backend.get_opensteamtool_status(), backend.get_steamtools_status(), backend.get_steam_status()
-        otool, stools, steam = asyncio.run(_st())
-        return jsonify({"success": True, "opensteamtool": otool, "steamtools": stools, "steam": steam})
+                return (backend.get_opensteamtool_status(), backend.get_steamtools_status(),
+                        backend.get_greenluma_status(), backend.get_steam_status())
+        otool, stools, gluma, steam = asyncio.run(_st())
+        return jsonify({"success": True, "opensteamtool": otool, "steamtools": stools,
+                        "greenluma": gluma, "steam": steam})
     except Exception as e:
         dummy = DxbBackend()
         dummy.log.error(dummy.stack_error(e))
@@ -379,6 +381,8 @@ def _background_install_dependency(kind: str, force: bool):
                 res = await backend.ensure_opensteamtool_installed(force=force)
             elif kind == "steamtools":
                 res = await backend.ensure_steamtools_installed(force=force)
+            elif kind == "greenluma":
+                res = await backend.ensure_greenluma_installed(force=force)
             else:
                 backend.log.error(f"未知依赖类型: {kind}")
                 return
@@ -397,11 +401,64 @@ def dependency_install():
     data = request.get_json(silent=True) or {}
     kind = data.get("kind", "")
     force = bool(data.get("force", False))
-    if kind not in ("opensteamtool", "steamtools"):
+    if kind not in ("opensteamtool", "steamtools", "greenluma"):
         return jsonify({"success": False, "message": "未知的依赖类型。"}), 400
+
+    # GreenLuma 官方不在 GitHub 发布（只在 cs.rin.ru 论坛）。没配镜像仓库时如实告知，
+    # 并给出官方下载页，而不是让按钮转一圈后甩一句「失败」。
+    if kind == "greenluma":
+        try:
+            repo = _quick_backend().greenluma_repo()
+        except Exception:
+            repo = ""
+        if not repo:
+            return jsonify({
+                "success": False,
+                "need_manual": True,
+                "official_url": GREENLUMA_OFFICIAL_URL,
+                "message": "未配置 GreenLuma 镜像仓库。\n\n"
+                           "GreenLuma 官方只在 cs.rin.ru 论坛发布（GitHub 上没有官方包）。\n\n"
+                           "两种做法：\n"
+                           "· 去官方页下载，把 GreenLuma*.dll（或 GreenLuma.exe）放到 Steam 根目录，"
+                           "然后点「重新检测」；\n"
+                           "· 或者你有自己的镜像仓库，就在卡片里把「GreenLuma 仓库 (owner/repo)」填上。",
+            })
+
     threading.Thread(target=_background_install_dependency, args=(kind, force), daemon=True).start()
-    label = "OpenSteamTool 内核" if kind == "opensteamtool" else "SteamTools"
+    label = {"opensteamtool": "OpenSteamTool 内核", "steamtools": "SteamTools",
+             "greenluma": "GreenLuma"}.get(kind, kind)
     return jsonify({"success": True, "message": f"已在后台开始下载/更新 {label}。"})
+
+
+# 允许从界面用系统浏览器打开的外部链接（白名单，避免被当成任意 URL 打开器）
+_OPEN_URL_WHITELIST = (
+    "cs.rin.ru",                  # GreenLuma 官方发布页
+    "github.com", "raw.githubusercontent.com", "api.github.com",
+    "go.microsoft.com",           # WebView2 Runtime 官方引导
+    "learn.microsoft.com",
+    "store.steampowered.com", "steamcommunity.com",
+)
+
+
+@app.route('/api/app/open_url', methods=['POST'])
+def app_open_url():
+    """用系统默认浏览器打开白名单内的外链（内置窗口不外跳，只有明确点按钮才走系统浏览器）。"""
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return jsonify({"success": False, "message": "只允许打开 http/https 链接。"}), 400
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not any(host == h or host.endswith("." + h) for h in _OPEN_URL_WHITELIST):
+        return jsonify({"success": False, "message": f"该域名不在白名单内，已拒绝打开：{host}"}), 403
+    try:
+        webbrowser.open(url)
+        return jsonify({"success": True, "message": f"已用系统浏览器打开：{host}", "url": url})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"打开失败：{e}"})
 
 
 # NEW: 应用自更新：下载最新安装包并自动打开安装
@@ -1373,23 +1430,70 @@ def app_restart():
     return jsonify({"success": True, "message": "正在重启应用…"})
 
 
+_privilege_state = {"last_elevate": None, "last_elevate_at": 0}
+
+
+@app.route('/api/app/privilege', methods=['GET'])
+def app_privilege():
+    """真实检测当前权限状态（不猜）：是否管理员、能否提权、能否普通重启。"""
+    try:
+        is_admin = bool(DxbBackend.is_admin())
+    except Exception:
+        is_admin = False
+    return jsonify({
+        "success": True,
+        "admin": is_admin,
+        "level": "admin" if is_admin else "user",
+        "pid": os.getpid(),
+        "exe": sys.executable,
+        "frozen": bool(getattr(sys, 'frozen', False)),
+        "elevate_available": _elevated_restart is not None,
+        "restart_available": _normal_restart is not None,
+        "last_elevate": _privilege_state.get("last_elevate"),
+        "last_elevate_at": _privilege_state.get("last_elevate_at"),
+    })
+
+
 @app.route('/api/app/restart_elevated', methods=['POST'])
 def app_restart_elevated():
-    """以管理员身份重启本程序（仅桌面壳可用）。"""
+    """以管理员身份重启本程序：真实检测 + 真实回传 UAC 结果（仅桌面壳可用）。"""
+    _privilege_state["last_elevate_at"] = time.time()
+
+    # 1) 真实检测：当前进程是不是已经是管理员
+    try:
+        already = bool(DxbBackend.is_admin())
+    except Exception:
+        already = False
+    if already:
+        _privilege_state["last_elevate"] = "already_admin"
+        return jsonify({"success": True, "already": True, "level": "admin",
+                        "message": f"检测结果：当前进程已是管理员权限（PID {os.getpid()}），无需重启。"})
+
+    # 2) 提权通道是否可用（由桌面壳注入 ShellExecuteW runas）
     if _elevated_restart is None:
-        return jsonify({"success": False, "available": False,
-                        "message": "当前环境不支持自动提权，请手动右键 exe → 以管理员身份运行。"})
-    if DxbBackend.is_admin():
-        return jsonify({"success": True, "already": True, "message": "当前已经是管理员权限。"})
-    def _go():
-        time.sleep(0.8)          # 先把响应吐出去，再提权
-        try:
-            _elevated_restart()
-        except Exception:
-            pass
-    threading.Thread(target=_go, daemon=True).start()
-    return jsonify({"success": True, "available": True,
-                    "message": "正在请求管理员权限，请在弹窗中点「是」，程序会以管理员身份重启。"})
+        _privilege_state["last_elevate"] = "unavailable"
+        return jsonify({"success": False, "available": False, "level": "user",
+                        "message": "检测结果：当前不是管理员，且本环境拿不到提权通道。\n"
+                                   "请关闭程序，右键 exe →「以管理员身份运行」。"})
+
+    # 3) 真实提权：ShellExecuteW(runas) 会弹 UAC，等用户表态后拿真实返回值
+    try:
+        ok = bool(_elevated_restart())
+    except Exception as e:
+        _privilege_state["last_elevate"] = f"error: {e}"
+        return jsonify({"success": False, "level": "user",
+                        "message": f"提权失败：{e}"})
+    if not ok:
+        # 用户在 UAC 弹窗点了「否」，或被系统策略拦截（ShellExecuteW 返回值 ≤ 32）
+        _privilege_state["last_elevate"] = "denied"
+        return jsonify({"success": False, "level": "user", "denied": True,
+                        "message": "检测结果：提权被拒绝（UAC 弹窗点了「否」，或被系统策略拦截）。\n"
+                                   "Steam 加速写 hosts 仍需要管理员权限，请右键 exe →「以管理员身份运行」。"})
+
+    _privilege_state["last_elevate"] = "granted"
+    return jsonify({"success": True, "level": "elevating", "restarting": True,
+                    "message": "已通过 UAC 授权，正在以管理员身份重启。\n"
+                               "当前窗口会在 1~2 秒内关闭，新的管理员窗口会自动打开（可能需几秒）。"})
 
 
 @app.route('/api/steam/restart', methods=['POST'])

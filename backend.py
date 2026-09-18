@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.14"  # 当前版本号
+CURRENT_VERSION = "2.15"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
     "force_unlocker_type": "auto",
     "auto_install_unlocker": True,
     "unlocker_preference": "greenluma",
-    "greenluma_repo": "WinterSamza/GreenLuma_2025",
+    "greenluma_repo": "",
     "steamtools_repo": "SteamTools/STAupdater",
     "Custom_Repos": {
         "github": [],
@@ -61,12 +61,17 @@ DEFAULT_CONFIG = {
     },
     "QA1": "温馨提示: Github_Personal_Token(个人访问令牌)可在Github设置的最底下开发者选项中找到, 详情请看教程。",
     "QA6": "auto_install_unlocker: 未检测到解锁工具时自动下载并安装，默认开。unlocker_preference 填 'greenluma' 或 'steamtools'。",
-    "QA7": "greenluma_repo / steamtools_repo: 自动安装所用的 GitHub 仓库（owner/repo），请填写发布 Release 的仓库。",
+    "QA7": "greenluma_repo / steamtools_repo: 自动安装所用的 GitHub 仓库（owner/repo）。"
+           "注意 GreenLuma 官方不在 GitHub 发布（官方在 cs.rin.ru 论坛），"
+           "greenluma_repo 留空时程序会引导你打开官方下载页手动安装，或填入你自己的镜像仓库。",
     "QA2": "Force_Unlocker: 强制指定解锁工具, 填入 'steamtools' 或 'greenluma'。留空则自动检测。",
     "QA3": "Custom_Repos: 自定义清单库配置。github数组用于添加GitHub仓库，zip数组用于添加ZIP清单库。",
     "QA4": "GitHub仓库格式: {\"name\": \"显示名称\", \"repo\": \"用户名/仓库名\"}",
     "QA5": "ZIP清单库格式: {\"name\": \"显示名称\", \"url\": \"下载URL，用{app_id}作为占位符\"}"
 }
+
+# GreenLuma 官方发布页（作者只在 cs.rin.ru 论坛更新，GitHub 上只有第三方管理器/镜像）
+GREENLUMA_OFFICIAL_URL = "https://cs.rin.ru/forum/viewtopic.php?f=10&t=103709"
 
 class STConverter:
     def __init__(self):
@@ -441,9 +446,13 @@ class DxbBackend:
 
     async def ensure_unlocker_installed(self) -> str | None:
         pref = self.config.get("unlocker_preference", "greenluma")
-        repo = self.config.get(f"{pref}_repo", "")
+        if pref == 'greenluma':
+            repo = self.greenluma_repo()
+        else:
+            repo = (self.config.get(f"{pref}_repo") or "").strip()
         if not repo:
-            self.log.warning("未配置解锁器仓库，跳过自动安装。")
+            self.log.warning(f"未配置 {pref} 的安装仓库（{pref}_repo 为空），跳过自动安装。"
+                             "可在设置页对应内核卡片里填入镜像仓库，或手动安装。")
             return None
         self.log.info(f"未检测到解锁工具，正在自动下载并安装 {pref}（仓库 {repo}）...")
         asset = await self._fetch_latest_release_asset(repo, ['.zip', '.7z'])
@@ -464,7 +473,7 @@ class DxbBackend:
                 zf.extractall(ext_dir)
             if pref == 'greenluma':
                 copied = False
-                for dll in ext_dir.rglob('GreenLuma_2025_*.dll'):
+                for dll in ext_dir.rglob('GreenLuma*.dll'):
                     shutil.copy2(dll, self.steam_path / dll.name)
                     copied = True
                 if copied:
@@ -636,6 +645,151 @@ class DxbBackend:
         self.log.info(f"SteamTools 已释放到 {dst}，请按官方指引完成注册。")
         return "steamtools"
 
+    async def _download_and_extract_any(self, download_url: str, asset_name: str, ext_dir: Path) -> bool:
+        """下载发布资产并解压到 ext_dir：zip 走内置 zipfile，7z 走 py7zr（可选依赖）。"""
+        import zipfile
+        zpath = self.temp_path / (asset_name or 'dep_asset.zip')
+        try:
+            data = await self._download_bytes(download_url)
+            if not data:
+                return False
+            self.temp_path.mkdir(parents=True, exist_ok=True)
+            zpath.write_bytes(data)
+            ext_dir.mkdir(parents=True, exist_ok=True)
+            low = (asset_name or '').lower()
+            if low.endswith('.7z'):
+                try:
+                    import py7zr  # 可选依赖，缺失时降级提示手动安装
+                except Exception:
+                    self.log.warning("发布包是 7z 但缺少 py7zr，无法自动解压，请手动安装。")
+                    return False
+                with py7zr.SevenZipFile(zpath, 'r') as z:
+                    z.extractall(ext_dir)
+                return True
+            with zipfile.ZipFile(zpath) as zf:
+                zf.extractall(ext_dir)
+            return True
+        except Exception as e:
+            self.log.error(f"下载/解压失败: {self.stack_error(e)}")
+            return False
+        finally:
+            if zpath.exists():
+                try:
+                    zpath.unlink()
+                except Exception:
+                    pass
+
+    async def ensure_greenluma_installed(self, force: bool = False) -> str | None:
+        """从 GitHub 下载/更新 GreenLuma（DLL 注入入库）到 Steam 根目录。
+
+        GreenLuma 2025 的 DLL 需与 steam.exe 同目录（Steam 根目录），
+        解锁目标由同目录 AppList\\*.txt 决定；这里把包内 AppList 一并释放。
+        """
+        sp = self.get_steam_path()
+        if not sp or not sp.exists():
+            self.log.error("无法确定有效的 Steam 路径，无法安装 GreenLuma。")
+            return None
+        if not force:
+            st = self.get_greenluma_status()
+            if st["installed"]:
+                self.log.info("GreenLuma 已安装，跳过（如需重装请使用强制更新）。")
+                return "greenluma"
+        repo = self.greenluma_repo()
+        if not repo:
+            self.log.warning(
+                "未配置 GreenLuma 仓库（greenluma_repo 为空）。"
+                "GreenLuma 官方只在 cs.rin.ru 论坛发布，程序不会去猜下载源："
+                f"请到官方页手动下载后把 DLL 放到 Steam 根目录，或填入自己的镜像仓库。官方页：{GREENLUMA_OFFICIAL_URL}")
+            return None
+        self.log.info(f"正在从 GitHub 获取 GreenLuma 最新发布（仓库 {repo}）...")
+        asset = await self._fetch_latest_release_asset(repo, ['.zip', '.7z', '.exe'])
+        if not asset:
+            self.log.error(f"仓库 {repo} 没有可用的发布资产（.zip / .7z / .exe）。"
+                           f"请改用 GreenLuma 官方发布页手动安装：{GREENLUMA_OFFICIAL_URL}")
+            return None
+        download_url, asset_name = asset
+
+        # 部分镜像只发单文件 GreenLuma.exe（自注入式），直接放进 Steam 根目录
+        if asset_name.lower().endswith('.exe'):
+            data = await self._download_bytes(download_url)
+            if not data:
+                self.log.error("下载 GreenLuma.exe 失败。")
+                return None
+            try:
+                (sp / 'GreenLuma.exe').write_bytes(data)
+            except Exception as e:
+                self.log.error(f"写入 GreenLuma.exe 失败: {e}")
+                return None
+            try:
+                (sp / 'AppList').mkdir(exist_ok=True)
+            except Exception:
+                pass
+            try:
+                tag = await self._fetch_release_tag(repo)
+                (sp / 'greenluma_version.txt').write_text(tag or asset_name, encoding='utf-8')
+            except Exception:
+                pass
+            self.log.info(f"GreenLuma.exe 已安装到 {sp}（运行它即可注入解锁）。")
+            return "greenluma"
+
+        ext_dir = self.temp_path / 'greenluma_extract'
+        if not await self._download_and_extract_any(download_url, asset_name, ext_dir):
+            self.log.warning("GreenLuma 发布包下载/解压失败，请前往设置页手动下载安装。")
+            shutil.rmtree(ext_dir, ignore_errors=True)
+            return None
+
+        copied: List[str] = []
+        for dll in sorted(ext_dir.rglob('GreenLuma_2025_*.dll')):
+            try:
+                shutil.copy2(dll, sp / dll.name)
+                copied.append(dll.name)
+            except Exception as e:
+                self.log.error(f"释放 {dll.name} 失败: {e}")
+        if not copied:
+            # 兼容其它命名/分支：只收名字里带 greenluma 的 DLL，避免污染 Steam 目录
+            for dll in sorted(ext_dir.rglob('*.dll')):
+                if 'greenluma' in dll.name.lower():
+                    try:
+                        shutil.copy2(dll, sp / dll.name)
+                        copied.append(dll.name)
+                    except Exception:
+                        pass
+        if not copied:
+            self.log.error("发布包中未找到 GreenLuma DLL。")
+            shutil.rmtree(ext_dir, ignore_errors=True)
+            return None
+
+        # AppList：GreenLuma 的解锁目标清单目录，包里有就一并释放
+        for extra in ('AppList', 'AppList_x64'):
+            src_d = ext_dir / extra
+            if src_d.is_dir():
+                try:
+                    shutil.copytree(src_d, sp / extra, dirs_exist_ok=True)
+                    self.log.info(f"已释放 {extra} 目录到 Steam 根目录。")
+                except Exception as e:
+                    self.log.warning(f"释放 {extra} 失败: {e}")
+        # DLLInjector / GreenLuma.exe / 配置 ini 等随包释放（不覆盖 Steam 自身文件）
+        for pat in ('GreenLuma*.exe', 'DLLInjector*.exe', '*.ini'):
+            for f in sorted(ext_dir.glob(pat)):
+                try:
+                    shutil.copy2(f, sp / f.name)
+                except Exception:
+                    pass
+        # AppList 是 GreenLuma 的解锁目标目录，缺失时先建好空目录，避免用户手动找路径
+        try:
+            (sp / 'AppList').mkdir(exist_ok=True)
+        except Exception:
+            pass
+
+        tag = await self._fetch_release_tag(repo)
+        try:
+            (sp / 'greenluma_version.txt').write_text(tag or asset_name, encoding='utf-8')
+        except Exception:
+            pass
+        shutil.rmtree(ext_dir, ignore_errors=True)
+        self.log.info(f"GreenLuma 已安装到 {sp}：{', '.join(copied)}")
+        return "greenluma"
+
     async def _download_bytes(self, url: str) -> bytes | None:
         try:
             r = await self.client.get(url, timeout=120, follow_redirects=True)
@@ -753,7 +907,7 @@ class DxbBackend:
 
     def get_steam_status(self) -> Dict:
         """检测 Steam 路径与已安装内核，供首页状态条显示。
-        kernel: steamtools(稳定入库) / opensteamtool(清单导入) / none
+        kernel: steamtools(稳定入库) / greenluma(DLL注入) / opensteamtool(清单导入) / none
         注意：OpenSteamTool 实际把 lua 放在 Steam 根目录的 config\\lua\\，
         内核 dll(OpenSteamTool.dll/dwmapi.dll/xinput1_4.dll) 也在 Steam 根目录。
         """
@@ -762,12 +916,14 @@ class DxbBackend:
             return {"steam_path": None, "exists": False, "kernel": "none",
                     "steamtools": False, "greenluma": False, "opensteamtool": False}
         is_steamtools = (sp / 'config' / 'stplug-in').is_dir()
-        is_greenluma = any((sp / dll).exists() for dll in ['GreenLuma_2025_x86.dll', 'GreenLuma_2025_x64.dll'])
+        is_greenluma = any(sp.glob('GreenLuma*.dll'))
         # OpenSteamTool：Steam 根目录的 OpenSteamTool.dll 或 config\\lua 目录
         is_opensteamtool = (sp / 'OpenSteamTool.dll').exists() or (sp / 'config' / 'lua').is_dir()
         if is_steamtools:
             kernel = "steamtools"
-        elif is_greenluma or is_opensteamtool:
+        elif is_greenluma:
+            kernel = "greenluma"
+        elif is_opensteamtool:
             kernel = "opensteamtool"
         else:
             kernel = "none"
@@ -809,6 +965,41 @@ class DxbBackend:
                 except Exception:
                     version = ""
         return {"steam_path": str(sp) if sp else None, "installed": installed, "version": version}
+
+    def get_greenluma_status(self) -> Dict:
+        """检测 GreenLuma（DLL 注入入库）状态，供设置页依赖卡片显示。"""
+        sp = self.get_steam_path()
+        installed = False
+        version = ""
+        dlls: List[str] = []
+        applist = None
+        gl_exe = None
+        applist_count = 0
+        if sp and sp.exists():
+            for d in sorted(sp.glob('GreenLuma*.dll')):
+                dlls.append(d.name)
+            if (sp / 'GreenLuma.exe').exists():
+                gl_exe = str(sp / 'GreenLuma.exe')
+            installed = bool(dlls) or bool(gl_exe)
+            ad = sp / 'AppList'
+            if ad.is_dir():
+                applist = str(ad)
+                try:
+                    applist_count = sum(1 for _ in ad.glob('*.txt'))
+                except Exception:
+                    applist_count = 0
+            vf = sp / 'greenluma_version.txt'
+            if vf.exists():
+                try:
+                    version = vf.read_text(encoding='utf-8').strip()
+                except Exception:
+                    version = ""
+        repo = self.greenluma_repo()
+        return {"steam_path": str(sp) if sp else None, "installed": installed,
+                "version": version, "dlls": dlls, "exe": gl_exe,
+                "applist_dir": applist, "applist_count": applist_count,
+                "repo": repo, "manual_only": not repo,
+                "official_url": GREENLUMA_OFFICIAL_URL}
 
     # 已知“非游戏”的运行库/工具 AppID：商店详情拿不到时据此过滤，避免误当游戏
     _NON_GAME_APPIDS = {
@@ -1205,6 +1396,20 @@ class DxbBackend:
             return bool(ctypes.windll.shell32.IsUserAnAdmin())
         except Exception:
             return False
+
+    # 早期版本写进配置的 GreenLuma 默认仓库（实测 GitHub 404，不是真实镜像）——
+    # 一律按「未配置」处理，走诚实的官方下载页引导，而不是让按钮报一个 404。
+    _DEAD_GREENLUMA_REPOS = {
+        'wintersamza/greenluma_2025', 'wintersamza/greenluma', 'greenluma/2025',
+        'greenluma_2025/greenluma_2025',
+    }
+
+    def greenluma_repo(self) -> str:
+        """返回有效的 GreenLuma 镜像仓库；未配置（或配置的是已知失效默认值）返回 ''。"""
+        repo = (self.config.get('greenluma_repo') or '').strip()
+        if repo.lower() in self._DEAD_GREENLUMA_REPOS:
+            return ''
+        return repo
 
     def _read_hosts(self) -> str:
         """surrogateescape 保证读→写能字节级还原，不会弄坏 hosts 里原有的中文注释。"""
@@ -1697,9 +1902,10 @@ class DxbBackend:
         try:
             st = self.get_steam_status()
             kernel = st.get('kernel', 'none')
-            kn = {'steamtools': 'SteamTools', 'opensteamtool': 'OpenSteamTool / GreenLuma'}.get(kernel, '')
+            kn = {'steamtools': 'SteamTools', 'greenluma': 'GreenLuma（DLL 注入）',
+                  'opensteamtool': 'OpenSteamTool（清单导入）'}.get(kernel, '')
             add('kernel', '入库内核', kernel != 'none',
-                f'已检测到 {kn}' if kernel != 'none' else '未检测到内核（SteamTools / OpenSteamTool 均未安装）',
+                f'已检测到 {kn}' if kernel != 'none' else '未检测到内核（SteamTools / GreenLuma / OpenSteamTool 均未安装）',
                 level='ok' if kernel != 'none' else 'warn')
         except Exception:
             pass
