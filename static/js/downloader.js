@@ -25,6 +25,7 @@
     let order = [];
     let steamPath = '';
     let pollTimer = null;
+    let isAdmin = false;   // 管理员身份 → SteamTools 安装包可以 /S 静默、无窗口装
     // GreenLuma 两种形态：stealth = 隐身版 user32.dll（默认，不怕 Steam 更新），inject = DLLInjector 注入版
     let glMode = 'stealth';
     try {
@@ -118,6 +119,18 @@
                          <span class="vchip">下载源最新：<b>${s.remote_version ? esc(s.remote_version) : (s.remote_ok ? '—' : '未取到')}</b></span>`;
                 files = s.files || [];
                 btnText = s.installed ? (state === 'update' ? '更新' : '重新安装') : '下载并安装';
+                if (k === 'steamtools') {
+                    chips += isAdmin
+                        ? '<span class="vchip state-ok">管理员：静默安装</span>'
+                        : '<span class="vchip">普通权限：会弹安装向导</span>';
+                }
+            }
+
+            if (k === 'steamtools') {
+                extra = `<div class="k-tip">三个内核里只有它是「安装包」：程序从 <b>steamtools.net 官方</b>下载
+st-setup-x.y.z.exe 后直接运行安装包本身（另外两个是下载完直接释放文件、不出安装程序）。
+${isAdmin ? '当前是管理员身份 → 用 /S 参数静默安装，全程不出窗口。'
+          : '当前不是管理员 → 会弹出官方安装向导，按提示点完即可；想全程无窗口静默装，用管理员身份重启本程序。'}</div>`;
             }
 
             const stateChip = `<span class="vchip ${STATE_CLASS[state] || ''}">${LABEL[state] || state}</span>`;
@@ -125,9 +138,9 @@
                 ? `<div class="k-msg">已就位：${esc(files.slice(0, 6).join('、'))}</div>` : '';
             const localBtn = (k === 'steamtools')
                 ? `<button class="btn btn-text k-local" data-kind="${k}">
-                       <span class="material-icons">upload_file</span> 用本地安装包
+                       <span class="material-icons">upload_file</span> 用本地包（exe/zip/7z）
                    </button>
-                   <input type="file" class="k-file" data-kind="${k}" accept=".zip,.7z" style="display:none">`
+                   <input type="file" class="k-file" data-kind="${k}" accept=".exe,.zip,.7z" style="display:none">`
                 : '';
             const modeSeg = isGL
                 ? `<div class="mode-seg" data-kind="greenluma">
@@ -211,6 +224,7 @@
         kernels = d.kernels || {};
         order = d.order || Object.keys(kernels);
         steamPath = d.steam_path || '';
+        isAdmin = !!d.admin;
         const chip = $('steamPathChip');
         if (chip) {
             chip.textContent = steamPath ? ('Steam：' + steamPath) : '未检测到 Steam 目录';

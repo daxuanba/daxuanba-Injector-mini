@@ -28,3 +28,7 @@ dist_enc/
 _obf/
 backup/
 _enctest/
+
+# 安装包落地目录（SteamTools 官方安装包下载到这里，可随时重跑）
+downloads/
+_smoke_tmp_steam/

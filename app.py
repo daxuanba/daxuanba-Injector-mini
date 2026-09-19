@@ -426,11 +426,23 @@ def dependency_install():
         return jsonify({"success": False, "message": "未知的依赖类型。"}), 400
 
     # GreenLuma 以前只能给 cs.rin.ru 论坛链接 + 打开浏览器，现在有真实可下载源了
-    # （ehgen0ng/wuhu 仓库里的 GreenLuma 2025），直接走下载管理那条安装通道。
-    if kind == "greenluma":
+    # （官方 stealth 形态的改写版 user32.dll），直接走下载管理那条安装通道。
+    # SteamTools 是官方 NSIS 安装包：管理员下 /S 静默无窗口，普通权限弹官方安装向导。
+    if kind in ("greenluma", "steamtools"):
         threading.Thread(target=_background_kernel_install, args=(kind, force), daemon=True).start()
-        return jsonify({"success": True, "kind": kind,
-                        "message": "已在后台开始下载 GreenLuma 2025（DLL + DLLInjector.exe）。"})
+        if kind == "greenluma":
+            msg = "已在后台开始下载 GreenLuma 隐身版（官方 stealth DLL，无窗口、无管理员）。"
+        else:
+            admin = False
+            try:
+                admin = bool(DxbBackend.is_admin())
+            except Exception:
+                admin = False
+            msg = ("已在后台下载 SteamTools 官方安装包，管理员模式将 /S 静默安装（无窗口）。"
+                   if admin else
+                   "已在后台下载 SteamTools 官方安装包；当前不是管理员，稍后会弹出官方安装向导，"
+                   "请按提示点完（想要无窗口静默装就用管理员身份重启本程序）。")
+        return jsonify({"success": True, "kind": kind, "message": msg})
 
     threading.Thread(target=_background_install_dependency, args=(kind, force), daemon=True).start()
     label = {"opensteamtool": "OpenSteamTool 内核", "steamtools": "SteamTools",
@@ -525,9 +537,14 @@ def kernel_status():
                     st['update_state'] = kernel_update_state(st.get('version') or '',
                                                              st.get('remote_version') or '')
                 sp = backend.get_steam_path()
+                try:
+                    is_admin = bool(DxbBackend.is_admin())
+                except Exception:
+                    is_admin = False
                 return {"success": True, "kernels": local,
                         "order": list(KERNEL_SPECS.keys()),
                         "steam_path": str(sp) if sp else '',
+                        "admin": is_admin,
                         "conflict": hub.conflict_check(),
                         "injection": hub.injection_status()}
         return jsonify(asyncio.run(_inner()))
@@ -543,14 +560,6 @@ def kernel_install():
     kind = str(data.get('kind') or '').strip()
     if kind not in KERNEL_SPECS:
         return jsonify({"success": False, "message": "未知内核。"}), 400
-    if kind == "steamtools" and not (KERNEL_SPECS[kind].get('repos') or
-                                     str((_quick_backend().config or {}).get('steamtools_repo') or '').strip()):
-        return jsonify({"success": False, "need_local": True,
-                        "message": "SteamTools 在 GitHub 上没有官方仓库。\n\n"
-                                   "两种做法：\n"
-                                   "· 直接上传你手上的安装包（zip/7z），我来解压并放到 Steam 的 "
-                                   "config\\stplug-in；\n"
-                                   "· 或在设置页填一个你自己的镜像仓库 owner/repo。"})
     force = bool(data.get('force', True))
     mode = str(data.get('mode') or '').strip().lower()
     threading.Thread(target=_background_kernel_install, args=(kind, force, mode), daemon=True).start()
@@ -558,8 +567,13 @@ def kernel_install():
         label = "GreenLuma 隐身版" if (mode or "stealth") != "inject" else "GreenLuma 注入版"
     else:
         label = KERNEL_SPECS[kind]['name']
+    if KERNEL_SPECS[kind].get('installer'):
+        # SteamTools 是「安装包型」：下完直接跑安装包，管理员下 /S 静默无窗口
+        extra = "（安装包型：下完会自动运行官方安装包）"
+    else:
+        extra = ""
     return jsonify({"success": True, "kind": kind, "mode": mode,
-                    "message": f"已开始下载/安装 {label}。"})
+                    "message": f"已开始下载/安装 {label}{extra}。"})
 
 
 @app.route('/api/kernel/uninstall', methods=['POST'])
@@ -581,7 +595,7 @@ def kernel_uninstall():
 
 @app.route('/api/kernel/install_local', methods=['POST'])
 def kernel_install_local():
-    """本地安装包通道（SteamTools 官方包没有 GitHub 源，只能走这里）。"""
+    """本地文件通道：上传 .exe 安装包就直接跑它，上传 zip/7z 就解压释放。"""
     kind = str(request.form.get('kind') or '').strip()
     f = request.files.get('file')
     if kind not in KERNEL_SPECS:
@@ -1333,7 +1347,7 @@ def get_detailed_config():
             "auto_install_unlocker": config.get("auto_install_unlocker", True),
             "unlocker_preference": config.get("unlocker_preference", "greenluma"),
             "greenluma_repo": config.get("greenluma_repo", "WinterSamza/GreenLuma_2025"),
-            "steamtools_repo": config.get("steamtools_repo", "SteamTools/STAupdater"),
+            "steamtools_repo": config.get("steamtools_repo", ""),
             # NEW: 添加自定义清单库配置
             "custom_repos": config.get("Custom_Repos", {"github": [], "zip": []}),
         }})
@@ -1373,6 +1387,11 @@ def update_config():  # 改为同步函数
             if key in data:
                 config_key = key_map.get(key, key)
                 current_config[config_key] = data[key]
+
+        # 用户在设置页明确保存过 → 打上 ack 标记，之后 auto_install_unlocker 就按他勾的来，
+        # 不会再被 v2.17 的老配置迁移（把默认开启的自动安装关掉）覆盖。
+        if "auto_install_unlocker" in data:
+            current_config["auto_install_unlocker_ack"] = True
 
         # 处理自定义清单库配置
         if "custom_repos" in data:

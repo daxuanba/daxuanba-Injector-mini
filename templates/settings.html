@@ -156,7 +156,8 @@
                         <span class="checkbox-button"></span>
                         <div class="checkbox-content">
                             <span class="checkbox-label">未检测到时自动下载安装</span>
-                            <span class="checkbox-description">无解锁工具时静默下载安装，不弹下载提示</span>
+                            <span class="checkbox-description">开启后，启动时若没检测到内核就自动下载并安装
+                                （会直接往 Steam 客户端目录写 DLL，请确认版本匹配；默认关闭，建议用「下载管理」页手动装）</span>
                         </div>
                     </label>
                 </div>
@@ -193,11 +194,16 @@
         <div class="card" data-category="deps">
             <div class="card-header"><h2>SteamTools（稳定入库）</h2></div>
             <div class="card-content">
-                <div class="input-helper">SteamTools 负责稳定入库。从 GitHub 官方源在线下载/更新，释放到 Steam 的 stplug-in 目录。与 OpenSteamTool 二选一，不要同时启用。</div>
+                <div class="input-helper">SteamTools 负责稳定入库。它是三个内核里唯一的<b>安装包型</b>：程序从
+                    <b>steamtools.net 官方</b>下载 st-setup-x.y.z.exe 后直接运行安装包 ——
+                    管理员身份下加 /S <b>静默安装、不显示窗口</b>，普通权限则弹出官方安装向导。
+                    装完 Steam 主目录会有 hid.dll / XInput1_4.dll / dwmapi.dll，config\stplug-in 放 lua。
+                    与 OpenSteamTool 二选一，不要同时启用。</div>
                 <div class="dep-status" id="stoolsStatus"><span class="status-text">检测中...</span></div>
                 <div class="input-group">
-                    <label for="steamtoolsRepo" class="input-label">SteamTools 仓库 (owner/repo)</label>
-                    <input type="text" id="steamtoolsRepo" class="text-field" placeholder="SteamTools/STAupdater">
+                    <label for="steamtoolsRepo" class="input-label">镜像仓库（可选，留空即用官方源）</label>
+                    <input type="text" id="steamtoolsRepo" class="text-field" placeholder="留空 = 官方 steamtools.net">
+                    <div class="input-helper">只有官方站不通时才用得上，填 owner/repo 即可。</div>
                 </div>
 
                 <div class="button-group">
@@ -209,13 +215,17 @@
         <div class="card" data-category="deps">
             <div class="card-header"><h2>GreenLuma（DLL 注入入库）</h2></div>
             <div class="card-content">
-                <div class="input-helper">GreenLuma 用 DLL 注入方式解锁，DLL 释放到 Steam 根目录（与 steam.exe 同目录），解锁目标读同目录 AppList\*.txt。与 OpenSteamTool / SteamTools 三选一，不要同时启用。<br>
-                    <b>注意</b>：GreenLuma 官方只在 cs.rin.ru 论坛发布，GitHub 上没有官方包。下方仓库留空时，「下载/更新」会引导你打开官方下载页手动安装（把 GreenLuma*.dll 或 GreenLuma.exe 放进 Steam 根目录即可）；如果你有镜像仓库，填上就能自动下载。</div>
+                <div class="input-helper">GreenLuma 释放文件到 Steam 根目录（与 steam.exe 同目录），解锁目标读同目录 AppList\*.txt。
+                    与 OpenSteamTool / SteamTools 三选一，不要同时启用。<br>
+                    <b>程序会自动下载安装</b>，不需要你手动丢文件：默认装<b>隐身版</b>（官方 stealth 形态的改写版
+                    user32.dll，Steam 启动时自己加载，无注入器、无管理员、无窗口，也不怕 Steam 更新）；
+                    也可在「下载管理」页切到<b>注入版</b>（DLLInjector.exe）；
+                    若注入版日志显示特征码扫描失败，说明该版本与你的 Steam 构建对不上，换隐身版即可。</div>
                 <div class="dep-status" id="glumaStatus"><span class="status-text">检测中...</span></div>
                 <div class="input-group">
-                    <label for="greenlumaRepo" class="input-label">GreenLuma 仓库 (owner/repo)</label>
-                    <input type="text" id="greenlumaRepo" class="text-field" placeholder="WinterSamza/GreenLuma_2025">
-                    <div class="input-helper">默认 WinterSamza/GreenLuma_2025，可在设置中改为镜像源。</div>
+                    <label for="greenlumaRepo" class="input-label">镜像仓库（可选，留空即用内置源）</label>
+                    <input type="text" id="greenlumaRepo" class="text-field" placeholder="留空 = 内置下载源">
+                    <div class="input-helper">只有内置源取不到时才用得上，填 owner/repo 即可。</div>
                 </div>
                 <div class="button-group">
                     <button class="btn btn-primary" id="glumaInstallBtn" type="button"><span class="material-icons">download</span> 下载/更新</button>

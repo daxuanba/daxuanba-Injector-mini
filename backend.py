@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.16"  # 当前版本号
+CURRENT_VERSION = "2.17"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -53,19 +53,22 @@ DEFAULT_CONFIG = {
     "background_brightness": 80, 
     "show_console_on_startup": False,
     "force_unlocker_type": "auto",
-    "auto_install_unlocker": True,
+    "auto_install_unlocker": False,
     "unlocker_preference": "greenluma",
     "greenluma_repo": "",
-    "steamtools_repo": "SteamTools/STAupdater",
+    "steamtools_repo": "",
     "Custom_Repos": {
         "github": [],
         "zip": []
     },
     "QA1": "温馨提示: Github_Personal_Token(个人访问令牌)可在Github设置的最底下开发者选项中找到, 详情请看教程。",
-    "QA6": "auto_install_unlocker: 未检测到解锁工具时自动下载并安装，默认开。unlocker_preference 填 'greenluma' 或 'steamtools'。",
-    "QA7": "greenluma_repo / steamtools_repo: 自动安装所用的 GitHub 仓库（owner/repo）。"
-           "注意 GreenLuma 官方不在 GitHub 发布（官方在 cs.rin.ru 论坛），"
-           "greenluma_repo 留空时程序会引导你打开官方下载页手动安装，或填入你自己的镜像仓库。",
+    "QA6": "auto_install_unlocker: 未检测到解锁工具时是否自动下载并安装。**默认关闭**——"
+           "自动安装会直接往 Steam 客户端目录写 DLL（GreenLuma 隐身版是改写版 user32.dll、"
+           "OpenSteamTool/SteamTools 是代理 DLL），版本与当前 Steam 客户端不匹配时会让 Steam 起不来，"
+           "所以改成要装就自己到「下载管理」页点一下。unlocker_preference 填 'greenluma' / 'steamtools' / 'opensteamtool'。",
+    "QA7": "greenluma_repo / steamtools_repo: 自动安装所用的镜像仓库（owner/repo），留空即可。"
+           "GreenLuma 官方只在 cs.rin.ru 论坛发布、SteamTools 官方只在 steamtools.net 发布安装包，"
+           "程序默认走官方/镜像自动下载，不需要你填；填了只作为官方源不通时的兜底。",
     "QA2": "Force_Unlocker: 强制指定解锁工具, 填入 'steamtools' 或 'greenluma'。留空则自动检测。",
     "QA3": "Custom_Repos: 自定义清单库配置。github数组用于添加GitHub仓库，zip数组用于添加ZIP清单库。",
     "QA4": "GitHub仓库格式: {\"name\": \"显示名称\", \"repo\": \"用户名/仓库名\"}",
@@ -419,10 +422,18 @@ class DxbBackend:
             self.unlocker_type = force_unlocker
             self.log.warning(f"已根据配置强制使用解锁工具: {force_unlocker}")
         else:
-            is_steamtools = (self.steam_path / 'config' / 'stplug-in').is_dir()
-            is_greenluma = any((self.steam_path / dll).exists() for dll in ['GreenLuma_2025_x86.dll', 'GreenLuma_2025_x64.dll'])
+            # 注意：config\stplug-in 是本程序自己会建的 lua 输出目录，不能凭它判断装没装，
+            # 否则永远「已检测到 SteamTools」。真判据是 hid.dll（官方安装包独有）或目录里真有 lua。
+            _plug = self.steam_path / 'config' / 'stplug-in'
+            is_steamtools = ((self.steam_path / 'hid.dll').exists() or
+                             (_plug.is_dir() and any(_plug.glob('*.lua'))))
+            is_greenluma = any((self.steam_path / dll).exists() for dll in [
+                'GreenLuma_2025_x86.dll', 'GreenLuma_2025_x64.dll',
+                'user32.dll', 'DLLInjector.exe'])
             _lua_dir = self.steam_path / 'config' / 'lua'
-            is_opensteamtool = (self.steam_path / 'OpenSteamTool.dll').exists() or _lua_dir.is_dir()
+            # 同理：config\lua 是我们自己会建的输出目录，必须看里面有没有真 lua
+            is_opensteamtool = ((self.steam_path / 'OpenSteamTool.dll').exists() or
+                                (_lua_dir.is_dir() and any(_lua_dir.glob('*.lua'))))
             if is_steamtools and is_greenluma:
                 self.log.error("环境冲突：同时检测到SteamTools和GreenLuma！请在设置中强制指定一个。")
                 self.unlocker_type = "conflict"
@@ -461,58 +472,35 @@ class DxbBackend:
         return self.steam_path / 'config' / 'stplug-in'
 
     async def ensure_unlocker_installed(self) -> str | None:
+        """没检测到解锁工具时自动装一个（配置里 unlocker_preference 决定装哪个）。
+
+        统一走「下载管理」那条安装通道：
+        · GreenLuma 隐身版 → 直接下载官方 stealth DLL 释放进去，无窗口、无管理员；
+        · SteamTools 是安装包型 → **只有管理员才自动装**（/S 静默无窗口）。
+          普通权限下不在这里弹安装向导，免得每次启动都蹦一个窗，改为提示去下载管理页手动装。
+        """
         pref = self.config.get("unlocker_preference", "greenluma")
-        if pref == 'greenluma':
-            repo = self.greenluma_repo()
-        else:
-            repo = (self.config.get(f"{pref}_repo") or "").strip()
-        if not repo:
-            self.log.warning(f"未配置 {pref} 的安装仓库（{pref}_repo 为空），跳过自动安装。"
-                             "可在设置页对应内核卡片里填入镜像仓库，或手动安装。")
+        if pref not in KERNEL_SPECS:
+            pref = "greenluma"
+        spec = KERNEL_SPECS[pref]
+        hub = KernelHub(self)
+        if spec.get("installer") and not hub._is_admin():
+            self.log.warning(
+                f"{spec['name']} 是安装包型内核，只有管理员身份才能免窗口静默安装；"
+                "普通权限下不自动弹官方安装向导。请到「下载管理」页手动点安装，"
+                "或用管理员身份重启本程序。")
             return None
-        self.log.info(f"未检测到解锁工具，正在自动下载并安装 {pref}（仓库 {repo}）...")
-        asset = await self._fetch_latest_release_asset(repo, ['.zip', '.7z'])
-        if not asset:
-            self.log.error("获取最新发布资产失败，自动安装中止。")
-            return None
-        download_url, asset_name = asset
-        zpath = self.temp_path / asset_name
+        self.log.info(f"未检测到解锁工具，正在自动下载并安装 {spec['name']} ...")
         try:
-            data = await self._download_bytes(download_url)
-            if not data:
-                return None
-            self.temp_path.mkdir(parents=True, exist_ok=True)
-            zpath.write_bytes(data)
-            import zipfile, shutil
-            ext_dir = self.temp_path / 'unlocker_extract'
-            with zipfile.ZipFile(zpath) as zf:
-                zf.extractall(ext_dir)
-            if pref == 'greenluma':
-                copied = False
-                for dll in ext_dir.rglob('GreenLuma*.dll'):
-                    shutil.copy2(dll, self.steam_path / dll.name)
-                    copied = True
-                if copied:
-                    self.log.info("GreenLuma DLL 已安装到 Steam 目录。")
-                    return 'greenluma'
-                self.log.warning("发布包中未找到 GreenLuma DLL。")
-                return None
-            else:
-                dst = self.steam_path / 'stplug-in'
-                dst.mkdir(parents=True, exist_ok=True)
-                for item in ext_dir.rglob('*'):
-                    if item.is_file():
-                        shutil.copy2(item, dst / item.name)
-                self.log.info("SteamTools 文件已释放到 Steam/stplug-in，请运行其安装器完成注册。")
-                return 'steamtools'
+            res = await hub.install(pref)
         except Exception as e:
-            self.log.error(f"自动安装解锁工具失败: {self.stack_error(e)}")
+            self.log.error(f"自动安装 {pref} 失败: {self.stack_error(e)}")
             return None
-        finally:
-            import shutil
-            shutil.rmtree(self.temp_path / 'unlocker_extract', ignore_errors=True)
-            if zpath.exists():
-                zpath.unlink()
+        if res.get("success"):
+            self.log.info(f"自动安装完成：{res.get('message')}")
+            return pref
+        self.log.error(f"自动安装失败：{res.get('message')}")
+        return None
 
     async def _fetch_latest_release_asset(self, repo: str, exts: list) -> Tuple[str, str] | None:
         api = f"https://api.github.com/repos/{repo}/releases/latest"
@@ -830,6 +818,20 @@ class DxbBackend:
         except Exception as e:
             self.log.error(f'生成配置文件失败: {self.stack_error(e)}')
     
+    @staticmethod
+    def _migrate_config(config: Dict) -> Dict:
+        """老配置的一次性迁移（就地改 dict 并返回）。
+
+        v2.17：以前 auto_install_unlocker 默认是开的 —— 启动时只要没检测到内核，程序就会
+        擅自往 Steam 客户端目录写 DLL（GreenLuma 隐身版是改写版 user32.dll，
+        OpenSteamTool / SteamTools 是代理 DLL）。这些 DLL 一旦跟当前 Steam 客户端构建对不上，
+        Steam 就会起不来（实测踩过）。所以：老配置里没有 ack 标记的一律先关掉；
+        用户到设置页自己勾上并保存时，`/api/config/update` 会打上 ack，之后尊重他的选择。
+        """
+        if config.get('auto_install_unlocker') and not config.get('auto_install_unlocker_ack'):
+            config['auto_install_unlocker'] = False
+        return config
+
     async def load_config(self) -> Dict | None:
         config_path = self.project_root / 'config.json'
         if not config_path.exists():
@@ -853,8 +855,8 @@ class DxbBackend:
                         config['Custom_Repos']['github'] = []
                     if 'zip' not in config['Custom_Repos']:
                         config['Custom_Repos']['zip'] = []
-                
-                return config
+
+                return self._migrate_config(config)
         except Exception as e:
             self.log.error(f"加载配置文件失败: {self.stack_error(e)}。正在重置配置文件...")
             if config_path.exists(): os.remove(config_path)
@@ -877,7 +879,7 @@ class DxbBackend:
             else:
                 config['Custom_Repos'].setdefault('github', [])
                 config['Custom_Repos'].setdefault('zip', [])
-            return config
+            return self._migrate_config(config)
         except Exception:
             return DEFAULT_CONFIG.copy()
 
@@ -4788,9 +4790,14 @@ class DxbBackend:
 # =====================================================================
 # 下载管理：三个内核的「真实版本检测 + 自动下载 + 自动安装」
 #   - OpenSteamTool：GitHub Releases（取 *-Release.zip，别拿 29MB 的 Debug）
-#   - GreenLuma   ：真·GreenLuma 2025（DLL + DLLInjector.exe），
-#                   源在 ehgen0ng/wuhu 仓库里（raw 文件，可直接下载）
-#   - SteamTools  ：GitHub 无官方源，走「本地安装包 / 自填镜像仓库」
+#                   → 下完解压，把 DLL 释放到 Steam 主目录（无窗口）
+#   - GreenLuma   ：两种形态，都是下载后直接释放，全程无窗口、无管理员
+#                   · 隐身版（默认）：官方 stealth 形态的改写版 user32.dll
+#                   · 注入版：GreenLuma_2025_x64.dll + DLLInjector.exe
+#                   → 由应用自己从上游/镜像下载，不允许手工丢文件
+#   - SteamTools  ：steamtools.net 官方 NSIS 安装包 st-setup-<ver>.exe
+#                   → 这是三个里唯一的「安装包」：下载完就直接运行它
+#                     （管理员：/S 静默、无窗口；普通权限：弹官方安装向导）
 # 全部纯后端 HTTP，不开任何浏览器窗口。
 # =====================================================================
 
@@ -4824,6 +4831,24 @@ GREENLUMA_STEALTH_BAK = "user32.dll.dxb_bak"  # 原文件备份名
 GREENLUMA_STEALTH_MARKER = "greenluma_stealth_version.txt"
 GREENLUMA_STEALTH_MIN_SIZE = 60000            # 体积下限，防拿到错误文件
 
+# ---------------------------------------------------------------- SteamTools 官方安装包
+# SteamTools（稳定入库）官方只在 steamtools.net 发布，且只发 NSIS 安装包
+# st-setup-<ver>.exe（约 10MB）。站点是 Cloudflare 后面的 SPA，直链藏在
+# /assets/index-*.js 里，所以版本检测分两步：下载页 → 找到 bundle → 正则扒出
+# res/st-setup-<ver>.exe。NSIS 支持 /S 静默安装；安装包自己会从注册表
+# HKCU\Software\Valve\Steam\SteamPath 找到 Steam 目录（本机 d:\fnaf 已登记），
+# 往主目录放代理 DLL（hid.dll / XInput1_4.dll / dwmapi.dll）并建 config\stplug-in。
+STEAMTOOLS_SITE = "https://steamtools.net"
+STEAMTOOLS_PAGE = STEAMTOOLS_SITE + "/download"
+STEAMTOOLS_RES_RE = re.compile(r'res/st-setup-([0-9]+(?:\.[0-9]+)+)\.exe', re.I)
+STEAMTOOLS_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+# 曾经写死过、但早就 404 的仓库值一律当「没配」，避免老配置把自动安装带沟里
+_DEAD_STEAMTOOLS_REPOS = {"steamtools/staupdater"}
+
+# 下发物扩展名是 exe 且 spec 标了 installer → 当天装包直接跑，不再当压缩包解
+INSTALLER_EXT = ".exe"
+
 KERNEL_SPECS: Dict[str, Dict[str, Any]] = {
     "opensteamtool": {
         "name": "OpenSteamTool",
@@ -4840,12 +4865,18 @@ KERNEL_SPECS: Dict[str, Dict[str, Any]] = {
     },
     "steamtools": {
         "name": "SteamTools",
-        "short": "稳定入库内核",
-        "desc": "装到 Steam 的 config\\stplug-in。GitHub 上没有官方源，需本地安装包或自填镜像仓库。",
-        "source": "github",
-        "repos": [],                          # 空 = 只能本地包 / 自填镜像
-        "asset_prefer": ["release"],
-        "asset_exts": [".zip", ".7z"],
+        "short": "稳定入库内核（官方安装包）",
+        "desc": "三个内核里唯一的安装包（steamtools.net 官方 NSIS）。下载完直接运行它："
+                "管理员下 /S 静默安装、全程无窗口；普通权限则弹官方安装向导让你自己点。"
+                "装完 Steam 主目录会有 hid.dll / XInput1_4.dll / dwmapi.dll，"
+                "config\\stplug-in 放 lua 清单。",
+        "source": "official",                 # steamtools.net 官方安装包（不是 GitHub 仓库）
+        "site": STEAMTOOLS_SITE,
+        "repos": [],                          # 只有官方站不通时才用自填镜像兜底
+        "asset_prefer": [],
+        "asset_exts": [INSTALLER_EXT],        # 下发物就是安装包本身
+        "installer": True,                    # ← 跑安装程序，不解析压缩包
+        "silent_args": ["/S"],                # NSIS 静默开关；仅管理员下使用
         "target": "stplug",
         "marker": "steamtools_version.txt",
         "extra_dirs": [],
@@ -4991,12 +5022,20 @@ class KernelHub:
                               else (out["inject"]["version"] if out["inject"]["installed"] else ""))
         elif kind == "steamtools":
             d = sp / 'config' / 'stplug-in'
+            st_files: List[str] = []
+            lua_n = 0
             if d.is_dir():
                 try:
-                    out["files"] = [p.name for p in d.iterdir()][:6]
-                    out["installed"] = any(d.glob('*.lua'))
+                    st_files = [p.name for p in d.iterdir()][:6]
+                    lua_n = sum(1 for _ in d.glob('*.lua'))
                 except Exception:
-                    pass
+                    st_files, lua_n = [], 0
+            # config\stplug-in 是程序固定会建的 lua 输出目录，凭它判断装没装会永远「已安装」。
+            # hid.dll 是官方安装包独有的代理 DLL，拿它当硬证据；其次是目录里真有 lua。
+            proxies = [n for n in ('hid.dll', 'XInput1_4.dll', 'dwmapi.dll') if (sp / n).exists()]
+            out["files"] = st_files + [n for n in proxies if n not in st_files]
+            out["lua_count"] = lua_n
+            out["installed"] = bool((sp / 'hid.dll').exists() or lua_n)
         else:  # opensteamtool
             lua = sp / 'config' / 'lua'
             dll_ok = (sp / 'OpenSteamTool.dll').exists()
@@ -5027,15 +5066,19 @@ class KernelHub:
             return {"ok": False, "error": "未知内核"}
         if spec.get("source") == "wuhu":
             return await self._remote_greenluma()
-        repos = list(spec.get("repos") or [])
-        if kind == "steamtools":
-            custom = (self.b.config.get('steamtools_repo') or '').strip()
-            if custom:
-                repos = [custom]
-        elif kind == "opensteamtool":
-            custom = (self.b.config.get('opensteamtool_repo') or '').strip()
-            if custom:
-                repos = [custom]
+        if spec.get("source") == "official":
+            # SteamTools：官方安装包优先；只有官方站不通、且用户自己填了镜像仓库时才兜底
+            off = await self._steamtools_latest()
+            custom = self._steamtools_repo_override()
+            if off.get("ok") or not custom:
+                return off
+            repos = [custom]
+        else:
+            repos = list(spec.get("repos") or [])
+            if kind == "opensteamtool":
+                custom = (self.b.config.get('opensteamtool_repo') or '').strip()
+                if custom:
+                    repos = [custom]
         for repo in repos:
             try:
                 tag, asset = await self._latest_release(repo, spec)
@@ -5045,9 +5088,46 @@ class KernelHub:
                             "note": ""}
             except Exception as e:
                 self.log.warning(f"查询 {repo} 最新发布失败：{e}")
-        if kind == "steamtools":
-            return {"ok": False, "note": "GitHub 上没有 SteamTools 官方仓库，请用「本地安装包」安装。"}
         return {"ok": False, "note": "查询远端版本失败（网络或仓库不可达）。"}
+
+    def _steamtools_repo_override(self) -> str:
+        """用户自填的 SteamTools 镜像仓库；早先写死过的死值一律当没填。"""
+        v = str(self.b.config.get('steamtools_repo') or '').strip()
+        if not v or v.lower() in _DEAD_STEAMTOOLS_REPOS:
+            return ""
+        return v
+
+    async def _steamtools_latest(self) -> Dict[str, Any]:
+        """SteamTools 官方最新安装包版本（纯 HTTP，两步扒 SPA bundle，不开浏览器）。
+
+        官方站是 CF 保护的 SPA，HTML 里没有直链，所以：
+          1) GET /download  → 从 HTML 里找 /assets/index-*.js
+          2) GET 那个 js    → 正则 res/st-setup-<ver>.exe
+        """
+        ua = {"User-Agent": STEAMTOOLS_UA}
+        try:
+            c = self._client()
+            r = await c.get(STEAMTOOLS_PAGE, headers=ua, timeout=25, follow_redirects=True)
+            if r.status_code != 200:
+                return {"ok": False, "note": f"SteamTools 官方下载页返回 HTTP {r.status_code}"
+                                             "（站点挂在 Cloudflare 后面，偶尔会拦）。"}
+            m = re.search(r'/assets/index-[\w.\-]+\.js', r.text)
+            if not m:
+                return {"ok": False, "note": "官方下载页结构变了，没找到资源清单，无法取版本号。"}
+            js = await c.get(STEAMTOOLS_SITE + m.group(0), headers=ua, timeout=30,
+                             follow_redirects=True)
+            if js.status_code != 200:
+                return {"ok": False, "note": f"取官方资源清单失败（HTTP {js.status_code}）。"}
+            hit = STEAMTOOLS_RES_RE.search(js.text)
+            if not hit:
+                return {"ok": False, "note": "官方资源清单里没解析到安装包文件名，无法取版本号。"}
+            ver = hit.group(1)
+            return {"ok": True, "version": ver, "repo": STEAMTOOLS_SITE,
+                    "asset": f"st-setup-{ver}.exe", "installer": True,
+                    "url": f"{STEAMTOOLS_SITE}/res/st-setup-{ver}.exe",
+                    "note": f"来源：steamtools.net 官方安装包（NSIS，约 10MB）"}
+        except Exception as e:
+            return {"ok": False, "note": f"取 SteamTools 官方版本失败：{str(e)[:110]}"}
 
     async def _remote_greenluma(self) -> Dict[str, Any]:
         """GreenLuma 远端版本（两种形态分别查，避免拿注入版的版本号糊弄隐身版）。
@@ -5339,6 +5419,76 @@ class KernelHub:
         except Exception as e:
             self.log.warning(f"写 DLLInjector.ini 失败：{e}")
 
+    # ---------------------------------------------------------- 安装包（exe）
+    def _downloads_dir(self) -> Path:
+        """安装包落地目录：exe 同目录的 downloads\\，重启后还在，用户能自己重跑。"""
+        d = Path(getattr(self.b, 'project_root', None) or Path.cwd()) / 'downloads'
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return d
+
+    def _is_admin(self) -> bool:
+        try:
+            return bool(DxbBackend.is_admin())
+        except Exception:
+            return False
+
+    def run_installer(self, exe: Path, silent_args=None, wait: int = 1800) -> Dict[str, Any]:
+        """运行官方安装包（SteamTools 这类「安装包型」内核）。
+
+        规矩：**是管理员就无窗口静默装**（NSIS 的 /S，CREATE_NO_WINDOW）；
+        不是管理员就老实弹官方安装向导让用户自己点，不假装已经装好了。
+        """
+        exe = Path(exe)
+        if not exe.exists():
+            return {"success": False, "message": f"安装包不存在：{exe}"}
+        if sys.platform != 'win32':
+            return {"success": False, "message": "只有 Windows 才能运行安装包。"}
+        admin = self._is_admin()
+        args = [str(a) for a in (silent_args or [])]
+        if admin and args:
+            try:
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = 0
+                p = subprocess.Popen(
+                    [str(exe)] + args, cwd=str(exe.parent), startupinfo=si,
+                    creationflags=0x08000000,          # CREATE_NO_WINDOW
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                return {"success": False, "admin": True, "silent": True,
+                        "message": f"启动静默安装失败：{e}"}
+            try:
+                rc = p.wait(timeout=wait)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+                return {"success": False, "admin": True, "silent": True,
+                        "message": f"静默安装超过 {max(1, wait // 60)} 分钟还没结束，已放弃等待。"
+                                   "多半被杀软拦了，或者安装包在等交互。"
+                                   "也可以到 downloads 目录手动双击那个安装包看看。"}
+            self.log.info(f"静默安装 {exe.name} 结束，返回码 {rc}")
+            return {"success": rc == 0, "admin": True, "silent": True, "returncode": rc,
+                    "message": ("管理员模式：已 /S 静默安装完成，全程没有窗口。"
+                                if rc == 0 else
+                                f"静默安装返回码 {rc}，不一定装成功了，"
+                                f"可以到 downloads 目录手动双击 {exe.name} 跑一遍看看。")}
+        # 非管理员：交给官方安装向导（ShellExecute，脱离本进程，用户的点击不会被我们打断）
+        try:
+            os.startfile(str(exe))
+        except Exception as e:
+            return {"success": False, "admin": False, "silent": False,
+                    "message": f"打开安装包失败：{e}"}
+        self.log.info(f"已打开官方安装向导：{exe}")
+        return {"success": True, "admin": False, "silent": False, "wizard": True,
+                "message": "当前不是管理员，已打开官方安装向导——请按提示点完。\n"
+                           "装完回来点「重新检测」看结果。\n"
+                           "想全程无窗口静默装：用管理员身份重启本程序，再点一次这个按钮。"}
+
     async def install(self, kind: str, on_progress=None, force: bool = True,
                       mode: str = "") -> Dict[str, Any]:
         """下载 + 安装一个内核，返回 {success, message, version, files}
@@ -5406,6 +5556,30 @@ class KernelHub:
         arc = tmp / aname
         if not await self._download_to(url, arc, on_progress=lambda p, m: prog(2 + int(p * 0.73), m), label=f" {aname}"):
             return {"success": False, "message": "下载失败，检查网络/加速后重试。"}
+
+        # 下发物是安装包 → 直接跑官方安装程序，不当压缩包解（SteamTools 走这条）
+        if spec.get("installer") and str(aname).lower().endswith(INSTALLER_EXT):
+            keep = self._downloads_dir() / str(aname)
+            kept = True
+            try:
+                shutil.copy2(arc, keep)
+            except Exception:
+                keep, kept = arc, False
+            prog(76, "运行官方安装包")
+            res = self.run_installer(keep, spec.get("silent_args") or [])
+            if res.get("success"):
+                try:
+                    (sp / spec["marker"]).write_text(str(latest.get("version") or aname),
+                                                     encoding='utf-8')
+                except Exception:
+                    pass
+            res.update({"version": str(latest.get("version") or aname),
+                        "files": [str(aname)], "installer": str(keep)})
+            if kept:
+                shutil.rmtree(tmp, ignore_errors=True)
+            prog(100 if res.get("success") else 0, res.get("message") or "")
+            return res
+
         prog(78, "解压")
         ex = tmp / 'x'
         if not self._extract(arc, ex):
@@ -5435,7 +5609,11 @@ class KernelHub:
         return False
 
     async def install_from_local(self, kind: str, filename: str, data: bytes, on_progress=None) -> Dict[str, Any]:
-        """从本地安装包（zip/7z）安装——SteamTools 的官方包走这条路。"""
+        """从本地文件安装。
+
+        · 上传的是安装包（.exe，比如 SteamTools 官方的 st-setup-x.y.z.exe）→ 直接运行它；
+        · 上传的是 zip / 7z → 解压后把文件释放到 Steam 对应目录。
+        """
         sp = self.b.get_steam_path()
         if not sp or not sp.exists():
             return {"success": False, "message": "没有检测到 Steam 目录。"}
@@ -5446,6 +5624,30 @@ class KernelHub:
         tmp.mkdir(parents=True, exist_ok=True)
         arc = tmp / (filename or 'pkg.zip')
         arc.write_bytes(data)
+
+        # 本地安装包通道：直接跑安装程序（管理员静默）
+        if str(filename or '').lower().endswith(INSTALLER_EXT):
+            keep = self._downloads_dir() / Path(filename).name
+            kept = True
+            try:
+                shutil.copy2(arc, keep)
+            except Exception:
+                keep, kept = arc, False
+            if on_progress:
+                on_progress(60, "运行本地安装包")
+            res = self.run_installer(keep, KERNEL_SPECS[kind].get("silent_args") or [])
+            if res.get("success"):
+                try:
+                    (sp / KERNEL_SPECS[kind]["marker"]).write_text("本地安装包", encoding='utf-8')
+                except Exception:
+                    pass
+            res.update({"files": [Path(filename).name], "installer": str(keep)})
+            if kept:
+                shutil.rmtree(tmp, ignore_errors=True)
+            if on_progress:
+                on_progress(100 if res.get("success") else 0, res.get("message") or "")
+            return res
+
         if on_progress:
             on_progress(40, "解压本地安装包")
         ex = tmp / 'x'
