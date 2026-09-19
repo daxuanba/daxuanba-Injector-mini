@@ -500,6 +500,24 @@ class SteamLoginHelper:
             pass
 
 
+# ------------------------------------------------------------------ 主窗口引用
+# 重启/提权时，新实例会开一个新窗口，旧实例必须立刻把窗口收掉，
+# 否则用户看到「一个主窗口 + 后面还压着一个旧窗口」。
+_MAIN_WINDOW = None
+
+
+def _close_main_window():
+    """立刻销毁主窗口（从 Flask 线程调用，pywebview 会派发到 GUI 线程）。"""
+    w = _MAIN_WINDOW
+    if w is None:
+        return
+    try:
+        w.destroy()
+        print('[大轩巴] 旧窗口已关闭。')
+    except Exception as e:
+        print('[大轩巴] 关闭主窗口失败：', e)
+
+
 # ------------------------------------------------------------------ 入口
 def _import_webview():
     try:
@@ -576,6 +594,12 @@ def main():
     helper = SteamLoginHelper(webview, mod)
     if hasattr(mod, 'register_steam_login_launcher'):
         mod.register_steam_login_launcher(helper.open)
+
+    # 关窗 launcher：重启/提权时 /api/shutdown 会先收掉这个窗口再退进程
+    global _MAIN_WINDOW
+    _MAIN_WINDOW = win
+    if hasattr(mod, 'register_window_closer'):
+        mod.register_window_closer(_close_main_window)
 
     # private_mode=False + storage_path：Cookie 持久化到用户目录，
     # Steam 登录态跨启动保留（与登录窗口共用同一份用户数据目录）

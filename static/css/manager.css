@@ -414,6 +414,12 @@
     color: var(--md-sys-color-on-surface-variant);
 }
 /* --- 真实已装游戏树 --- */
+/* 已装游戏是「整行卡片」布局（封面+信息+按钮），不能被 file-grid 的
+   minmax(230px) 多列网格挤扁 —— 挤扁后「启动/安装」按钮文字会竖排、
+   卡片被撑高盖住内容。installed 视图下把网格切成单列整行。 */
+.file-grid.tree-mode { display: block; }
+.file-grid.tree-mode .game-tree-card { width: 100%; }
+.game-launch { flex: none; white-space: nowrap; }
 .game-tree-card {
     background: var(--md-sys-color-surface);
     border-radius: var(--md-sys-shape-corner-medium, 12px);

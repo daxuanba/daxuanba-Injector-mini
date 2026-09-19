@@ -154,6 +154,7 @@ class FileManagerApp {
 
     renderGrid() {
         if (this.currentTab === 'installed') { this.renderInstalled(); return; }
+        this.elements.gridContainer.classList.remove('tree-mode');
         const data = this.fullData[this.currentTab] || [];
         const searchTerm = this.elements.searchInput.value.toLowerCase();
         
@@ -245,6 +246,7 @@ class FileManagerApp {
     renderInstalled() {
         const result = this.installedData;
         const container = this.elements.gridContainer;
+        container.classList.add('tree-mode');   // 已装游戏是整行卡片，不能被多列网格挤扁
         if (!result || !result.success) {
             this.showScanMessage((result && result.message) || '扫描失败', result && result.hint);
             container.innerHTML = '';

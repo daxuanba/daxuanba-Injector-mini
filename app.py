@@ -58,7 +58,8 @@ project_root = Path.cwd()
 sys.path.insert(0, str(project_root))
 
 try:
-    from backend import DxbBackend, DEFAULT_CONFIG, GREENLUMA_OFFICIAL_URL
+    from backend import (DxbBackend, DEFAULT_CONFIG, GREENLUMA_OFFICIAL_URL,
+                         KernelHub, KERNEL_SPECS, net_selftest, kernel_update_state)
 except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
@@ -210,6 +211,20 @@ def register_app_restart(fn):
     _normal_restart = fn if callable(fn) else None
 
 
+# ---------------- 关窗（重启/提权时立刻收掉旧窗口，别留两个） ----------------
+_window_closer = None
+
+
+def register_window_closer(fn):
+    """由桌面壳注入：fn() 立刻关掉主窗口。
+
+    提权/普通重启时，新实例会开一个新窗口；旧实例必须马上把自己的窗口收掉，
+    否则用户会看到「一个主窗口 + 后面还压着一个旧窗口」。
+    """
+    global _window_closer
+    _window_closer = fn if callable(fn) else None
+
+
 def _is_steam_logged_in() -> bool:
     """入库前的登录态判定：内置浏览器登录成功，或配置里已存过 Cookie。"""
     if STEAM_LOGIN.get("status") == "success" and STEAM_LOGIN.get("account"):
@@ -259,6 +274,12 @@ def free_page():
 def tools_page():
     """工具箱：Steam 错误诊断修复 + 下载管理。"""
     return render_template('tools.html')
+
+
+@app.route('/downloader')
+def downloader_page():
+    """下载管理：三个内核的真实版本检测 + 自动下载 + 自动装到 Steam 主目录。"""
+    return render_template('downloader.html')
 
 
 # --- Core API Routes ---
@@ -404,30 +425,245 @@ def dependency_install():
     if kind not in ("opensteamtool", "steamtools", "greenluma"):
         return jsonify({"success": False, "message": "未知的依赖类型。"}), 400
 
-    # GreenLuma 官方不在 GitHub 发布（只在 cs.rin.ru 论坛）。没配镜像仓库时如实告知，
-    # 并给出官方下载页，而不是让按钮转一圈后甩一句「失败」。
+    # GreenLuma 以前只能给 cs.rin.ru 论坛链接 + 打开浏览器，现在有真实可下载源了
+    # （ehgen0ng/wuhu 仓库里的 GreenLuma 2025），直接走下载管理那条安装通道。
     if kind == "greenluma":
-        try:
-            repo = _quick_backend().greenluma_repo()
-        except Exception:
-            repo = ""
-        if not repo:
-            return jsonify({
-                "success": False,
-                "need_manual": True,
-                "official_url": GREENLUMA_OFFICIAL_URL,
-                "message": "未配置 GreenLuma 镜像仓库。\n\n"
-                           "GreenLuma 官方只在 cs.rin.ru 论坛发布（GitHub 上没有官方包）。\n\n"
-                           "两种做法：\n"
-                           "· 去官方页下载，把 GreenLuma*.dll（或 GreenLuma.exe）放到 Steam 根目录，"
-                           "然后点「重新检测」；\n"
-                           "· 或者你有自己的镜像仓库，就在卡片里把「GreenLuma 仓库 (owner/repo)」填上。",
-            })
+        threading.Thread(target=_background_kernel_install, args=(kind, force), daemon=True).start()
+        return jsonify({"success": True, "kind": kind,
+                        "message": "已在后台开始下载 GreenLuma 2025（DLL + DLLInjector.exe）。"})
 
     threading.Thread(target=_background_install_dependency, args=(kind, force), daemon=True).start()
     label = {"opensteamtool": "OpenSteamTool 内核", "steamtools": "SteamTools",
              "greenluma": "GreenLuma"}.get(kind, kind)
     return jsonify({"success": True, "message": f"已在后台开始下载/更新 {label}。"})
+
+
+# ==================== 下载管理：内核真实版本检测 + 自动下载安装 ====================
+# 三个内核（OpenSteamTool / SteamTools / GreenLuma）全部纯后端 HTTP 下载，
+# 不开任何浏览器窗口；下完直接释放到 Steam 主目录，可同时共存。
+# 进度不依赖 socket.io（CDN 可能被墙），改用内存态 + 前端轮询，最稳。
+KERNEL_PROGRESS: Dict[str, Dict[str, Any]] = {}
+
+
+def _kernel_prog(kind: str):
+    def prog(pct, msg):
+        KERNEL_PROGRESS[kind] = {"percent": int(pct or 0), "message": str(msg or ''),
+                                 "running": True, "ts": time.time()}
+        try:
+            socketio.emit('kernel_progress', {"kind": kind, "percent": int(pct or 0), "message": msg})
+        except Exception:
+            pass
+    return prog
+
+
+def _kernel_finish(kind: str, res: Dict[str, Any], backend):
+    try:
+        state = KernelHub(backend).local_status(kind)
+    except Exception:
+        state = {}
+    KERNEL_PROGRESS[kind] = {
+        "percent": 100 if res.get("success") else 0,
+        "message": str(res.get("message") or ''),
+        "running": False, "ts": time.time(),
+    }
+    try:
+        socketio.emit('kernel_done', {"kind": kind, "result": res, "state": state})
+    except Exception:
+        pass
+
+
+def _background_kernel_install(kind: str, force: bool, mode: str = ""):
+    async def _run():
+        async with DxbBackend() as backend:
+            patch_log_for_socketio(backend.log)
+            await backend.initialize()
+            hub = KernelHub(backend)
+            try:
+                res = await hub.install(kind, on_progress=_kernel_prog(kind), force=force, mode=mode)
+            except Exception as e:
+                res = {"success": False, "message": f"安装异常：{e}"}
+            _kernel_finish(kind, res, backend)
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        KERNEL_PROGRESS[kind] = {"percent": 0, "message": str(e), "running": False, "ts": time.time()}
+
+
+@app.route('/api/kernel/progress', methods=['GET'])
+def kernel_progress():
+    """前端轮询安装进度（不依赖 socket.io）。"""
+    return jsonify({"success": True, "progress": KERNEL_PROGRESS})
+
+
+@app.route('/api/kernel/status', methods=['GET'])
+def kernel_status():
+    """三个内核：本地状态 + 远端最新版 + 是否需要更新（真实检测，不弹浏览器）。"""
+    try:
+        async def _inner():
+            async with DxbBackend() as backend:
+                await backend.initialize()
+                hub = KernelHub(backend)
+                local = hub.all_local()
+                remote = {}
+                for k in KERNEL_SPECS:
+                    try:
+                        remote[k] = await hub.remote_latest(k)
+                    except Exception as e:
+                        remote[k] = {"ok": False, "note": str(e)[:120]}
+                for k, st in local.items():
+                    r = remote.get(k) or {}
+                    st['remote_version'] = r.get('version') or ''
+                    st['remote_ok'] = bool(r.get('ok'))
+                    st['remote_note'] = r.get('note') or ''
+                    if k == 'greenluma':
+                        # 两种形态各自的最新版，前端按当前形态对比，别拿错版本号
+                        st['remote_stealth'] = r.get('stealth_version') or ''
+                        st['remote_inject'] = r.get('inject_version') or ''
+                        cur = (st.get('mode') or 'stealth')
+                        st['remote_version'] = (st['remote_stealth'] if cur == 'stealth'
+                                                else (st['remote_inject'] or st['remote_version']))
+                    st['update_state'] = kernel_update_state(st.get('version') or '',
+                                                             st.get('remote_version') or '')
+                sp = backend.get_steam_path()
+                return {"success": True, "kernels": local,
+                        "order": list(KERNEL_SPECS.keys()),
+                        "steam_path": str(sp) if sp else '',
+                        "conflict": hub.conflict_check(),
+                        "injection": hub.injection_status()}
+        return jsonify(asyncio.run(_inner()))
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/kernel/install', methods=['POST'])
+def kernel_install():
+    data = request.get_json(silent=True) or {}
+    kind = str(data.get('kind') or '').strip()
+    if kind not in KERNEL_SPECS:
+        return jsonify({"success": False, "message": "未知内核。"}), 400
+    if kind == "steamtools" and not (KERNEL_SPECS[kind].get('repos') or
+                                     str((_quick_backend().config or {}).get('steamtools_repo') or '').strip()):
+        return jsonify({"success": False, "need_local": True,
+                        "message": "SteamTools 在 GitHub 上没有官方仓库。\n\n"
+                                   "两种做法：\n"
+                                   "· 直接上传你手上的安装包（zip/7z），我来解压并放到 Steam 的 "
+                                   "config\\stplug-in；\n"
+                                   "· 或在设置页填一个你自己的镜像仓库 owner/repo。"})
+    force = bool(data.get('force', True))
+    mode = str(data.get('mode') or '').strip().lower()
+    threading.Thread(target=_background_kernel_install, args=(kind, force, mode), daemon=True).start()
+    if kind == "greenluma":
+        label = "GreenLuma 隐身版" if (mode or "stealth") != "inject" else "GreenLuma 注入版"
+    else:
+        label = KERNEL_SPECS[kind]['name']
+    return jsonify({"success": True, "kind": kind, "mode": mode,
+                    "message": f"已开始下载/安装 {label}。"})
+
+
+@app.route('/api/kernel/uninstall', methods=['POST'])
+def kernel_uninstall():
+    """卸载内核。目前只有 GreenLuma 隐身版需要（要把 Steam 目录里的 user32.dll 拿掉）。"""
+    data = request.get_json(silent=True) or {}
+    kind = str(data.get('kind') or '').strip()
+    mode = str(data.get('mode') or 'stealth').strip().lower()
+    if kind != 'greenluma' or mode != 'stealth':
+        return jsonify({"success": False, "message": "只有 GreenLuma 隐身版支持在这里移除。"}), 400
+    try:
+        res = KernelHub(_quick_backend()).uninstall_greenluma_stealth()
+        return jsonify(res)
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/kernel/install_local', methods=['POST'])
+def kernel_install_local():
+    """本地安装包通道（SteamTools 官方包没有 GitHub 源，只能走这里）。"""
+    kind = str(request.form.get('kind') or '').strip()
+    f = request.files.get('file')
+    if kind not in KERNEL_SPECS:
+        return jsonify({"success": False, "message": "未知内核。"}), 400
+    if not f:
+        return jsonify({"success": False, "message": "没收到文件。"}), 400
+    data = f.read()
+    if not data:
+        return jsonify({"success": False, "message": "文件为空。"}), 400
+    fname = f.filename or 'pkg.zip'
+
+    def _run():
+        async def _inner():
+            async with DxbBackend() as backend:
+                await backend.initialize()
+                hub = KernelHub(backend)
+                try:
+                    res = await hub.install_from_local(kind, fname, data, on_progress=_kernel_prog(kind))
+                except Exception as e:
+                    res = {"success": False, "message": f"安装异常：{e}"}
+                _kernel_finish(kind, res, backend)
+        asyncio.run(_inner())
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"success": True, "kind": kind,
+                    "message": f"已开始从本地包安装 {KERNEL_SPECS[kind]['name']}。"})
+
+
+@app.route('/api/kernel/launch', methods=['POST'])
+def kernel_launch():
+    """启动 Steam；GreenLuma 模式走 DLLInjector.exe 无窗口注入。"""
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get('mode') or 'auto').strip()
+
+    def _run():
+        async def _inner():
+            async with DxbBackend() as backend:
+                await backend.initialize()
+                return await KernelHub(backend).launch_steam(mode)
+        return asyncio.run(_inner())
+    try:
+        return jsonify(_run())
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/kernel/injection', methods=['GET'])
+def kernel_injection():
+    """真实检测 steam.exe 当前是否加载了 GreenLuma / LumaCore 注入模块。"""
+    try:
+        return jsonify({"success": True, **KernelHub(_quick_backend()).injection_status()})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/net/selftest', methods=['GET'])
+def net_selftest_route():
+    """直连 / 代理 两条路的真实连通性测试（回答“为什么非要加速”）。"""
+    mode = (request.args.get('mode') or 'direct').strip()
+    try:
+        return jsonify({"success": True, **asyncio.run(net_selftest(mode=mode))})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/net/proxy', methods=['GET', 'POST'])
+def net_proxy_route():
+    """查看 / 设置后端代理（直连不通时用，支持 http:// 与 socks5://）。"""
+    b = _quick_backend()
+    cfg = b.config or {}
+    if request.method == 'GET':
+        return jsonify({"success": True, "proxy": cfg.get('network_proxy') or ''})
+    data = request.get_json(silent=True) or {}
+    proxy = str(data.get('proxy') or '').strip()
+    cfg['network_proxy'] = proxy
+    try:
+        b._save_config_sync(cfg)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"保存失败：{e}"})
+    return jsonify({"success": True, "proxy": proxy,
+                    "message": "已保存。重启应用后后端请求改走该代理。"})
 
 
 # 允许从界面用系统浏览器打开的外部链接（白名单，避免被当成任意 URL 打开器）
@@ -1528,12 +1764,25 @@ def toggle_console():
 @socketio.on('connect')
 def handle_connect(): emit('response', {"message": "已连接到大轩巴入库器mini服务器"})
 
-@app.route('/api/shutdown', methods=['POST'])
+@app.route('/api/shutdown', methods=['POST', 'GET'])
 def shutdown():
+    """关闭应用。桌面壳（dxb_desktop）重启/提权后用 GET 打这个口，
+    以前只允许 POST → 405 → 旧实例不退出 → 出现「一个主窗口一个后台窗口」。"""
     print("接收到 HTTP 关闭请求，正在准备关闭服务器...")
+
     def kill_process():
-        time.sleep(0.5)
+        # 先尽量把主窗口收掉（新实例已经开好自己的窗口了），再无条件退出进程。
+        # 关窗放在子线程并限时 join：万一 pywebview 的 destroy 卡住，也不会拖住退出。
+        try:
+            if _window_closer:
+                t = threading.Thread(target=_window_closer, daemon=True)
+                t.start()
+                t.join(1.0)
+        except Exception:
+            pass
+        time.sleep(0.2)
         os._exit(0)
+
     threading.Thread(target=kill_process, daemon=True).start()
     return jsonify({"success": True, "message": "服务器正在关闭..."})
 

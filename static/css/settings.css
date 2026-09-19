@@ -5,6 +5,9 @@ main.settings-main {
     margin: 0 auto;
     padding: 24px;
     grid-template-columns: 1fr;
+    /* 关键：不加 align-content，网格行会被拉伸填满剩余高度，
+       标签栏那一行被撑到两百多像素，就成了设置页顶上那块大白 */
+    align-content: start;
     box-sizing: border-box;
 }
 

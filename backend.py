@@ -22,11 +22,13 @@ import io  # For workshop manifest processing
 import socket
 import ssl
 import locale
+import ctypes
+import tempfile
 from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.15"  # 当前版本号
+CURRENT_VERSION = "2.16"  # 当前版本号
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 # --- LOGGING SETUP ---
@@ -194,7 +196,21 @@ class DxbBackend:
         self.name_cache: Dict[str, str] = {} # NEW: 添加游戏名称缓存
 
     async def __aenter__(self):
-        self.client = httpx.AsyncClient(verify=False, trust_env=True)
+        # 用户可在设置里填自定义代理（http:// 或 socks5://），留空则走直连/系统环境变量。
+        # 国内直连 Steam 社区经常不通，填了代理后端所有请求都走它，比「只加速浏览器」更管用。
+        proxy = ''
+        try:
+            cfg = self._load_config_sync() or {}
+            proxy = str(cfg.get('network_proxy') or '').strip()
+        except Exception:
+            proxy = ''
+        kwargs = dict(verify=False, trust_env=True)
+        if proxy:
+            kwargs['proxy'] = proxy if '://' in proxy else f'http://{proxy}'
+        try:
+            self.client = httpx.AsyncClient(**kwargs)
+        except Exception:
+            self.client = httpx.AsyncClient(verify=False, trust_env=True)
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -4767,3 +4783,1078 @@ class DxbBackend:
                     self.log.info(f'已重命名: {file.name} -> {new_filename.name}')
                 except Exception as e:
                     self.log.error(f'重命名失败 {file.name}: {e}')
+
+
+# =====================================================================
+# 下载管理：三个内核的「真实版本检测 + 自动下载 + 自动安装」
+#   - OpenSteamTool：GitHub Releases（取 *-Release.zip，别拿 29MB 的 Debug）
+#   - GreenLuma   ：真·GreenLuma 2025（DLL + DLLInjector.exe），
+#                   源在 ehgen0ng/wuhu 仓库里（raw 文件，可直接下载）
+#   - SteamTools  ：GitHub 无官方源，走「本地安装包 / 自填镜像仓库」
+# 全部纯后端 HTTP，不开任何浏览器窗口。
+# =====================================================================
+
+# GitHub 下载加速前缀（下载 release 资产 / raw 文件时按顺序回退）
+GH_DL_PROXIES = [
+    "",
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
+    "https://gh.llkk.cc/",
+    "https://ghproxy.net/",
+]
+
+# wuhu 仓库里 GreenLuma 2025 的文件（master 分支，实测 raw/jsDelivr/gh-proxy 全通）
+GREENLUMA_REPO = "ehgen0ng/wuhu"
+GREENLUMA_BRANCH = "master"
+GREENLUMA_DIR = "archive/go/utils/GreenLuma"
+GREENLUMA_FILES = ["DLLInjector.exe", "GreenLuma_2025_x64.dll", "DLLInjector.ini", "GreenLuma2025.txt"]
+
+# ---------------------------------------------------------------- GreenLuma 隐身版
+# 注入版（上面那份）的问题：DLLInjector 是靠「特征码扫描 steam.exe」挂钩的，
+# 一旦 Steam 自动更新，特征码对不上就直接失败（实测会卡在 Failed to get InternalGetInt）。
+# 隐身版换了个思路：GreenLuma 官方出的 stealth 形态本身就是一份改写过的 user32.dll，
+# 放到 Steam 主目录，Steam 启动时自己会加载它 → 不需要注入器、不需要管理员、没有窗口，
+# 也不依赖特征码匹配 Steam 版本，对新 Steam 明显更耐用。
+# 来源：Cranch-fur/GreenLuma-GUI 的 release（包内 GreenLuma.dll 即官方 stealth DLL，未加密）。
+GREENLUMA_STEALTH_REPO = "Cranch-fur/GreenLuma-GUI"
+GREENLUMA_STEALTH_ASSET_EXT = ".zip"
+GREENLUMA_STEALTH_INNER = "GreenLuma.dll"     # 压缩包内文件名
+GREENLUMA_STEALTH_DLL = "user32.dll"          # 落到 Steam 主目录时用的名字
+GREENLUMA_STEALTH_BAK = "user32.dll.dxb_bak"  # 原文件备份名
+GREENLUMA_STEALTH_MARKER = "greenluma_stealth_version.txt"
+GREENLUMA_STEALTH_MIN_SIZE = 60000            # 体积下限，防拿到错误文件
+
+KERNEL_SPECS: Dict[str, Dict[str, Any]] = {
+    "opensteamtool": {
+        "name": "OpenSteamTool",
+        "short": "清单导入内核",
+        "desc": "装到 Steam 主目录，lua 清单目录 config\\lua。与 SteamTools 二选一。",
+        "source": "github",
+        "repos": ["OpenSteam001/OpenSteamTool"],
+        "asset_prefer": ["release"],          # 优先 Release.zip（Debug 包 29MB 且带调试符号）
+        "asset_exts": [".zip", ".7z"],
+        "target": "steam_root",
+        "marker": "opensteamtool_version.txt",
+        "extra_dirs": ["config/lua"],
+            "root_files": ["OpenSteamTool.dll", "dwmapi.dll", "xinput1_4.dll"],
+    },
+    "steamtools": {
+        "name": "SteamTools",
+        "short": "稳定入库内核",
+        "desc": "装到 Steam 的 config\\stplug-in。GitHub 上没有官方源，需本地安装包或自填镜像仓库。",
+        "source": "github",
+        "repos": [],                          # 空 = 只能本地包 / 自填镜像
+        "asset_prefer": ["release"],
+        "asset_exts": [".zip", ".7z"],
+        "target": "stplug",
+        "marker": "steamtools_version.txt",
+        "extra_dirs": [],
+    },
+    "greenluma": {
+        "name": "GreenLuma",
+        "short": "DLL 入库（两种形态）",
+        "desc": "默认装「隐身版」：改写版 user32.dll 放进 Steam 主目录，启动 Steam 自动生效——"
+                "无注入器、无管理员、无窗口，也不怕 Steam 更新。另可选「注入版」（DLLInjector.exe，"
+                "对 Steam 版本敏感）。AppList 里放 AppID。",
+        "source": "wuhu",
+        "repos": [],
+        "asset_prefer": [],
+        "asset_exts": [],
+        "target": "steam_root",
+        "marker": "greenluma_version.txt",
+        "extra_dirs": ["AppList"],
+        "root_files": ["GreenLuma_2025_x64.dll", "DLLInjector.exe"],
+        "modes": ["stealth", "inject"],
+        "default_mode": "stealth",
+    },
+}
+
+
+def run_hidden(args, cwd=None, timeout: int = 120):
+    """无窗口跑子进程并取回输出。
+
+    中文 Windows 下 tasklist/taskkill/net 输出是 GBK，text=True 默认按 UTF-8 解会炸，
+    所以统一按系统首选编码解码 + errors='ignore'。
+    """
+    flags = 0x08000000 if sys.platform == 'win32' else 0      # CREATE_NO_WINDOW
+    si = None
+    if sys.platform == 'win32':
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+    try:
+        return subprocess.run(
+            args, cwd=cwd, timeout=timeout, startupinfo=si, creationflags=flags,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding=locale.getpreferredencoding(False), errors='ignore',
+        )
+    except Exception as e:
+        class _R:
+            returncode = -1
+            stdout = f'执行失败: {e}'
+        return _R()
+
+
+# =====================================================================
+# 进程模块枚举：判断 steam.exe 到底加载了谁家的 user32.dll
+# （隐身版 GreenLuma 没有日志、界面上也看不出来，这是唯一可靠的判据）
+# =====================================================================
+_TH32CS_SNAPMODULE = 0x00000008
+_TH32CS_SNAPMODULE32 = 0x00000010
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class _MODULEENTRY32(ctypes.Structure):
+    _fields_ = [("dwSize", ctypes.c_ulong),
+                ("th32ModuleID", ctypes.c_ulong),
+                ("th32ProcessID", ctypes.c_ulong),
+                ("GlblcntUsage", ctypes.c_ulong),
+                ("ProccntUsage", ctypes.c_ulong),
+                ("modBaseAddr", ctypes.c_void_p),
+                ("modBaseSize", ctypes.c_ulong),
+                ("hModule", ctypes.c_void_p),
+                ("szModule", ctypes.c_char * 256),
+                ("szExePath", ctypes.c_char * 260)]
+
+
+def process_modules(pid: int) -> List[Tuple[str, str]]:
+    """枚举指定进程已加载的模块 → [(模块名, 完整路径)]。非 Windows / 失败返回 []。"""
+    if sys.platform != 'win32':
+        return []
+    try:
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        h = k32.CreateToolhelp32Snapshot(_TH32CS_SNAPMODULE | _TH32CS_SNAPMODULE32, int(pid))
+        if not h or h == _INVALID_HANDLE_VALUE:
+            return []
+        out: List[Tuple[str, str]] = []
+        me = _MODULEENTRY32()
+        me.dwSize = ctypes.sizeof(_MODULEENTRY32)
+        try:
+            ok = k32.Module32First(ctypes.c_void_p(h), ctypes.byref(me))
+            while ok:
+                out.append((me.szModule.decode('mbcs', 'ignore'),
+                            me.szExePath.decode('mbcs', 'ignore')))
+                ok = k32.Module32Next(ctypes.c_void_p(h), ctypes.byref(me))
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+        return out
+    except Exception:
+        return []
+
+
+class KernelHub:
+    """内核（OpenSteamTool / SteamTools / GreenLuma）状态 + 下载 + 安装。"""
+    def __init__(self, backend):
+        self.b = backend
+        self.log = backend.log
+
+    def _client(self):
+        """KernelHub 也可能被 _quick_backend()（没走 async with）实例化，client 可能是 None。"""
+        c = getattr(self.b, 'client', None)
+        if c is None:
+            c = httpx.AsyncClient(verify=False, trust_env=True)
+            self.b.client = c
+        return c
+
+    # ---------------------------------------------------------- 本地状态
+    def local_status(self, kind: str) -> Dict[str, Any]:
+        spec = KERNEL_SPECS.get(kind)
+        if not spec:
+            return {"ok": False, "error": "未知内核"}
+        sp = self.b.get_steam_path()
+        out: Dict[str, Any] = {"kind": kind, "name": spec["name"], "short": spec.get("short", ""),
+                               "desc": spec.get("desc", ""), "installed": False, "version": "",
+                               "steam_path": str(sp) if sp else None, "files": [], "applist": 0}
+        if not sp or not sp.exists():
+            out["error"] = "没有检测到 Steam 目录"
+            return out
+        if kind == "greenluma":
+            inject_files = [n for n in ["GreenLuma_2025_x64.dll", "DLLInjector.exe", "LumaCore.dll"]
+                            if (sp / n).exists()]
+            out["inject"] = {"installed": bool(inject_files), "files": inject_files,
+                             "version": self._read_marker(sp / KERNEL_SPECS['greenluma']['marker'])}
+            out["stealth"] = self.greenluma_stealth_state()
+            ad = sp / 'AppList'
+            if ad.is_dir():
+                try:
+                    out["applist"] = sum(1 for _ in ad.glob('*.txt'))
+                except Exception:
+                    out["applist"] = 0
+            out["files"] = ([GREENLUMA_STEALTH_DLL] if out["stealth"]["installed"] else []) + inject_files
+            out["installed"] = out["stealth"]["installed"] or out["inject"]["installed"]
+            out["modes"] = list(KERNEL_SPECS['greenluma'].get("modes") or [])
+            out["mode"] = ("stealth" if out["stealth"]["installed"]
+                           else ("inject" if out["inject"]["installed"] else ""))
+            # 版本号以「实际装上的那种形态」为准，别拿另一个形态的版本号糊弄
+            out["version"] = (out["stealth"]["version"] if out["stealth"]["installed"]
+                              else (out["inject"]["version"] if out["inject"]["installed"] else ""))
+        elif kind == "steamtools":
+            d = sp / 'config' / 'stplug-in'
+            if d.is_dir():
+                try:
+                    out["files"] = [p.name for p in d.iterdir()][:6]
+                    out["installed"] = any(d.glob('*.lua'))
+                except Exception:
+                    pass
+        else:  # opensteamtool
+            lua = sp / 'config' / 'lua'
+            dll_ok = (sp / 'OpenSteamTool.dll').exists()
+            lua_ok = lua.is_dir() and any(lua.glob('*.lua'))
+            out["installed"] = dll_ok or lua_ok
+            out["files"] = [n for n in ["OpenSteamTool.dll", "dwmapi.dll", "xinput1_4.dll"] if (sp / n).exists()]
+        if not out.get("version"):
+            out["version"] = self._read_marker(sp / spec["marker"])
+        return out
+
+    @staticmethod
+    def _read_marker(path: Path) -> str:
+        try:
+            if path.exists():
+                return path.read_text(encoding='utf-8').strip()
+        except Exception:
+            pass
+        return ""
+
+    def all_local(self) -> Dict[str, Any]:
+        return {k: self.local_status(k) for k in KERNEL_SPECS}
+
+    # ---------------------------------------------------------- 远端最新版
+    async def remote_latest(self, kind: str) -> Dict[str, Any]:
+        """查远端最新版本（纯 API/HTTP，不开浏览器）。返回 {ok, version, url, note}"""
+        spec = KERNEL_SPECS.get(kind)
+        if not spec:
+            return {"ok": False, "error": "未知内核"}
+        if spec.get("source") == "wuhu":
+            return await self._remote_greenluma()
+        repos = list(spec.get("repos") or [])
+        if kind == "steamtools":
+            custom = (self.b.config.get('steamtools_repo') or '').strip()
+            if custom:
+                repos = [custom]
+        elif kind == "opensteamtool":
+            custom = (self.b.config.get('opensteamtool_repo') or '').strip()
+            if custom:
+                repos = [custom]
+        for repo in repos:
+            try:
+                tag, asset = await self._latest_release(repo, spec)
+                if tag:
+                    return {"ok": True, "version": tag, "repo": repo,
+                            "asset": asset[1] if asset else "", "url": asset[0] if asset else "",
+                            "note": ""}
+            except Exception as e:
+                self.log.warning(f"查询 {repo} 最新发布失败：{e}")
+        if kind == "steamtools":
+            return {"ok": False, "note": "GitHub 上没有 SteamTools 官方仓库，请用「本地安装包」安装。"}
+        return {"ok": False, "note": "查询远端版本失败（网络或仓库不可达）。"}
+
+    async def _remote_greenluma(self) -> Dict[str, Any]:
+        """GreenLuma 远端版本（两种形态分别查，避免拿注入版的版本号糊弄隐身版）。
+
+        · 隐身版（默认）：Cranch-fur/GreenLuma-GUI 的 release，tag 形如 v1.3_GL1.8.7；
+        · 注入版：wuhu 仓库的 GreenLuma2025.txt。
+        """
+        sver, _surl = await self._stealth_latest()
+        iver = ""
+        txt = await self._fetch_raw("GreenLuma2025.txt")
+        if txt:
+            m = re.search(r'GreenLuma\s+20\d\d[ \t]+([0-9]+(?:\.[0-9]+)+)', txt)
+            if m:
+                iver = m.group(1)
+        if not sver and not iver:
+            return {"ok": False, "note": "无法从下载源解析 GreenLuma 版本（可能要手动配镜像）。"}
+        notes = []
+        if not sver:
+            notes.append("隐身版源没取到")
+        if not iver:
+            notes.append("注入版版本号未解析")
+        return {"ok": bool(sver), "version": sver or iver,
+                "repo": GREENLUMA_STEALTH_REPO, "asset": GREENLUMA_STEALTH_INNER,
+                "stealth_version": sver, "inject_version": iver,
+                "note": "；".join(notes)}
+
+    async def _stealth_latest(self) -> Tuple[str, str]:
+        """取 GreenLuma 隐身版最新 zip 直链（GitHub release，纯 API，不开浏览器）。"""
+        try:
+            api = f"https://api.github.com/repos/{GREENLUMA_STEALTH_REPO}/releases/latest"
+            token = (self.b.config.get("Github_Personal_Token") or "").strip()
+            headers = {"User-Agent": "DaXuanBa-Injector"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            r = await self._client().get(api, headers=headers, timeout=20)
+            if r.status_code != 200:
+                return "", ""
+            rel = r.json()
+            tag = str(rel.get("tag_name") or "").strip()
+            url = ""
+            for a in (rel.get("assets") or []):
+                nm = str(a.get("name") or "")
+                if nm.lower().endswith(GREENLUMA_STEALTH_ASSET_EXT):
+                    url = a.get("browser_download_url") or ""
+                    break
+            m = re.search(r'GL[ _]?([0-9]+(?:\.[0-9]+)+)', tag, re.I)
+            return (m.group(1) if m else tag), url
+        except Exception as e:
+            self.log.warning(f"查询 GreenLuma 隐身版失败：{e}")
+            return "", ""
+
+    # ---------------------------------------------------------- 底层网络
+    async def _latest_release(self, repo: str, spec: Dict) -> Tuple[str, Tuple[str, str] | None]:
+        api = f"https://api.github.com/repos/{repo}/releases/latest"
+        token = (self.b.config.get("Github_Personal_Token") or "").strip()
+        headers = {"User-Agent": "DaXuanBa-Injector"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        r = await self._client().get(api, headers=headers, timeout=20)
+        if r.status_code != 200:
+            return "", None
+        rel = r.json()
+        tag = str(rel.get("tag_name") or "").strip()
+        assets = rel.get("assets") or []
+        best = None
+        prefer = [p.lower() for p in (spec.get("asset_prefer") or [])]
+        exts = [e.lower() for e in (spec.get("asset_exts") or [])]
+        for want in prefer:                       # 先按「偏好关键词」挑（release 优先）
+            for a in assets:
+                nm = str(a.get("name") or "")
+                if want in nm.lower() and any(nm.lower().endswith(e) for e in exts):
+                    best = (a.get("browser_download_url"), nm)
+                    break
+            if best:
+                break
+        if not best:                              # 再退化成「任意符合后缀的」
+            for a in assets:
+                nm = str(a.get("name") or "")
+                if any(nm.lower().endswith(e) for e in exts):
+                    best = (a.get("browser_download_url"), nm)
+                    break
+        return tag, best
+
+    def _raw_urls(self, name: str) -> List[str]:
+        path = f"{GREENLUMA_DIR}/{name}"
+        base = [
+            f"https://raw.githubusercontent.com/{GREENLUMA_REPO}/{GREENLUMA_BRANCH}/{path}",
+            f"https://cdn.jsdelivr.net/gh/{GREENLUMA_REPO}@{GREENLUMA_BRANCH}/{path}",
+            f"https://fastly.jsdelivr.net/gh/{GREENLUMA_REPO}@{GREENLUMA_BRANCH}/{path}",
+            f"https://gcore.jsdelivr.net/gh/{GREENLUMA_REPO}@{GREENLUMA_BRANCH}/{path}",
+        ]
+        out = list(base)
+        for u in base[:2]:
+            out.append(f"https://gh-proxy.com/{u}")
+        return out
+
+    async def _fetch_raw(self, name: str) -> str:
+        for u in self._raw_urls(name):
+            try:
+                r = await self._client().get(u, timeout=30, follow_redirects=True)
+                if r.status_code == 200 and r.content:
+                    return r.content.decode('utf-8', 'ignore')
+            except Exception:
+                continue
+        return ""
+
+    async def _download_to(self, url: str, dest: Path, on_progress=None, label: str = "") -> bool:
+        """下载（带镜像回退 + 真实进度）。url 为 github 链接时自动尝试加速前缀。"""
+        cands = [url]
+        if "github.com" in url or "raw.githubusercontent.com" in url:
+            cands = [p + url for p in GH_DL_PROXIES]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        last_err = ""
+        for i, u in enumerate(cands):
+            try:
+                async with self._client().stream("GET", u, follow_redirects=True, timeout=180) as r:
+                    if r.status_code != 200:
+                        last_err = f"HTTP {r.status_code}"
+                        continue
+                    total = int(r.headers.get("content-length") or 0)
+                    got = 0
+                    with open(dest, 'wb') as f:
+                        async for chunk in r.aiter_bytes(65536):
+                            f.write(chunk)
+                            got += len(chunk)
+                            if on_progress:
+                                pct = int(got * 100 / total) if total else 0
+                                on_progress(pct, f"下载{label} {got // 1024}KB" + (f"/{total // 1024}KB" if total else ""))
+                if dest.exists() and dest.stat().st_size > 0:
+                    return True
+            except Exception as e:
+                last_err = str(e)[:120]
+                continue
+        self.log.error(f"下载失败（{len(cands)} 个通道都试过）：{last_err}")
+        return False
+
+    # ---------------------------------------------------------- 安装
+    def _extract(self, archive: Path, out_dir: Path) -> bool:
+        """解压 zip / 7z（7z 需要可选依赖 py7zr）。"""
+        name = archive.name.lower()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            if name.endswith('.7z'):
+                try:
+                    import py7zr
+                except Exception:
+                    self.log.warning("发布包是 7z 但缺少 py7zr，无法自动解压。")
+                    return False
+                with py7zr.SevenZipFile(archive, 'r') as z:
+                    z.extractall(out_dir)
+                return True
+            if name.endswith('.rar'):
+                self.log.warning("暂不支持 rar，请把包内文件解出来再手动放。")
+                return False
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(out_dir)
+            return True
+        except Exception as e:
+            self.log.error(f"解压失败：{e}")
+            return False
+
+    def _copy_to_steam(self, kind: str, src_dir: Path, sp: Path) -> List[str]:
+        """把解压出来的东西放进正确的目录，返回实际落地的文件名。"""
+        spec = KERNEL_SPECS[kind]
+        placed: List[str] = []
+        if spec["target"] == "stplug":
+            dst = sp / 'config' / 'stplug-in'
+            dst.mkdir(parents=True, exist_ok=True)
+            for p in src_dir.rglob('*'):
+                if p.is_file():
+                    shutil.copy2(p, dst / p.name)
+                    placed.append(p.name)
+            return placed
+        # steam_root：优先按清单里的文件名挑，挑了不到就把顶层文件都放过去
+        wanted = [n.lower() for n in spec.get("root_files", [])]
+        found = {}
+        for p in src_dir.rglob('*'):
+            if p.is_file() and p.name.lower() in wanted:
+                found[p.name.lower()] = p
+        # GreenLuma 包可能叫别的年份/架构，宽松兜底
+        if kind == "greenluma":
+            for p in src_dir.rglob('*'):
+                if p.is_file() and (p.name.lower().startswith('greenluma') or
+                                    p.name.lower() in ('dllinjector.exe', 'dllinjector.ini')):
+                    found.setdefault(p.name.lower(), p)
+        if not found:
+            for p in src_dir.rglob('*.dll'):
+                found.setdefault(p.name.lower(), p)
+        for p in found.values():
+            shutil.copy2(p, sp / p.name)
+            placed.append(p.name)
+        # 主目录里 GreenLuma 的 ini 需要重写成绝对路径（跳过交互式设置工具）
+        if kind == "greenluma" and (sp / 'DLLInjector.exe').exists():
+            self._write_dllinjector_ini(sp)
+        for d in spec.get("extra_dirs", []):
+            try:
+                (sp / d).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+        return placed
+
+    def _write_dllinjector_ini(self, sp: Path):
+        """写 DLLInjector.ini：绝对路径 + 假父进程(explorer) + 隐身文件，跳过交互式设置工具。
+
+        这些项一个都不能省。少了 EnableFakeParentProcess，steam.exe 的父进程就是
+        DLLInjector（控制台程序），Steam 起来会立刻退；少了 CreateFiles/NoQuestion.bin，
+        GreenLuma 还会弹询问框（无窗口跑就卡住）。之前精简成 8 行就是「注入完 Steam 一闪就没」的元凶。
+        """
+        steam_exe = sp / 'steam.exe'
+        dll = sp / 'GreenLuma_2025_x64.dll'
+        if not dll.exists():
+            cands = sorted(sp.glob('GreenLuma*x64.dll'))
+            if cands:
+                dll = cands[0]
+        lines = [
+            "[DllInjector]",
+            "AllowMultipleInstancesOfDLLInjector = 0",
+            "UseFullPathsFromIni = 1",
+            "",
+            "# Exe to start, if you use stealth mode, remove \"-inhibitbootstrap\"",
+            f"Exe = {steam_exe}",
+            "CommandLine =",
+            "",
+            "# Dll to inject",
+            f"Dll = {dll}",
+            "",
+            "# Export to call in dll",
+            "Export = Init",
+            "",
+            "# Check if call to export returned positive value",
+            "CheckReturnValue = 0",
+            "",
+            "# Wait for started exe to close before exiting the DllInjector process.",
+            "WaitForProcessTermination = 0",
+            "",
+            "# Set a fake parent process",
+            "# 注意：EnableFakeParentProcess=1 需要管理员权限，普通权限下 DLLInjector 会直接卡死/失败，",
+            "# 所以这里保持 0（官方默认发行版的 ini 也是「二选一」，普通启动不需要假父进程）。",
+            "EnableFakeParentProcess = 0",
+            "FakeParentProcess = explorer.exe",
+            "",
+            "EnableMitigationsOnChildProcess = 0",
+            "",
+            "DEP = 1",
+            "SEHOP = 1",
+            "HeapTerminate = 1",
+            "ForceRelocateImages = 1",
+            "BottomUpASLR = 1",
+            "HighEntropyASLR = 1",
+            "RelocationsRequired = 1",
+            "StrictHandleChecks = 0",
+            "Win32kSystemCallDisable = 0",
+            "ExtensionPointDisable = 1",
+            "CFG = 1",
+            "CFGExportSuppression = 1",
+            "StrictCFG = 1",
+            "DynamicCodeDisable = 0",
+            "DynamicCodeAllowOptOut = 0",
+            "BlockNonMicrosoftBinaries = 0",
+            "FontDisable = 1",
+            "NoRemoteImages = 1",
+            "NoLowLabelImages = 1",
+            "PreferSystem32 = 0",
+            "RestrictIndirectBranchPrediction = 1",
+            "SpeculativeStoreBypassDisable = 0",
+            "ShadowStack = 0",
+            "ContextIPValidation = 0",
+            "BlockNonCETEHCONT = 0",
+            "BlockFSCTL = 0",
+            "",
+            "# 自动创建这两个文件 → 隐身模式 + 不再弹询问框（无窗口运行必须）",
+            "CreateFiles = 2",
+            "FileToCreate_1 = StealthMode.bin",
+            "FileToCreate_2 = NoQuestion.bin",
+            "",
+            "Use4GBPatch = 0",
+            "FileToPatch_1 =",
+            "",
+            "BootImage = ",
+            "BootImageWidth = 0",
+            "BootImageHeight = 0",
+            "BootImageXOffest = 0",
+            "BootImageYOffest = 0",
+            "",
+        ]
+        try:
+            (sp / 'DLLInjector.ini').write_text('\r\n'.join(lines), encoding='utf-8')
+            self.log.info("已写入完整 DLLInjector.ini（假父进程 + 隐身 + 免询问）")
+        except Exception as e:
+            self.log.warning(f"写 DLLInjector.ini 失败：{e}")
+
+    async def install(self, kind: str, on_progress=None, force: bool = True,
+                      mode: str = "") -> Dict[str, Any]:
+        """下载 + 安装一个内核，返回 {success, message, version, files}
+
+        mode 只有 GreenLuma 用：stealth = 隐身版 user32.dll（默认），inject = 注入版 DLLInjector。
+        """
+        spec = KERNEL_SPECS.get(kind)
+        if not spec:
+            return {"success": False, "message": "未知内核"}
+        sp = self.b.get_steam_path()
+        if not sp or not sp.exists():
+            return {"success": False, "message": "没有检测到 Steam 目录，先在设置页指定 Steam 路径。"}
+
+        if kind == "greenluma":
+            mode = (mode or spec.get("default_mode") or "stealth").strip().lower()
+            if mode == "stealth":
+                return await self.install_greenluma_stealth(on_progress=on_progress)
+
+        def prog(pct, msg):
+            if on_progress:
+                try:
+                    on_progress(pct, msg)
+                except Exception:
+                    pass
+
+        tmp = self.b.temp_path / f'kernel_{kind}'
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+
+        if kind == "greenluma":
+            ok_all = True
+            for i, name in enumerate(GREENLUMA_FILES):
+                prog(int(i * 90 / len(GREENLUMA_FILES)), f"下载 {name}")
+                dest = tmp / name
+                got = False
+                for u in self._raw_urls(name):
+                    if await self._download_to_single(u, dest):
+                        got = True
+                        break
+                if not got and name != 'DLLInjector.ini' and name != 'GreenLuma2025.txt':
+                    ok_all = False
+                    self.log.error(f"{name} 下载失败（所有通道都不通）。")
+            if not ok_all:
+                return {"success": False, "message": "GreenLuma 组件下载失败，检查网络后重试。"}
+            prog(92, "释放到 Steam 主目录")
+            placed = self._copy_to_steam(kind, tmp, sp)
+            remote = await self._remote_greenluma()
+            # 注入版的版本号必须用注入版自己的，别把隐身版的 1.8.7 写到注入版标记里
+            ver = remote.get("inject_version") or remote.get("version") or "GreenLuma 2025"
+            try:
+                (sp / spec["marker"]).write_text(ver, encoding='utf-8')
+            except Exception:
+                pass
+            shutil.rmtree(tmp, ignore_errors=True)
+            prog(100, "安装完成")
+            self.log.info(f"GreenLuma 已装到 Steam 主目录：{placed}")
+            return {"success": True, "message": f"GreenLuma 已安装到 {sp}", "version": ver, "files": placed}
+
+        # GitHub 发布包两个内核（OpenSteamTool / SteamTools）
+        latest = await self.remote_latest(kind)
+        if not latest.get("ok") or not latest.get("url"):
+            return {"success": False, "message": latest.get("note") or "没有可用的下载源"}
+        url, aname = latest["url"], latest.get("asset") or f"{kind}.zip"
+        prog(2, f"下载 {aname}")
+        arc = tmp / aname
+        if not await self._download_to(url, arc, on_progress=lambda p, m: prog(2 + int(p * 0.73), m), label=f" {aname}"):
+            return {"success": False, "message": "下载失败，检查网络/加速后重试。"}
+        prog(78, "解压")
+        ex = tmp / 'x'
+        if not self._extract(arc, ex):
+            return {"success": False, "message": "解压失败（可能是 7z/rar，需要本地手动解压）。"}
+        prog(88, "释放到 Steam")
+        placed = self._copy_to_steam(kind, ex, sp)
+        try:
+            (sp / spec["marker"]).write_text(str(latest.get("version") or aname), encoding='utf-8')
+        except Exception:
+            pass
+        shutil.rmtree(tmp, ignore_errors=True)
+        prog(100, "安装完成")
+        self.log.info(f"{spec['name']} 已安装：{placed}")
+        return {"success": True, "message": f"{spec['name']} 已安装到 {sp}",
+                "version": str(latest.get("version") or aname), "files": placed}
+
+    async def _download_to_single(self, url: str, dest: Path) -> bool:
+        """单通道下载（wuhu raw 已经带多镜像列表，这里不再加前缀）。"""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            r = await self._client().get(url, timeout=60, follow_redirects=True)
+            if r.status_code == 200 and r.content:
+                dest.write_bytes(r.content)
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def install_from_local(self, kind: str, filename: str, data: bytes, on_progress=None) -> Dict[str, Any]:
+        """从本地安装包（zip/7z）安装——SteamTools 的官方包走这条路。"""
+        sp = self.b.get_steam_path()
+        if not sp or not sp.exists():
+            return {"success": False, "message": "没有检测到 Steam 目录。"}
+        if kind not in KERNEL_SPECS:
+            return {"success": False, "message": "未知内核"}
+        tmp = self.b.temp_path / f'kernel_local_{kind}'
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        arc = tmp / (filename or 'pkg.zip')
+        arc.write_bytes(data)
+        if on_progress:
+            on_progress(40, "解压本地安装包")
+        ex = tmp / 'x'
+        if not self._extract(arc, ex):
+            return {"success": False, "message": "解压失败：只支持 zip / 7z（7z 需 py7zr）。"}
+        if on_progress:
+            on_progress(70, "释放到 Steam")
+        placed = self._copy_to_steam(kind, ex, sp)
+        try:
+            (sp / KERNEL_SPECS[kind]["marker"]).write_text("本地安装包", encoding='utf-8')
+        except Exception:
+            pass
+        shutil.rmtree(tmp, ignore_errors=True)
+        if on_progress:
+            on_progress(100, "安装完成")
+        if not placed:
+            return {"success": False, "message": "包里没找到可释放的文件，确认你传的是正确的安装包。"}
+        return {"success": True, "message": f"已从本地包安装 {KERNEL_SPECS[kind]['name']}", "files": placed}
+
+    # -------------------------------------------------- GreenLuma 隐身版
+    def _steam_pids(self) -> List[int]:
+        """当前 steam.exe 的 PID 列表（tasklist 输出是 GBK，按系统编码解）。"""
+        r = run_hidden(['tasklist', '/FI', 'imagename eq steam.exe', '/FO', 'CSV', '/NH'], timeout=25)
+        pids: List[int] = []
+        for line in (r.stdout or '').splitlines():
+            parts = [x.strip().strip('"') for x in line.split(',')]
+            if len(parts) >= 2 and parts[1].isdigit():
+                pids.append(int(parts[1]))
+        return pids
+
+    def stealth_loaded(self) -> bool:
+        """steam.exe 是否真的加载了 Steam 主目录下那份 user32.dll（= 隐身版生效）。
+
+        隐身版不写任何日志、界面上也看不出来，唯一可靠判据是查进程模块路径：
+        系统那份在 C:\\Windows\\System32，我们这份在 Steam 主目录。
+        """
+        sp = self.b.get_steam_path()
+        if not sp or sys.platform != 'win32':
+            return False
+        root = str(sp).rstrip('\\/').lower()
+        for pid in self._steam_pids():
+            for name, path in process_modules(pid):
+                if name.lower() == GREENLUMA_STEALTH_DLL and path.lower().startswith(root):
+                    return True
+        return False
+
+    def greenluma_stealth_state(self) -> Dict[str, Any]:
+        sp = self.b.get_steam_path()
+        out: Dict[str, Any] = {"installed": False, "version": "", "path": None,
+                               "size": 0, "loaded": False, "backup": None}
+        if not sp:
+            return out
+        dst = sp / GREENLUMA_STEALTH_DLL
+        if dst.exists():
+            out["installed"] = True
+            out["path"] = str(dst)
+            try:
+                out["size"] = dst.stat().st_size
+            except OSError:
+                pass
+            out["version"] = self._read_marker(sp / GREENLUMA_STEALTH_MARKER)
+        if (sp / GREENLUMA_STEALTH_BAK).exists():
+            out["backup"] = str(sp / GREENLUMA_STEALTH_BAK)
+        out["loaded"] = self.stealth_loaded()
+        return out
+
+    async def install_greenluma_stealth(self, on_progress=None) -> Dict[str, Any]:
+        """下载 GreenLuma 隐身版 → Steam 主目录 user32.dll（原文件先备份）。"""
+        def prog(p, m=""):
+            if on_progress:
+                try:
+                    on_progress(p, m)
+                except Exception:
+                    pass
+        sp = self.b.get_steam_path()
+        if not sp or not sp.exists():
+            return {"success": False, "message": "没有检测到 Steam 目录。"}
+        tmp = Path(tempfile.mkdtemp(prefix='dxb_gls_'))
+        try:
+            prog(4, "查询隐身版最新版本")
+            ver, url = await self._stealth_latest()
+            if not url:
+                return {"success": False, "message": "拿不到 GreenLuma 隐身版下载地址（网络不通或仓库不可达）。"}
+            prog(12, f"下载 GreenLuma {ver or ''} 隐身版")
+            zp = tmp / ('greenluma_stealth' + GREENLUMA_STEALTH_ASSET_EXT)
+            # 下载自己的进度是 0-100，映射到 12-68 这一段，不然会和后面的「解包 72%」打架回跳
+            if not await self._download_to(url, zp,
+                                           on_progress=lambda p, m: prog(12 + int(p * 0.56), m),
+                                           label=" GreenLuma 隐身版"):
+                return {"success": False, "message": "下载 GreenLuma 隐身版失败（各镜像都不通）。"}
+            prog(72, "解包")
+            outdir = tmp / 'out'
+            if not self._extract(zp, outdir):
+                return {"success": False, "message": "GreenLuma 隐身版压缩包解压失败。"}
+            dll = None
+            for p in outdir.rglob('*'):
+                if p.is_file() and p.name.lower() == GREENLUMA_STEALTH_INNER.lower():
+                    dll = p
+                    break
+            if dll is None:
+                for p in outdir.rglob('*.dll'):
+                    dll = p
+                    break
+            if dll is None:
+                return {"success": False, "message": f"压缩包里没找到 {GREENLUMA_STEALTH_INNER}。"}
+            if dll.stat().st_size < GREENLUMA_STEALTH_MIN_SIZE:
+                return {"success": False,
+                        "message": f"取到的 {dll.name} 只有 {dll.stat().st_size} 字节，体积异常，已中止。"}
+            prog(86, "释放到 Steam 主目录")
+            dst = sp / GREENLUMA_STEALTH_DLL
+            bak = sp / GREENLUMA_STEALTH_BAK
+            if dst.exists() and not bak.exists():
+                try:
+                    shutil.copy2(dst, bak)
+                except Exception as e:
+                    self.log.warning(f"备份原 user32.dll 失败：{e}")
+            shutil.copy2(dll, dst)
+            (sp / GREENLUMA_STEALTH_MARKER).write_text(ver or 'unknown', encoding='utf-8')
+            (sp / 'AppList').mkdir(parents=True, exist_ok=True)
+            prog(100, "安装完成")
+            self.log.info(f"GreenLuma 隐身版已装到 {dst}（{dll.stat().st_size} B）")
+            return {"success": True, "mode": "stealth", "version": ver or 'unknown',
+                    "files": [GREENLUMA_STEALTH_DLL],
+                    "message": f"GreenLuma {ver or ''} 隐身版已装到 {dst}"
+                               f"（原 user32.dll 已备份为 {GREENLUMA_STEALTH_BAK}）。\n\n"
+                               "以后直接启动 Steam 就行：不需要注入器、不需要管理员、没有任何窗口。"
+                               "AppID 放到 Steam 主目录的 AppList 文件夹。"}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def uninstall_greenluma_stealth(self) -> Dict[str, Any]:
+        """移除隐身版：有备份就还原原 user32.dll，没备份直接删。"""
+        sp = self.b.get_steam_path()
+        if not sp or not sp.exists():
+            return {"success": False, "message": "没有检测到 Steam 目录。"}
+        dst = sp / GREENLUMA_STEALTH_DLL
+        bak = sp / GREENLUMA_STEALTH_BAK
+        try:
+            if dst.exists():
+                dst.unlink()
+            restored = False
+            if bak.exists():
+                shutil.move(str(bak), str(dst))
+                restored = True
+            mk = sp / GREENLUMA_STEALTH_MARKER
+            if mk.exists():
+                mk.unlink()
+        except Exception as e:
+            return {"success": False, "message": f"移除失败：{e}"}
+        return {"success": True, "mode": "stealth",
+                "message": "已移除 GreenLuma 隐身版（user32.dll）。"
+                           + ("原来的 user32.dll 已从备份还原。" if restored else "")
+                           + "\n\n重启 Steam 后生效。"}
+
+    # ---------------------------------------------------------- 注入 / 启动
+    def greenluma_log_tail(self, lines: int = 40) -> List[str]:
+        """读 GreenLuma 自己写的日志（判断注入到底走到哪一步的真凭据）。"""
+        sp = self.b.get_steam_path()
+        if not sp:
+            return []
+        p = sp / 'GreenLuma_2025.log'
+        if not p.exists():
+            return []
+        try:
+            return p.read_text(encoding='utf-8', errors='ignore').splitlines()[-lines:]
+        except Exception:
+            return []
+
+    def conflict_check(self) -> Dict[str, Any]:
+        """检测内核共存冲突（纯检测，不动用户文件）。
+
+        OpenSteamTool 靠劫持 dwmapi.dll / xinput1_4.dll 这类代理 DLL 把代码塞进 steam.exe；
+        GreenLuma 又往 steam.exe 里挂二十来个 MinHook 钩子。两个一起挂，
+        Steam 经常「起来一下就退」。所以三内核能同时*安装*，但运行时最好只启一个。
+        """
+        out = {"ok": True, "proxies": [], "greenluma": [], "stealth": False, "message": ""}
+        sp = self.b.get_steam_path()
+        if not sp or not sp.exists():
+            return out
+        out["proxies"] = [n for n in ('dwmapi.dll', 'xinput1_4.dll', 'winmm.dll', 'version.dll')
+                          if (sp / n).exists()]
+        out["greenluma"] = [n for n in ('GreenLuma_2025_x64.dll', 'DLLInjector.exe')
+                            if (sp / n).exists()]
+        out["stealth"] = (sp / GREENLUMA_STEALTH_DLL).exists()
+        if out["proxies"] and (out["greenluma"] or out["stealth"]):
+            out["ok"] = False
+            names = []
+            if out["greenluma"]:
+                names.append("GreenLuma 注入版")
+            if out["stealth"]:
+                names.append("GreenLuma 隐身版（user32.dll）")
+            out["message"] = (
+                "OpenSteamTool 的代理 DLL（%s）和 %s 同时挂在 Steam 主目录。"
+                "两者都会往 steam.exe 里挂钩子，一起用很容易让 Steam 启动后立刻退出。"
+                "建议二选一：要用 GreenLuma 就把这些代理 DLL 移出 Steam 目录。"
+                % ('、'.join(out["proxies"]), ' 和 '.join(names)))
+        return out
+
+    def injection_status(self) -> Dict[str, Any]:
+        """真实检测：steam.exe 是否在跑、有没有加载 GreenLuma（注入版 / 隐身版）。"""
+        out = {"steam_running": False, "injected": False, "modules": [], "stealth": False}
+        if sys.platform != 'win32':
+            return out
+        r = run_hidden(['tasklist', '/fi', 'imagename eq steam.exe', '/m'], timeout=25)
+        text = r.stdout or ""
+        out["steam_running"] = 'steam.exe' in text.lower()
+        mods = []
+        for m in re.finditer(r'(GreenLuma[\w.\-]*\.dll|LumaCore[\w.\-]*\.dll)', text, re.I):
+            if m.group(1) not in mods:
+                mods.append(m.group(1))
+        # 隐身版没有自己的模块名（它就叫 user32.dll），只能按「加载路径」判定
+        if out["steam_running"] and self.stealth_loaded():
+            out["stealth"] = True
+            mods.append(f"{GREENLUMA_STEALTH_DLL}（隐身版）")
+        out["modules"] = mods
+        out["injected"] = bool(mods)
+        return out
+
+    def _launch_plain(self, sp: Path, kind: str, conflict: Dict[str, Any]) -> Dict[str, Any]:
+        """不起注入器，直接拉 steam.exe —— 隐身版 GreenLuma / 代理 DLL 都由 Steam 自己加载。"""
+        exe = sp / 'steam.exe'
+        if not exe.exists():
+            return {"success": False, "message": f"没找到 {exe}"}
+        run_hidden(['taskkill', '/F', '/IM', 'steam.exe'], timeout=30)   # 换内核前先退干净
+        time.sleep(1.2)
+        try:
+            subprocess.Popen([str(exe)], cwd=str(sp))
+        except Exception as e:
+            return {"success": False, "message": f"启动 Steam 失败：{e}"}
+        if kind != 'stealth':
+            return {"success": True, "message": "已启动 Steam（内核 DLL 会随进程自动加载）。",
+                    "injection": self.injection_status()}
+        # 隐身版：盯一会儿，确认真是 Steam 目录下那份 user32.dll 被加载了，别嘴上说成功
+        loaded = False
+        for _ in range(8):
+            time.sleep(2)
+            if self.stealth_loaded():
+                loaded = True
+                break
+        st = self.injection_status()
+        if loaded:
+            msg = ("GreenLuma 隐身版已生效：steam.exe 加载了 Steam 主目录下的 user32.dll。\n"
+                   "没有注入器、没有管理员、没有任何窗口；AppID 放在 Steam 主目录的 AppList 文件夹。")
+            if conflict and not conflict.get("ok", True):
+                msg += "\n\n⚠ " + conflict["message"]
+            return {"success": True, "message": msg, "injection": st, "conflict": conflict}
+        if st["steam_running"]:
+            return {"success": False,
+                    "message": "Steam 起来了，但没检测到它加载 Steam 主目录下的 user32.dll。\n\n"
+                               "可能是安全软件拦了，或 Steam 走了别的启动方式（比如 bin\\x86launcher.exe）。"
+                               "重启 Steam 再试一次；仍不行就用 OpenSteamTool / SteamTools 入库。",
+                    "injection": st, "conflict": conflict}
+        return {"success": False,
+                "message": "Steam 启动后立刻退出了。\n\n"
+                           "先点「移除隐身版」把 Steam 主目录里的 user32.dll 拿掉，确认 Steam 能正常启动，"
+                           "再考虑换 OpenSteamTool / SteamTools 入库。",
+                "injection": st, "conflict": conflict}
+
+    async def _launch_inject(self, sp: Path, injector: Path,
+                             conflict: Dict[str, Any]) -> Dict[str, Any]:
+        """DLLInjector.exe 无窗口注入启动（注入版；对 Steam 版本敏感）。"""
+        if not injector.exists():
+            return {"success": False, "message": "没找到 DLLInjector.exe，先在下载管理里装 GreenLuma（注入版）。"}
+        run_hidden(['taskkill', '/F', '/IM', 'steam.exe'], timeout=30)   # 注入前必须先退干净
+        time.sleep(1.5)
+        run_hidden([str(injector)], cwd=str(sp), timeout=60)
+        # 注入后 steam.exe 会先起 bootstrap，慢的时候十几秒才稳住，多盯几次再下结论
+        st = self.injection_status()
+        for _ in range(6):
+            time.sleep(2)
+            st = self.injection_status()
+            if st["injected"]:
+                break
+        if st["injected"]:
+            return {"success": True,
+                    "message": "已通过 DLLInjector 无窗口注入 GreenLuma，并拉起 Steam。",
+                    "injection": st, "conflict": conflict}
+        log = self.greenluma_log_tail(60)
+        sig_fail = [l for l in log if 'Failed' in l]
+        if not st["steam_running"]:
+            msg = "GreenLuma 注入已执行（全程无窗口），但 Steam 起来后立刻退出了。"
+            if sig_fail:
+                msg += "\n\nGreenLuma 日志里的关键失败行：\n· " + "\n· ".join(sig_fail[:4])
+                msg += ("\n\n这说明注入版的特征码跟你当前 Steam 构建对不上——注入版天生怕 Steam 更新。"
+                        "\n建议改用「GreenLuma 隐身版」（不靠特征码扫描，对新 Steam 更耐用），"
+                        "或用 OpenSteamTool / SteamTools 入库。")
+            elif conflict and not conflict.get("ok", True):
+                msg += "\n\n" + conflict["message"]
+            else:
+                msg += "\n\n没读到 GreenLuma 日志：检查 DLLInjector.ini 路径，或看安全软件是否拦了注入。"
+            return {"success": False, "message": msg, "injection": st,
+                    "log_tail": log[-12:], "conflict": conflict}
+        return {"success": False,
+                "message": "Steam 在跑，但没检测到 GreenLuma 模块（可能被杀软拦下）。"
+                           + (("\n\n" + conflict["message"]) if conflict and not conflict.get("ok", True) else ""),
+                "injection": st, "conflict": conflict}
+
+    async def launch_steam(self, mode: str = "auto") -> Dict[str, Any]:
+        """启动 Steam。
+
+        - greenluma_stealth / stealth：隐身版（Steam 目录里的 user32.dll），普通启动即可；
+        - greenluma：装了隐身版就走隐身版，否则回落到注入版；
+        - greenluma_inject / inject：强制走 DLLInjector.exe 注入；
+        - normal / auto：普通启动，代理 DLL（OpenSteamTool 等）随进程自动加载。
+        """
+        sp = self.b.get_steam_path()
+        if not sp or not sp.exists():
+            return {"success": False, "message": "没有检测到 Steam 目录。"}
+        mode = (mode or 'auto').strip().lower()
+        stealth = self.greenluma_stealth_state()
+        injector = sp / 'DLLInjector.exe'
+        conflict = self.conflict_check()
+
+        if mode in ('greenluma_stealth', 'stealth'):
+            if not stealth['installed']:
+                return {"success": False,
+                        "message": "还没装 GreenLuma 隐身版（Steam 主目录里没有 user32.dll）。"
+                                   "先在「下载管理」里点 GreenLuma 的下载安装。"}
+            return self._launch_plain(sp, 'stealth', conflict)
+
+        if mode in ('greenluma_inject', 'inject'):
+            return await self._launch_inject(sp, injector, conflict)
+
+        if mode == 'greenluma':
+            if stealth['installed']:
+                return self._launch_plain(sp, 'stealth', conflict)
+            return await self._launch_inject(sp, injector, conflict)
+
+        return self._launch_plain(sp, 'normal', conflict)
+
+
+# =====================================================================
+# 网络自检：真实测「直连」到底通不通（回答“为什么非要加速”）
+# =====================================================================
+NET_PROBE_TARGETS = [
+    ("Steam 商店", "https://store.steampowered.com/api/appdetails?appids=730"),
+    ("Steam 社区", "https://steamcommunity.com/"),
+    ("Steam API", "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/"),
+    ("Steam 图片", "https://cdn.akamai.steamstatic.com/steam/apps/730/header.jpg"),
+    ("GitHub API", "https://api.github.com/rate_limit"),
+]
+
+
+def _ver_tuple(v: str):
+    """把 "1.4.8" / "v2.15" 这种版本串转成可比较的元组（用于内核版本对比）。"""
+    m = re.match(r'v?(\d+(?:\.\d+)*)', str(v or '').strip())
+    if not m:
+        return (0,)
+    return tuple(int(x) for x in m.group(1).split('.'))
+
+
+def kernel_update_state(local: str, remote: str) -> str:
+    """返回 inner: none（无远端信息）/ latest（已是最新）/ update（可更新）/ unknown"""
+    if not remote:
+        return "none"
+    if not local:
+        return "update"          # 没装过就算可安装
+    lt, rt = _ver_tuple(local), _ver_tuple(remote)
+    if lt == (0,) or rt == (0,):
+        return "unknown"
+    # 对齐位数再比，避免 (1,4) vs (1,4,0) 误判
+    n = max(len(lt), len(rt))
+    lt = lt + (0,) * (n - len(lt))
+    rt = rt + (0,) * (n - len(rt))
+    if lt < rt:
+        return "update"
+    return "latest"
+
+
+async def net_selftest(timeout: float = 6.0, mode: str = "direct") -> Dict[str, Any]:
+    """真实打一遍关键域名，返回每个域名的连通性/耗时。
+
+    mode='direct' → 强制直连（忽略系统代理，回答“能不能不加速”）；
+    mode='proxy'  → 走当前配置（自定义代理或系统环境变量）。
+    两个都跑，前端就能明确告诉用户“直连到底行不行、差在哪”。
+    """
+    if mode == "direct":
+        client = httpx.AsyncClient(verify=False, trust_env=False)
+    else:
+        proxy = ''
+        try:
+            cfg = DxbBackend()._load_config_sync() or {}
+            proxy = str(cfg.get('network_proxy') or '').strip()
+        except Exception:
+            proxy = ''
+        kw = dict(verify=False, trust_env=True)
+        if proxy:
+            kw['proxy'] = proxy if '://' in proxy else f'http://{proxy}'
+        client = httpx.AsyncClient(**kw)
+
+    async def probe(name: str, url: str):
+        t0 = time.perf_counter()
+        try:
+            r = await client.get(url, timeout=timeout, follow_redirects=True)
+            ms = int((time.perf_counter() - t0) * 1000)
+            ok = r.status_code < 500
+            return {"name": name, "ok": ok, "status": r.status_code, "ms": ms,
+                    "error": "" if ok else f"HTTP {r.status_code}"}
+        except Exception as e:
+            ms = int((time.perf_counter() - t0) * 1000)
+            return {"name": name, "ok": False, "status": 0, "ms": ms, "error": type(e).__name__}
+
+    try:
+        results = await asyncio.gather(*[probe(n, u) for n, u in NET_PROBE_TARGETS])
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+    ok_count = sum(1 for r in results if r["ok"])
+    return {"mode": mode, "ok": ok_count == len(results), "ok_count": ok_count,
+            "total": len(results), "results": [dict(r) for r in results]}
