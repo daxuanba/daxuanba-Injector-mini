@@ -118,6 +118,34 @@
                 </div>
             </div>
 
+            <div class="card manager-card">
+                <div class="card-header">
+                    <h2>一键修复（Steam 起不来 / 不弹窗 / 秒退）</h2>
+                </div>
+                <div class="card-content">
+                    <div class="warn-box" id="repairScan" style="display:none;"></div>
+                    <div class="hint-box" style="margin-bottom:14px;">
+                        内核往 Steam 目录写的那些代理 DLL（<code>user32.dll</code> /
+                        <code>hid.dll</code> / <code>dwmapi.dll</code> / <code>OpenSteamTool.dll</code>）
+                        版本对不上当前 Steam 客户端时，Steam 会起不来、或者起来一下就退；
+                        被强杀过的 Steam 还会留下坏 <code>htmlcache</code>，表现是<b>启动不弹窗</b>、
+                        日志刷 <code>Failed creating offscreen shared JS context</code>。<br>
+                        这里把它们<b>全部隔离（挪走，不是删除）</b> + 清 htmlcache。
+                        <b>文件一个都不会丢</b>，随时能在下面「还原」原样装回去。
+                    </div>
+                    <div class="row-flex">
+                        <button class="btn btn-primary" id="repairBtn">
+                            <span class="material-icons">build_circle</span> 一键修复
+                        </button>
+                        <button class="btn btn-secondary" id="repairRescanBtn">
+                            <span class="material-icons">search</span> 重新检测
+                        </button>
+                    </div>
+                    <div class="k-msg" id="repairMsg"></div>
+                    <div id="repairBatches" style="margin-top:12px;"></div>
+                </div>
+            </div>
+
         </main>
     </div>
 </div>

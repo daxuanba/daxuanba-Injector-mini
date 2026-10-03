@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.20"
+CURRENT_VERSION = "2.21"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -5810,6 +5810,176 @@ class KernelHub:
                                "AppID 放到 Steam 主目录的 AppList 文件夹。"}
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    KERNEL_DLLS = {
+        'greenluma': [GREENLUMA_STEALTH_DLL, 'GreenLuma_2025_x64.dll', 'GreenLuma_2025_x86.dll',
+                      'LumaCore.dll', 'DLLInjector.exe'],
+        'steamtools': ['hid.dll', 'XInput1_4.dll', 'dwmapi.dll'],
+        'opensteamtool': ['OpenSteamTool.dll', 'dwmapi.dll', 'xinput1_4.dll', 'XInput1_4.dll'],
+    }
+    KERNEL_MARKS = ['greenluma_stealth_version.txt', 'greenluma_version.txt',
+                    'steamtools_version.txt', 'opensteamtool_version.txt']
+
+    def _quarantine_root(self) -> Path:
+        return self.b.project_root / 'quarantine'
+
+    def repair_scan(self) -> Dict[str, Any]:
+        sp = self.b.get_steam_path()
+        out: Dict[str, Any] = {'ok': False, 'steam_path': str(sp) if sp else '',
+                               'dlls': [], 'marks': [], 'htmlcache': '', 'batches': []}
+        if not sp or not sp.exists():
+            out['error'] = '没有检测到 Steam 目录'
+            return out
+        try:
+            disk_names = {f.lower(): f for f in os.listdir(sp)}
+        except Exception:
+            disk_names = {}
+        seen = set()
+        for kind, names in self.KERNEL_DLLS.items():
+            for n in names:
+                key = n.lower()
+                if key in seen or key not in disk_names:
+                    continue
+                real = disk_names[key]
+                p = sp / real
+                if p.exists():
+                    seen.add(key)
+                    out['dlls'].append({'name': real, 'size': p.stat().st_size,
+                                        'kernels': [k for k, v in self.KERNEL_DLLS.items() if n in v]})
+        for m in self.KERNEL_MARKS:
+            if (sp / m).exists():
+                out['marks'].append(m)
+        hc = Path(os.environ.get('LOCALAPPDATA', '')) / 'Steam' / 'htmlcache'
+        if hc.is_dir():
+            try:
+                out['htmlcache'] = str(hc)
+                out['htmlcache_size'] = sum(f.stat().st_size for f in hc.rglob('*') if f.is_file())
+            except Exception:
+                pass
+        qr = self._quarantine_root()
+        if qr.is_dir():
+            out['batches'] = sorted([b.name for b in qr.iterdir() if b.is_dir()], reverse=True)[:10]
+        out['ok'] = True
+        out['nothing'] = not (out['dlls'] or out['marks'] or out.get('htmlcache'))
+        return out
+
+    def repair(self, close_steam: bool = True, clear_cache: bool = True) -> Dict[str, Any]:
+        """一键修复：把内核代理 DLL 隔离 + 清 htmlcache，让 Steam 能重新起来。
+
+        绝不删除用户文件：全部 move 到本程序目录下的 quarantine/repair_<时间戳>/，
+        随时可以用 restore_repair 原样还回去。
+        """
+        sp = self.b.get_steam_path()
+        if not sp or not sp.exists():
+            return {'success': False, 'message': '没有检测到 Steam 目录。'}
+        stamp = time.strftime('%Y%m%d_%H%M%S')
+        batch = self._quarantine_root() / f'repair_{stamp}'
+        moved: List[str] = []
+        skipped: List[str] = []
+        errors: List[str] = []
+        notes: List[str] = []
+
+        if close_steam:
+            r = close_steam()
+            if r.get('forced'):
+                notes.append('Steam 没自己退出，已强制结束（并清理了可能被写坏的 htmlcache）')
+            elif r.get('already_closed'):
+                notes.append('Steam 当前没在运行')
+            else:
+                notes.append('Steam 已正常退出')
+
+        try:
+            batch.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return {'success': False, 'message': f'创建隔离目录失败：{e}'}
+
+        for n in [d['name'] for d in self.repair_scan().get('dlls', [])]:
+            src = sp / n
+            dst = batch / n
+            try:
+                if src.exists():
+                    shutil.move(str(src), str(dst))
+                    moved.append(n)
+            except Exception as e:
+                errors.append(f'{n}: {e}')
+        for m in self.KERNEL_MARKS:
+            src = sp / m
+            if not src.exists():
+                continue
+            try:
+                shutil.move(str(src), str(batch / m))
+                moved.append(m + '（版本标记）')
+            except Exception as e:
+                errors.append(f'{m}: {e}')
+
+        cache_moved = False
+        if clear_cache:
+            hc = Path(os.environ.get('LOCALAPPDATA', '')) / 'Steam' / 'htmlcache'
+            if hc.is_dir():
+                try:
+                    tgt = batch / 'htmlcache'
+                    shutil.move(str(hc), str(tgt))
+                    cache_moved = True
+                    notes.append('已把 htmlcache 整体挪走（它坏掉会导致 Steam 启动不弹窗、'
+                                 '日志刷 Failed creating offscreen shared JS context）')
+                except Exception as e:
+                    errors.append(f'htmlcache: {e}')
+
+        if not moved and not cache_moved:
+            shutil.rmtree(batch, ignore_errors=True)
+            return {'success': True, 'nothing': True, 'moved': [], 'cache_moved': False,
+                    'notes': ['Steam 目录里没有可隔离的内核文件，htmlcache 也不存在，无需修复。'],
+                    'message': '没有需要修的东西，Steam 目录是干净的。'}
+
+        msg = [f'修复完成，共隔离 {len(moved)} 项：',
+               '　' + '、'.join(moved) if moved else '　（没有内核文件）']
+        if cache_moved:
+            msg.append('　htmlcache 已挪走')
+        if notes:
+            msg.append('\n' + '\n'.join(notes))
+        if errors:
+            msg.append('\n失败：' + '；'.join(errors))
+        msg.append(f'\n\n这些文件没有删除，已挪到：{batch}')
+        msg.append('Steam 现在应该能正常启动了。要恢复内核，去「离线注入」页点「还原」即可。')
+        return {'success': True, 'moved': moved, 'batch': batch.name, 'batch_path': str(batch),
+                'cache_moved': cache_moved, 'notes': notes, 'errors': errors,
+                'message': '\n'.join(msg)}
+
+    def restore_repair(self, batch: str) -> Dict[str, Any]:
+        sp = self.b.get_steam_path()
+        if not sp or not sp.exists():
+            return {'success': False, 'message': '没有检测到 Steam 目录。'}
+        name = os.path.basename(str(batch or '')).strip()
+        if not name.startswith('repair_'):
+            return {'success': False, 'message': '批次名不合法。'}
+        src = self._quarantine_root() / name
+        if not src.is_dir():
+            return {'success': False, 'message': f'找不到隔离批次 {name}。'}
+        back, skipped, errors = [], [], []
+        for f in src.iterdir():
+            if f.name == 'htmlcache':
+                continue
+            dst = sp / f.name
+            try:
+                if dst.exists():
+                    skipped.append(f.name)
+                    continue
+                shutil.move(str(f), str(dst))
+                back.append(f.name)
+            except Exception as e:
+                errors.append(f'{f.name}: {e}')
+        if not back and not skipped:
+            shutil.rmtree(src, ignore_errors=True)
+        msg = [f'已还原 {len(back)} 项：' + ('、'.join(back) if back else '（无）')]
+        if skipped:
+            msg.append('跳过（Steam 目录里已有同名文件，没覆盖）：' + '、'.join(skipped))
+        if errors:
+            msg.append('失败：' + '；'.join(errors))
+        if not src.exists() or not any(src.iterdir()):
+            shutil.rmtree(src, ignore_errors=True)
+            msg.append('\n这个批次已清空并删除。htmlcache 不还原（它是缓存，重启 Steam 会自己重建）。')
+        return {'success': True, 'restored': back, 'skipped': skipped, 'errors': errors,
+                'message': '\n'.join(msg)}
 
     def uninstall_greenluma_stealth(self) -> Dict[str, Any]:
         """移除隐身版：有备份就还原原 user32.dll，没备份直接删。"""

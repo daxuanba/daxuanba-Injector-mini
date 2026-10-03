@@ -574,6 +574,47 @@ def updates_check():
         return jsonify({"success": False, "message": str(e)})
 
 
+@app.route('/api/kernel/repair/scan', methods=['GET'])
+def kernel_repair_scan():
+    try:
+        b = DxbBackend()
+        b.config = b._load_config_sync() or {}
+        return jsonify({'success': True, **(KernelHub(b).repair_scan())})
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/kernel/repair', methods=['POST'])
+def kernel_repair():
+    data = request.get_json(silent=True) or {}
+    try:
+        b = DxbBackend()
+        b.config = b._load_config_sync() or {}
+        r = KernelHub(b).repair(
+            close_steam=bool(data.get('close_steam', True)),
+            clear_cache=bool(data.get('clear_cache', True)))
+        return jsonify(r)
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/kernel/repair/restore', methods=['POST'])
+def kernel_repair_restore():
+    data = request.get_json(silent=True) or {}
+    try:
+        b = DxbBackend()
+        b.config = b._load_config_sync() or {}
+        return jsonify(KernelHub(b).restore_repair(str(data.get('batch') or '')))
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({'success': False, 'message': str(e)})
+
+
 @app.route('/api/steam/account', methods=['GET'])
 def steam_account_api():
     """本机 Steam 客户端的登录账号（读 loginusers.vdf，不需要联网也不需要 cookie）"""
