@@ -1,4 +1,3 @@
-// --- START OF FILE static/js/settings.js (MODIFIED WITH CUSTOM REPOS AND AUTO-UPDATE) ---
 class SettingsManager {
     constructor() {
         this.elements = {
@@ -22,7 +21,6 @@ class SettingsManager {
             unlockerPrefRadios: document.querySelectorAll('input[name="unlockerPref"]'),
             greenlumaRepo: document.getElementById('greenlumaRepo'),
             steamtoolsRepo: document.getElementById('steamtoolsRepo'),
-            // 依赖模块元素
             ostStatus: document.getElementById('ostStatus'),
             opensteamtoolRepo: document.getElementById('opensteamtoolRepo'),
             ostInstallBtn: document.getElementById('ostInstallBtn'),
@@ -32,13 +30,14 @@ class SettingsManager {
             glumaInstallBtn: document.getElementById('glumaInstallBtn'),
             glumaRecheckBtn: document.getElementById('glumaRecheckBtn'),
             glumaOfficialBtn: document.getElementById('glumaOfficialBtn'),
-            // NEW: 自定义清单库相关元素
+            nativeStatus: document.getElementById('nativeStatus'),
+            useNativeBtn: document.getElementById('useNativeBtn'),
+            updateSummary: document.getElementById('updateSummary'),
             checkUpdatesBtn: document.getElementById('checkUpdatesBtn'),
             addGithubRepoBtn: document.getElementById('addGithubRepoBtn'),
             addZipRepoBtn: document.getElementById('addZipRepoBtn'),
             githubReposList: document.getElementById('githubReposList'),
             zipReposList: document.getElementById('zipReposList'),
-            // 模态框元素
             addRepoModal: document.getElementById('addRepoModal'),
             repoModalTitle: document.getElementById('repoModalTitle'),
             repoName: document.getElementById('repoName'),
@@ -48,7 +47,6 @@ class SettingsManager {
             repoUrlGroup: document.getElementById('repoUrlGroup'),
             cancelRepoBtn: document.getElementById('cancelRepoBtn'),
             saveRepoBtn: document.getElementById('saveRepoBtn'),
-            // 更新相关模态框
             updateModal: document.getElementById('updateModal'),
             updateInfo: document.getElementById('updateInfo'),
             updateChangelog: document.getElementById('updateChangelog'),
@@ -57,7 +55,7 @@ class SettingsManager {
             ignoreUpdateBtn: document.getElementById('ignoreUpdateBtn'),
         };
         
-        this.currentRepoType = 'github'; // 'github' or 'zip'
+        this.currentRepoType = 'github';
         this.customRepos = { github: [], zip: [] };
         
         this.initialize();
@@ -75,21 +73,17 @@ class SettingsManager {
             this.elements.toggleConsoleBtn.addEventListener('click', () => this.toggleConsole());
         }
 
-        // NEW: 自定义清单库事件监听器
-        this.elements.checkUpdatesBtn.addEventListener('click', () => this.checkForUpdates());
+        this.elements.checkUpdatesBtn.addEventListener('click', () => this.checkAllUpdates());
         this.elements.addGithubRepoBtn.addEventListener('click', () => this.showAddRepoModal('github'));
         this.elements.addZipRepoBtn.addEventListener('click', () => this.showAddRepoModal('zip'));
         
-        // 模态框事件监听器
         this.elements.saveRepoBtn.addEventListener('click', () => this.saveRepo());
         this.elements.cancelRepoBtn.addEventListener('click', () => this.hideAddRepoModal());
         
-        // 更新模态框事件监听器
         this.elements.laterUpdateBtn.addEventListener('click', () => this.hideUpdateModal());
         this.elements.downloadUpdateBtn.addEventListener('click', () => this.downloadUpdate());
         this.elements.ignoreUpdateBtn.addEventListener('click', () => this.ignoreUpdate());
         
-        // 点击模态框背景关闭
         this.elements.addRepoModal.addEventListener('click', (e) => {
             if (e.target === this.elements.addRepoModal) this.hideAddRepoModal();
         });
@@ -97,10 +91,8 @@ class SettingsManager {
             if (e.target === this.elements.updateModal) this.hideUpdateModal();
         });
 
-        // 顶部分类导航：点击切换显示的配置分类
         this.setupCategoryTabs();
 
-        // 依赖模块安装
         if (this.elements.ostInstallBtn) this.elements.ostInstallBtn.addEventListener('click', () => this.installDependency('opensteamtool'));
         if (this.elements.stoolsInstallBtn) this.elements.stoolsInstallBtn.addEventListener('click', () => this.installDependency('steamtools'));
         if (this.elements.glumaInstallBtn) this.elements.glumaInstallBtn.addEventListener('click', () => this.installDependency('greenluma'));
@@ -110,8 +102,18 @@ class SettingsManager {
         });
         if (this.elements.glumaOfficialBtn) this.elements.glumaOfficialBtn.addEventListener('click', () => this.openExternal(
             'https://cs.rin.ru/forum/viewtopic.php?f=10&t=103709'));
+        if (this.elements.useNativeBtn) this.elements.useNativeBtn.addEventListener('click', async () => {
+            const r = await fetch('/api/config/update', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force_unlocker_type: 'native' })
+            });
+            const d = await r.json();
+            this.showSnackbar(d.success ? '已把入库方式设为「自研入库」，回首页直接入库即可'
+                                         : (d.message || '设置失败'), d.success ? 'success' : 'error');
+        });
 
         this.loadDependencyStatus();
+        this.checkAllUpdates();
     }
 
     setupCategoryTabs() {
@@ -180,7 +182,6 @@ class SettingsManager {
         }
     }
 
-    // NEW: 检查更新功能
     async checkForUpdates() {
         const btn = this.elements.checkUpdatesBtn;
         const originalContent = btn.innerHTML;
@@ -211,9 +212,7 @@ class SettingsManager {
         }
     }
 
-    // NEW: 显示更新模态框
     showUpdateModal(updateInfo) {
-        // 生成更新信息
         const infoHtml = `
             <div class="update-info-item">
                 <span class="update-info-label">当前版本:</span>
@@ -230,10 +229,8 @@ class SettingsManager {
         `;
         this.elements.updateInfo.innerHTML = infoHtml;
         
-        // 生成更新日志
         this.elements.updateChangelog.textContent = updateInfo.release_body || '暂无更新日志';
         
-        // 保存更新信息到模态框
         this.elements.updateModal.dataset.updateUrl = updateInfo.release_url;
         this.elements.updateModal.dataset.latestVersion = updateInfo.latest_version;
         
@@ -267,7 +264,6 @@ class SettingsManager {
     ignoreUpdate() {
         const latestVersion = this.elements.updateModal.dataset.latestVersion;
         if (latestVersion) {
-            // 这里可以保存忽略的版本信息到本地存储
             localStorage.setItem('ignoredVersion', latestVersion);
             this.showSnackbar(`已忽略版本 ${latestVersion}`, 'info');
         }
@@ -276,41 +272,72 @@ class SettingsManager {
 
     async loadDependencyStatus() {
         try {
-            const response = await fetch('/api/dependency/status');
+            const response = await fetch('/api/kernel/status');
             const data = await response.json();
             if (!data.success) return;
-            const render = (el, st) => {
-                if (!el) return;
-                const ok = st && st.installed;
-                const ver = (st && st.version) ? ` v${st.version}` : '';
-                el.innerHTML = ok
-                    ? `<span class="status-dot ok"></span><span class="status-text">已安装${ver}</span>`
-                    : `<span class="status-dot warn"></span><span class="status-text">未安装</span>`;
-            };
-            render(this.elements.ostStatus, data.opensteamtool);
-            render(this.elements.stoolsStatus, data.steamtools);
-            // GreenLuma 单独渲染：额外显示 AppList 条数与「是否已配镜像仓库」
-            const gl = data.greenluma;
-            const glEl = this.elements.glumaStatus;
-            if (glEl) {
-                if (gl && gl.installed) {
-                    const ver = gl.version ? ` v${gl.version}` : '';
-                    const names = (gl.dlls || []).slice(0, 2).join(', ') || (gl.exe ? 'GreenLuma.exe' : '');
-                    glEl.innerHTML = `<span class="status-dot ok"></span><span class="status-text">已安装${ver}`
-                        + `　·　AppList ${gl.applist_count || 0} 个</span>`;
-                    glEl.title = `${names}\nAppList: ${gl.applist_dir || '未创建'}`
-                        + `\n仓库: ${gl.repo || '未配置（官方不在 GitHub）'}`;
-                } else if (gl) {
-                    glEl.innerHTML = `<span class="status-dot warn"></span><span class="status-text">未安装`
-                        + `${gl.manual_only ? '　·　未配镜像仓库，需手动安装（点「官方下载页」）' : ''}</span>`;
-                    glEl.title = `Steam 路径: ${gl.steam_path || '未检测到'}\n仓库: ${gl.repo || '未配置'}`;
-                } else {
-                    glEl.innerHTML = '<span class="status-text">检测中...</span>';
+            const STATE_TXT = { none: '未安装', install: '可安装', latest: '已是最新',
+                                update: '可更新', unknown: '版本未知' };
+            const verCmp = (a, b) => {
+                const pa = String(a || '').replace(/^v/i, '').split('.');
+                const pb = String(b || '').replace(/^v/i, '').split('.');
+                const n = Math.max(pa.length, pb.length);
+                for (let i = 0; i < n; i++) {
+                    const x = parseInt(pa[i], 10) || 0, y = parseInt(pb[i], 10) || 0;
+                    if (x !== y) return x > y ? 1 : -1;
                 }
+                return 0;
+            };
+            const render = (el, kind) => {
+                if (!el) return;
+                const st = (data.kernels || {})[kind] || {};
+                if (st.builtin) {
+                    el.innerHTML = `<span class="status-dot ok"></span><span class="status-text">内置免安装`
+                        + `${st.version ? ' v' + st.version : ''}</span>`;
+                    el.title = st.note || '';
+                    return;
+                }
+                const cls = st.update_state === 'update' ? 'warn' : (st.installed ? 'ok' : '');
+                const local = st.version || (st.installed ? '已安装' : '未安装');
+                const remote = st.remote_version ? `　·　最新 ${st.remote_version}` : '　·　最新未取到';
+                const state = st.update_state ? `　·　${STATE_TXT[st.update_state] || ''}` : '';
+                el.innerHTML = `<span class="status-dot ${cls}"></span>`
+                    + `<span class="status-text">${local}${remote}${state}</span>`;
+                el.title = (st.remote_note || '') + (st.files && st.files.length ? ('\n已就位：' + st.files.join('、')) : '');
+            };
+            render(this.elements.ostStatus, 'opensteamtool');
+            render(this.elements.stoolsStatus, 'steamtools');
+            render(this.elements.glumaStatus, 'greenluma');
+            if (this.elements.nativeStatus) render(this.elements.nativeStatus, 'native');
+            this._kernelPollTimer && clearInterval(this._kernelPollTimer);
+            if (this._kInstalling) {
+                this._kernelPollTimer = setInterval(() => this._pollKernelProgress(), 900);
             }
         } catch (e) {
-            console.error('加载依赖状态失败', e);
+            console.error('加载内核状态失败', e);
         }
+    }
+
+    async _pollKernelProgress() {
+        const kind = this._kInstalling;
+        if (!kind) { clearInterval(this._kernelPollTimer); return; }
+        try {
+            const r = await fetch('/api/kernel/progress');
+            const d = await r.json();
+            const p = ((d.progress || {})[kind]) || {};
+            const bar = document.getElementById(`kprog-${kind}`);
+            const msg = document.getElementById(`kmsg-${kind}`);
+            if (bar) {
+                bar.classList.add('show');
+                const i = bar.querySelector('i');
+                if (i) i.style.width = Math.max(0, Math.min(100, p.percent || 0)) + '%';
+            }
+            if (msg && p.message != null) { msg.textContent = p.message; }
+            if (p.running === false) {
+                clearInterval(this._kernelPollTimer);
+                this._kInstalling = null;
+                setTimeout(() => this.loadDependencyStatus(), 600);
+            }
+        } catch (e) { /* ignore */ }
     }
 
     async installDependency(kind) {
@@ -324,34 +351,60 @@ class SettingsManager {
         const original = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = '<span class="material-icons spin">hourglass_top</span> 下载中...';
+        this._kInstalling = kind;
         try {
-            const response = await fetch('/api/dependency/install', {
+            const response = await fetch('/api/kernel/install', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ kind, force: false })
+                body: JSON.stringify({ kind, force: true })
             });
             const data = await response.json();
-            if (data.need_manual) {
-                // GreenLuma 官方不在 GitHub：如实告诉用户，并询问是否打开官方下载页
-                const go = window.confirm(`${data.message}\n\n现在用系统浏览器打开官方下载页？`);
-                if (go && data.official_url) await this.openExternal(data.official_url);
-                return;
-            }
             if (data.success) {
                 this.showSnackbar(data.message, 'info');
-                setTimeout(() => this.loadDependencyStatus(), 4000);
-                setTimeout(() => this.loadDependencyStatus(), 9000);
+                this._pollKernelProgress();
             } else {
                 this.showSnackbar(`安装失败: ${data.message}`, 'error');
+                this._kInstalling = null;
             }
         } catch (e) {
             this.showSnackbar(`安装出错: ${e.message}`, 'error');
+            this._kInstalling = null;
         } finally {
-            setTimeout(() => { btn.disabled = false; btn.innerHTML = original; }, 1500);
+            setTimeout(() => { btn.disabled = false; btn.innerHTML = original; }, 2500);
         }
     }
 
-    // 用系统默认浏览器打开白名单外链（内置窗口不外跳，只有明确点按钮才走系统浏览器）
+    async checkAllUpdates() {
+        const btn = this.elements.checkUpdatesBtn;
+        if (btn) { btn.disabled = true; }
+        if (this.elements.updateSummary) { this.elements.updateSummary.textContent = '正在去上游查最新版本…'; }
+        try {
+            const r = await fetch('/api/updates/check');
+            const d = await r.json();
+            if (!d.success) { this.showSnackbar(d.message || '检查失败', 'error'); return; }
+            const app = d.app || {}, ks = d.kernels || {};
+            const parts = [`应用：${app.has_update ? `${app.local} → ${app.remote} 可更新`
+                : (app.ok ? `${app.local} 已是最新` : '版本未取到')}`];
+            Object.keys(ks).forEach(k => {
+                const v = ks[k] || {};
+                const nm = ({ opensteamtool: 'OpenSteamTool', steamtools: 'SteamTools',
+                              greenluma: 'GreenLuma', native: '自研入库' })[k] || k;
+                if (v.builtin) { parts.push(`${nm}：内置免安装`); return; }
+                if (!v.ok) { parts.push(`${nm}：未取到`); return; }
+                if (!v.installed) { parts.push(`${nm}：未安装（最新 ${v.remote}）`); return; }
+                parts.push(`${nm}：${v.local} → ${v.remote} ${v.has_update ? '可更新' : '已是最新'}`);
+            });
+            if (this.elements.updateSummary) { this.elements.updateSummary.textContent = parts.join('　|　'); }
+            const anyUpd = app.has_update || Object.values(ks).some(v => v && v.has_update);
+            this.showSnackbar(anyUpd ? '有可更新的内容' : '全部已是最新', anyUpd ? 'info' : 'success');
+            this.loadDependencyStatus();
+        } catch (e) {
+            this.showSnackbar(`检查更新出错: ${e.message}`, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; }
+        }
+    }
+
     async openExternal(url) {
         try {
             const r = await fetch('/api/app/open_url', {
@@ -366,7 +419,6 @@ class SettingsManager {
         }
     }
 
-    // NEW: 显示添加仓库模态框
     showAddRepoModal(type) {
         this.currentRepoType = type;
         
@@ -382,7 +434,6 @@ class SettingsManager {
             this.elements.repoUrl.placeholder = '例如：https://example.com/download/{app_id}.zip';
         }
         
-        // 清空表单
         this.elements.repoName.value = '';
         this.elements.repoPath.value = '';
         this.elements.repoUrl.value = '';
@@ -395,7 +446,6 @@ class SettingsManager {
         this.elements.addRepoModal.classList.remove('show');
     }
 
-    // NEW: 保存仓库
     saveRepo() {
         const name = this.elements.repoName.value.trim();
         
@@ -429,7 +479,6 @@ class SettingsManager {
             repoData = { name, url };
         }
         
-        // 检查是否重复
         const existingRepos = this.customRepos[this.currentRepoType];
         const isDuplicate = existingRepos.some(repo => 
             repo.name === name || 
@@ -442,13 +491,11 @@ class SettingsManager {
             return;
         }
         
-        // 添加到列表
         this.customRepos[this.currentRepoType].push(repoData);
         this.renderReposList();
         this.hideAddRepoModal();
         this.showSnackbar(`成功添加${this.currentRepoType === 'github' ? 'GitHub仓库' : 'ZIP清单库'}`, 'success');
         
-        // FIXED: 添加保存配置调用
         this.saveConfig().then(() => {
             console.log('自定义仓库配置已保存到服务器');
         }).catch(error => {
@@ -457,14 +504,12 @@ class SettingsManager {
         });
     }
 
-    // NEW: 删除仓库
     removeRepo(type, index) {
         if (confirm('确定要删除这个仓库吗？')) {
             this.customRepos[type].splice(index, 1);
             this.renderReposList();
             this.showSnackbar('仓库已删除', 'success');
             
-            // FIXED: 添加保存配置调用
             this.saveConfig().then(() => {
                 console.log('删除仓库后配置已保存到服务器');
             }).catch(error => {
@@ -474,11 +519,8 @@ class SettingsManager {
         }
     }
 
-    // NEW: 渲染仓库列表
     renderReposList() {
-        // 渲染GitHub仓库列表
         this.renderReposListByType('github', this.elements.githubReposList);
-        // 渲染ZIP仓库列表
         this.renderReposListByType('zip', this.elements.zipReposList);
     }
 
@@ -509,12 +551,10 @@ class SettingsManager {
             </div>
         `).join('');
 
-        // FIXED: 为每个删除按钮添加事件监听器，而不是使用onclick属性
         container.querySelectorAll('.repo-delete-btn').forEach((btn) => {
             btn.addEventListener('click', (event) => {
-                event.stopPropagation(); // 防止事件冒泡
+                event.stopPropagation();
                 
-                // 从按钮的父级元素获取数据属性
                 const repoItem = btn.closest('.repo-item');
                 const repoType = repoItem.dataset.repoType;
                 const repoIndex = parseInt(repoItem.dataset.repoIndex, 10);
@@ -538,13 +578,11 @@ class SettingsManager {
                 this.elements.disableLogging.checked = data.config.disable_logging || false;
                 this.elements.showConsoleOnStartup.checked = data.config.show_console_on_startup || false;
 
-                // 加载强制解锁工具设置
                 const forceUnlockerValue = data.config.force_unlocker_type || 'auto';
                 this.elements.forceUnlockerRadios.forEach(radio => {
                     radio.checked = radio.value === forceUnlockerValue;
                 });
 
-                // 加载解锁器自动安装设置
                 this.elements.autoInstallUnlocker.checked = data.config.auto_install_unlocker !== false;
                 const prefValue = data.config.unlocker_preference || 'greenluma';
                 this.elements.unlockerPrefRadios.forEach(radio => {
@@ -554,7 +592,6 @@ class SettingsManager {
                 this.elements.steamtoolsRepo.value = data.config.steamtools_repo || '';
                 this.elements.opensteamtoolRepo.value = data.config.opensteamtool_repo || '';
 
-                // NEW: 加载自定义清单库配置
                 this.customRepos = data.config.custom_repos || { github: [], zip: [] };
                 this.renderReposList();
 
@@ -568,7 +605,6 @@ class SettingsManager {
     }
 
     async saveConfig() {
-        // 获取强制解锁工具设置
         const selectedUnlockerRadio = document.querySelector('input[name="forceUnlocker"]:checked');
         const forceUnlockerValue = selectedUnlockerRadio ? selectedUnlockerRadio.value : 'auto';
 
@@ -585,7 +621,6 @@ class SettingsManager {
             greenluma_repo: this.elements.greenlumaRepo.value.trim(),
             steamtools_repo: this.elements.steamtoolsRepo.value.trim(),
             opensteamtool_repo: this.elements.opensteamtoolRepo.value.trim(),
-            // NEW: 保存自定义清单库配置
             custom_repos: this.customRepos,
         };
 
@@ -635,7 +670,6 @@ class SettingsManager {
     }
 }
 
-// 创建全局实例以便在HTML中调用
 let settingsManager;
 
 document.addEventListener('DOMContentLoaded', () => {

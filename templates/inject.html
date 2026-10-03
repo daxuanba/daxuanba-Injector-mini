@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>离线注入 - 大轩巴入库器mini</title>
+    <link rel="icon" href="{{ url_for('static', filename='dxb-word.svg') }}" type="image/svg+xml"/>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/manager.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dx-theme.css') }}">
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('dxb-theme-preference') || 'dark';
+                document.documentElement.classList.add(t === 'dark' ? 'dxb-dark' : 'dxb-light');
+            } catch (e) {
+                document.documentElement.classList.add('dxb-dark');
+            }
+        })();
+    </script>
+    <style>
+        .hint-box{font-size:12.5px;line-height:1.65;padding:11px 13px;border-radius:11px;
+            background:var(--md-sys-color-surface-container-high);color:var(--md-sys-color-on-surface-variant);}
+        .row-flex{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
+        .k-msg{font-size:12.5px;margin-top:12px;color:var(--md-sys-color-on-surface-variant);
+            min-height:18px;white-space:pre-line;line-height:1.6;}
+        .warn-box{font-size:12.5px;line-height:1.65;padding:11px 13px;border-radius:11px;
+            margin-bottom:14px;white-space:pre-line;
+            background:var(--md-sys-color-warning-container, rgba(255,183,77,.14));
+            color:var(--md-sys-color-on-warning-container, #ffcc80);}
+        .mod-table{width:100%;border-collapse:collapse;margin-top:12px;font-size:12.5px;}
+        .mod-table th,.mod-table td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--md-sys-color-outline-variant);}
+        .mod-table th{color:var(--md-sys-color-on-surface-variant);font-weight:600;}
+        .mod-table td{color:var(--md-sys-color-on-surface);word-break:break-all;}
+        .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;}
+        .tag-dxb{background:var(--md-sys-color-success-container,rgba(76,175,80,.2));color:var(--md-sys-color-success,#66bb6a);}
+        .tag-sys{background:var(--md-sys-color-surface-variant);color:var(--md-sys-color-on-surface-variant);}
+    </style>
+</head>
+<body>
+<div id="background-overlay"></div>
+<div class="app-container">
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <span class="dxb-wordmark">大轩巴</span>
+            <div class="sidebar-version">入库器mini</div>
+        </div>
+        <nav class="sidebar-nav">
+            <a class="nav-item" href="/"><span class="material-icons">home</span><span>首页</span></a>
+            <a class="nav-item" href="/manager"><span class="material-icons">library_books</span><span>入库管理</span></a>
+            <a class="nav-item" href="/craft"><span class="material-icons">auto_fix_high</span><span>手搓</span></a>
+            <a class="nav-item" href="/free"><span class="material-icons">card_giftcard</span><span>免费游戏</span></a>
+            <a class="nav-item" href="/recommend"><span class="material-icons">local_fire_department</span><span>推荐</span></a>
+            <a class="nav-item" href="/tools"><span class="material-icons">build</span><span>工具箱</span></a>
+            <a class="nav-item" href="/downloader"><span class="material-icons">download</span><span>下载管理</span></a>
+            <a class="nav-item active" href="/inject"><span class="material-icons">colorize</span><span>离线注入</span></a>
+            <a class="nav-item" href="/settings"><span class="material-icons">settings</span><span>设置</span></a>
+            <a class="nav-item" href="/about"><span class="material-icons">info</span><span>关于</span></a>
+        </nav>
+        <div class="sidebar-footer">
+            <button class="nav-action" id="themeToggleBtn" title="切换主题"><span class="material-icons">dark_mode</span></button>
+            <button class="nav-action" id="backgroundSettingsBtn" title="自定义背景"><span class="material-icons">wallpaper</span></button>
+            <button class="nav-action" id="shutdownBtn" title="关闭应用"><span class="material-icons">power_settings_new</span></button>
+        </div>
+    </aside>
+    <div class="content-area">
+        <header class="content-header">
+            <span class="dxb-wordmark">大轩巴</span>
+            <h1 class="app-title">离线注入</h1>
+            <div class="content-header-actions">
+                <button class="btn btn-text" id="checkInjectionBtn" title="重新检测">
+                    <span class="material-icons">refresh</span><span class="settings-text">重新检测</span>
+                </button>
+            </div>
+        </header>
+        <main class="manager-main-content">
+
+            <div class="card manager-card">
+                <div class="card-header"><h2>启动 Steam</h2></div>
+                <div class="card-content">
+                    <div class="hint-box" style="margin-bottom:14px;">
+                        <b>普通启动</b>：直接拉起 Steam，不带任何注入。<br>
+                        <b>GreenLuma 隐身启动</b>：Steam 主目录里放改写过的 user32.dll，Steam 启动时自己加载
+                        —— 不用注入器、不用管理员、没有窗口，也不怕 Steam 更新。<br>
+                        <b>注入版启动</b>：用 DLLInjector.exe 往 steam.exe 挂钩子，同样全程无窗口，但对 Steam 版本敏感。
+                    </div>
+                    <div id="conflictBox"></div>
+                    <div class="row-flex">
+                        <button class="btn btn-secondary" id="launchNormalBtn">
+                            <span class="material-icons">play_arrow</span> 普通启动 Steam
+                        </button>
+                        <button class="btn btn-primary" id="launchGlBtn">
+                            <span class="material-icons">bolt</span> GreenLuma 隐身启动
+                        </button>
+                        <button class="btn btn-text" id="launchGlInjectBtn">
+                            <span class="material-icons">colorize</span> 注入版启动
+                        </button>
+                    </div>
+                    <div class="k-msg" id="launchMsg"></div>
+                </div>
+            </div>
+
+            <div class="card manager-card">
+                <div class="card-header"><h2>注入检测（真查进程模块）</h2></div>
+                <div class="card-content">
+                    <div class="hint-box">
+                        不看界面、不看日志，直接枚举 steam.exe 已加载的 DLL 路径。
+                        同一个 user32.dll 会同时出现两条（系统一份、Steam 目录一份），
+                        <b>只有 Steam 目录那条带「本程序」标签</b>，那才是 GreenLuma 隐身版真正生效的证据。
+                    </div>
+                    <div class="k-msg" id="injectMsg">正在检测…</div>
+                    <table class="mod-table" id="modTable" style="display:none;">
+                        <thead><tr><th style="width:200px;">模块</th><th>实际加载路径</th><th style="width:90px;">来源</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+        </main>
+    </div>
+</div>
+
+<div class="snackbar" id="snackbar">
+    <div class="snackbar-content">
+        <span id="snackbarMessage"></span>
+        <button class="snackbar-action" id="snackbarClose"><span class="material-icons">close</span></button>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
+<script src="{{ url_for('static', filename='js/inject-page.js') }}"></script>
+<script src="{{ url_for('static', filename='js/background-manager.js') }}"></script>
+</body>
+</html>

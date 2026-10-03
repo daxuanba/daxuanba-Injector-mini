@@ -1,4 +1,3 @@
-// --- 工具箱：Steam 错误诊断 / 一键修复 + 下载管理 ---
 class ToolsApp {
     constructor() {
         this.elements = {
@@ -27,12 +26,12 @@ class ToolsApp {
             snackbarClose: document.getElementById('snackbarClose'),
         };
         this.diag = null;
-        this.accelCategory = 'steam';  // 当前加速分类：steam / browser / github
-        this.accelMode = 'hosts';      // 加速方式：hosts（写系统hosts，需管理员）/ free（免hosts，改浏览器解析）
-        this.accel = null;        // 最近一次测速结果（按当前分类）
-        this.accelStatus = null;  // hosts 加速块状态
-        this.accelFree = null;    // 免hosts加速状态
-        this.privilege = null;    // 真实权限检测结果（/api/app/privilege）
+        this.accelCategory = 'steam';
+        this.accelMode = 'hosts';
+        this.accel = null;
+        this.accelStatus = null;
+        this.accelFree = null;
+        this.privilege = null;
         this.store = window.DxbTaskLog ? window.DxbTaskLog.local('tools') : null;
         this.initialize();
     }
@@ -42,8 +41,8 @@ class ToolsApp {
     }
 
     initialize() {
-        this.elements.diagBtn.addEventListener('click', () => this.diagnose());
-        this.elements.fixAllBtn.addEventListener('click', () => this.repairAll());
+        if (this.elements.diagBtn) this.elements.diagBtn.addEventListener('click', () => this.diagnose());
+        if (this.elements.fixAllBtn) this.elements.fixAllBtn.addEventListener('click', () => this.repairAll());
         this.elements.dlRefreshBtn.addEventListener('click', () => this.loadDownloads());
         this.elements.dlOpenSteamBtn.addEventListener('click', () => this.openSteamDownloads());
         this.elements.snackbarClose.addEventListener('click', () => this.hideSnackbar());
@@ -58,7 +57,6 @@ class ToolsApp {
         this.diagnose();
         this.loadDownloads();
     }
-
     showSnackbar(msg, type = 'info') {
         const sb = this.elements.snackbar;
         this.elements.snackbarMessage.textContent = msg;
@@ -79,9 +77,9 @@ class ToolsApp {
         return `${i === 0 ? Math.round(n) : n.toFixed(2)} ${u[i]}`;
     }
 
-    /* ---------- 诊断 / 修复 ---------- */
 
     async diagnose(silent = false) {
+        if (!this.elements.diagBtn || !this.elements.diagList) return;
         this.elements.diagBtn.disabled = true;
         this.elements.diagList.innerHTML = '<div class="empty-hint">正在体检，请稍候…</div>';
         if (!silent) this.log('info', '开始 Steam 环境体检…');
@@ -104,6 +102,7 @@ class ToolsApp {
 
     renderDiag(d) {
         const chip = this.elements.diagSummary;
+        if (!chip || !this.elements.diagList || !this.elements.diagFixBar) return;
         const cls = d.issues ? 'bad' : (d.warnings ? 'warn' : '');
         chip.innerHTML = `<span class="summary-chip ${cls}">${d.summary}</span>`;
 
@@ -126,7 +125,7 @@ class ToolsApp {
         const bar = this.elements.diagFixBar;
         bar.innerHTML = '';
         const fixes = d.fixes || [];
-        this.elements.fixAllBtn.disabled = fixes.length === 0;
+        if (this.elements.fixAllBtn) this.elements.fixAllBtn.disabled = fixes.length === 0;
         if (!fixes.length) return;
         fixes.forEach(f => {
             const b = document.createElement('button');
@@ -170,7 +169,6 @@ class ToolsApp {
         await this.loadDownloads();
     }
 
-    /* ---------- 下载管理 ---------- */
 
     async loadDownloads(silent = false) {
         if (!silent) this.elements.dlActive.innerHTML = '<div class="empty-hint">正在加载下载列表…</div>';
@@ -304,7 +302,6 @@ class ToolsApp {
         }
     }
 
-    /* ---------- Steam 加速（hosts 优选） ---------- */
 
     static latClass(ms) {
         if (ms == null) return 'bad';
@@ -320,7 +317,7 @@ class ToolsApp {
             if (cat === this.accelCategory) return;
             this.accelCategory = cat;
             tabs.forEach(x => x.classList.toggle('active', x === t));
-            this.accel = null;            // 切分类清空已有测速结果
+            this.accel = null;
             this.accelStatus = null;
             this.elements.accelList.innerHTML =
                 '<div class="empty-hint">已切换到「' + t.textContent +
@@ -354,7 +351,6 @@ class ToolsApp {
         if (this.elements.accelRestoreBtn) {
             this.elements.accelRestoreBtn.title = free ? '移除免hosts加速映射' : '移除 hosts 加速记录';
         }
-        // 免hosts 模式提示条
         const fb = this.elements.accelFreeBar;
         if (fb) fb.innerHTML = '';
     }
@@ -377,7 +373,6 @@ class ToolsApp {
         }
     }
 
-    // 真实权限检测：问后端当前进程到底是不是管理员（IsUserAnAdmin），不靠前端猜
     async refreshPrivilege(verbose) {
         try {
             const r = await fetch('/api/app/privilege', { cache: 'no-store' });
@@ -413,7 +408,6 @@ class ToolsApp {
         const bar = this.elements.accelAdminBar;
         bar.innerHTML = '';
 
-        // 本机已有本地反代型加速器（Steam 社区 302 / Steam++ / Watt Toolkit）时会互相覆盖
         const la = s.local_accel;
         if (la && la.active) {
             const w = document.createElement('div');
@@ -431,7 +425,6 @@ class ToolsApp {
             bar.appendChild(w);
         }
 
-        // 真实权限检测条：始终显示后端真实返回的权限状态 + 重新检测 + 提权重启
         const pv = this.privilege;
         const perm = document.createElement('div');
         perm.className = 'accel-warn' + ((pv && pv.admin) ? ' accel-ok' : '');
@@ -460,7 +453,6 @@ class ToolsApp {
         }
         bar.appendChild(perm);
 
-        // hosts 模式下即使是管理员也写不进 hosts：多半被安全软件/组策略锁了
         if (this.accelMode === 'hosts' && !s.writable && pv && pv.admin) {
             const w = document.createElement('div');
             w.className = 'accel-warn';
@@ -682,24 +674,20 @@ class ToolsApp {
                 return;
             }
             if (!d.success) {
-                // 真实失败：UAC 被拒 / 没有提权通道
                 this.showSnackbar(d.message || '提权失败。', d.denied ? 'warning' : 'error');
                 this.log('warn', d.message || '提权失败');
                 await this.refreshPrivilege(false);
                 return;
             }
-            // UAC 已通过：等管理员实例起来，轮询真实权限
             this.showSnackbar(d.message || '已通过 UAC，正在以管理员身份重启…', 'success');
             this.log('info', 'UAC 已通过，等待管理员实例启动…');
             this.waitForElevatedRestart();
         } catch (e) {
-            // 旧实例正在关闭（连接被中断）属预期，转而轮询新实例
             this.log('info', '当前窗口正在关闭，等待管理员实例…');
             this.waitForElevatedRestart();
         }
     }
 
-    // 重启后真实检测：轮询 /api/app/privilege 直到新实例报「管理员」
     waitForElevatedRestart() {
         const deadline = Date.now() + 60000;
         let stop = false;

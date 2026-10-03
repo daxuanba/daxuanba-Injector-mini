@@ -1,4 +1,3 @@
-// --- START OF FILE static/js/background-manager.js (FIXED) ---
 
 class BackgroundManager {
     constructor() {
@@ -74,26 +73,21 @@ class BackgroundManager {
         }
     }
 
-    // **** 这是主要修复点 ****
     applyStyles() {
         const blur = this.elements.blurSlider.value;
         const saturation = this.elements.saturationSlider.value;
         const brightness = this.elements.brightnessSlider.value;
 
-        // 更新滑块旁边的数值显示
         this.elements.blurValue.textContent = `${blur}px`;
         this.elements.saturationValue.textContent = `${saturation}%`;
         this.elements.brightnessValue.textContent = `${brightness}%`;
 
         if (this.currentImagePath) {
-            // 如果有图片路径，则设置背景图片和滤镜
             this.elements.overlay.style.backgroundImage = `url('/${this.currentImagePath}?v=${new Date().getTime()}')`;
             const filterValue = `blur(${blur}px) saturate(${saturation}%) brightness(${brightness}%)`;
             this.elements.overlay.style.filter = filterValue;
-            // backdrop-filter 是可选的，但效果更好
             this.elements.overlay.style.backdropFilter = filterValue;
         } else {
-            // 如果没有图片路径（即默认状态），则移除背景和所有滤镜
             this.elements.overlay.style.backgroundImage = 'none';
             this.elements.overlay.style.filter = 'none';
             this.elements.overlay.style.backdropFilter = 'none';
@@ -109,12 +103,10 @@ class BackgroundManager {
         this.elements.saturationValue.textContent = `${saturation}%`;
         this.elements.brightnessValue.textContent = `${brightness}%`;
 
-        // 在实时预览时，我们总是应用滤镜
         const filterValue = `blur(${blur}px) saturate(${saturation}%) brightness(${brightness}%)`;
         this.elements.overlay.style.filter = filterValue;
         this.elements.overlay.style.backdropFilter = filterValue;
     }
-    // **** 修复结束 ****
 
     async handleFileSelect(event) {
         const file = event.target.files[0];
@@ -191,7 +183,6 @@ class BackgroundManager {
         this.elements.modal.classList.remove('show');
         setTimeout(() => {
             this.elements.modal.style.display = 'none';
-            // 关闭时重新加载设置，以撤销任何未保存的更改
             this.loadSettings();
         }, 300);
     }

@@ -1,5 +1,4 @@
 
-// --- 页面内确认框（替代原生 confirm，避免 QT 原生弹窗） ---
 function dxbConfirm(message) {
     return new Promise((resolve) => {
         const overlay = document.createElement('div');
@@ -25,12 +24,10 @@ function dxbConfirm(message) {
         document.body.appendChild(overlay);
     });
 }
-// --- START OF FILE static/js/theme-toggle.js (MODIFIED for Shutdown) ---
 document.addEventListener('DOMContentLoaded', () => {
     const themeToggleBtn = document.getElementById('themeToggleBtn');
     const shutdownBtn = document.getElementById('shutdownBtn');
 
-    // --- Theme Toggle Logic ---
     if (themeToggleBtn) {
         const body = document.body;
         const root = document.documentElement;
@@ -78,19 +75,16 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // --- Shutdown Logic ---
     if (shutdownBtn) {
         shutdownBtn.addEventListener('click', () => {
             dxbConfirm('确定要关闭应用吗？将同时关闭网页和后台程序。').then((ok) => {
                 if (!ok) return;
-                // Inform the user
                 document.body.innerHTML = `
                     <div class="dxb-shutdown">
                         <h1>正在关闭应用...</h1>
                         <p>您可以安全地关闭此浏览器标签页。</p>
                     </div>`;
 
-                    // Send shutdown request to the server
                     fetch('/api/shutdown', { method: 'POST' })
                         .catch(error => {
                             console.error('无法连接到服务器以执行关闭命令:', error);
@@ -100,8 +94,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-// --- 加载遮罩防卡死：万一某次请求异常导致遮罩没被隐藏，超时后自动隐藏，
-//     避免遮罩一直盖在页面上、拦截点击（表现为「点了没反应 / 下载按钮被挡住」）。---
 setInterval(() => {
     document.querySelectorAll('.loading-overlay.visible').forEach(el => {
         const since = parseInt(el.dataset.dxbShownAt || '0', 10) || 0;

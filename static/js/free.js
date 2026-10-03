@@ -1,6 +1,3 @@
-// --- 免费游戏页：账号登录（内置浏览器）+ 分页 + 入库/安装 ---
-// 说明：入库 = 写 addappid 永久解锁清单；安装 = 调 Steam 客户端下载本体。
-//       入库必须先登录（未登录会自动拉起内置浏览器登录窗口）。
 class FreeGamesApp {
     constructor() {
         this.elements = {
@@ -38,7 +35,6 @@ class FreeGamesApp {
         this.games = [];
         this.pollTimer = null;
         this.busy = false;
-        // 入库日志走本地快照：切到别的页面再回来，日志还在
         this.store = window.DxbTaskLog ? window.DxbTaskLog.local('free') : null;
         this.initialize();
     }
@@ -55,8 +51,19 @@ class FreeGamesApp {
         this.elements.nextPageBtn.addEventListener('click', () => { if (this.page < this.totalPages()) { this.page++; this.renderGames(); } });
         this.elements.injectPageBtn.addEventListener('click', () => this.inject(this.currentPageGames()));
         this.elements.injectAllBtn.addEventListener('click', () => this.inject(this.games));
-        this.elements.loginBtn.addEventListener('click', () => this.browserLogin());
-        this.elements.logoutBtn.addEventListener('click', () => this.logout());
+        if (this.elements.loginBtn) this.elements.loginBtn.addEventListener('click', () => this.browserLogin());
+        if (this.elements.logoutBtn) this.elements.logoutBtn.addEventListener('click', () => this.logout());
+        const reload = document.getElementById('accountReloadBtn');
+        if (reload) reload.addEventListener('click', () => this.restoreLogin());
+        const avToggle = document.getElementById('avatarToggleBtn');
+        if (avToggle) {
+            avToggle.addEventListener('click', () => {
+                const on = !this.wantAvatar();
+                try { localStorage.setItem('dxb-show-avatar', on ? '1' : '0'); } catch (e) { /* ignore */ }
+                this.syncAvatarToggleBtn();
+                this.restoreLogin();
+            });
+        }
         this.elements.snackbarClose.addEventListener('click', () => this.hideSnackbar());
         if (this.elements.manualToggleBtn) {
             this.elements.manualToggleBtn.addEventListener('click', () => {
@@ -75,10 +82,13 @@ class FreeGamesApp {
         this.restoreLogin();
     }
 
-    /* ---------- 账号登录 ---------- */
 
-    /** 登录态：内置浏览器已登录成功，或配置里存过 Cookie */
     async isLoggedIn() {
+        try {
+            const r = await fetch('/api/steam/account');
+            const d = await r.json();
+            if (d.success && d.account && d.account.logged_in) return true;
+        } catch (e) { /* ignore */ }
         try {
             const r = await fetch('/api/steam/login/status');
             const d = await r.json();
@@ -95,13 +105,21 @@ class FreeGamesApp {
     }
 
     async restoreLogin() {
-        // 1) 优先问服务端：内置浏览器是否已经登录过
+        try {
+            const r = await fetch('/api/steam/account');
+            const d = await r.json();
+            const acc = d && d.account;
+            if (d.success && acc && acc.logged_in) {
+                this.applyLocalAccount(acc);
+                return;
+            }
+            this.applyNoLocalAccount(acc && acc.error);
+        } catch (e) { /* ignore */ }
         try {
             const r = await fetch('/api/steam/login/status');
             const d = await r.json();
             if (d.status === 'success' && d.account) { this.applyAccount(d.account, true); return; }
         } catch (e) { /* ignore */ }
-        // 2) 回落到本地保存的 Cookie
         try {
             const r = await fetch('/api/config/detailed');
             if (r.ok) {
@@ -110,6 +128,42 @@ class FreeGamesApp {
                 if (cookie) { this.manualLogin(cookie, true); }
             }
         } catch (e) { /* ignore */ }
+    }
+
+    applyLocalAccount(acc) {
+        const name = acc.persona || acc.steamid64 || '已登录';
+        this.elements.name.textContent = name + '（本机 Steam 客户端）';
+        this.elements.balance.textContent = acc.steamid64 ? ('SteamID ' + acc.steamid64) : '';
+        if (acc.avatar_path && this.wantAvatar()) {
+            this.elements.avatar.src = '/api/steam/avatar?t=' + Date.now();
+            this.elements.avatar.style.display = 'block';
+            this.elements.avatar.onerror = () => { this.elements.avatar.style.display = 'none'; };
+        } else {
+            this.elements.avatar.style.display = 'none';
+        }
+        this.syncAvatarToggleBtn();
+        this.log('success', `已识别本机 Steam 账号：${name}`);
+    }
+
+    wantAvatar() {
+        try { return localStorage.getItem('dxb-show-avatar') !== '0'; } catch (e) { return true; }
+    }
+
+    syncAvatarToggleBtn() {
+        const btn = document.getElementById('avatarToggleBtn');
+        if (!btn) { return; }
+        const on = this.wantAvatar();
+        const t = btn.querySelector('.settings-text');
+        const ic = btn.querySelector('.material-icons');
+        if (t) { t.textContent = on ? '隐藏头像' : '显示头像'; }
+        if (ic) { ic.textContent = on ? 'account_circle' : 'account_circle_off'; }
+        if (!on) { this.elements.avatar.style.display = 'none'; }
+    }
+
+    applyNoLocalAccount(err) {
+        this.elements.name.textContent = '未检测到本机 Steam 登录账号';
+        this.elements.balance.textContent = err || '请先在这台电脑上登录一次 Steam 客户端';
+        this.elements.avatar.style.display = 'none';
     }
 
     applyAccount(acc, silent = false) {
@@ -133,13 +187,12 @@ class FreeGamesApp {
                 bar.style.backgroundPosition = 'center';
             }
         }
-        this.elements.logoutBtn.style.display = 'inline-block';
+        if (this.elements.logoutBtn) this.elements.logoutBtn.style.display = 'inline-block';
         if (!silent) this.log('success', `已登录：${acc.name || 'Steam 账号'}`);
     }
 
-    /** 用内置（沉默）浏览器登录 Steam。@returns {Promise<boolean>} 是否登录成功 */
     async browserLogin() {
-        this.elements.loginBtn.disabled = true;
+        if (this.elements.loginBtn) this.elements.loginBtn.disabled = true;
         try {
             const resp = await fetch('/api/steam/login/start', { method: 'POST' });
             const d = await resp.json();
@@ -150,7 +203,6 @@ class FreeGamesApp {
                 window.open('https://store.steampowered.com/login/', '_blank');
                 return false;
             }
-            // 桌面壳派发失败：必须立刻报错并亮出手动粘贴，不能假装成功去白等
             if (!d.success) {
                 const msg = d.message || '打开登录窗口失败，请改用手动粘贴 Cookie。';
                 this.showSnackbar(msg, 'error');
@@ -166,11 +218,10 @@ class FreeGamesApp {
             this.log('error', `打开登录窗口失败：${e.message}`);
             return false;
         } finally {
-            this.elements.loginBtn.disabled = false;
+            if (this.elements.loginBtn) this.elements.loginBtn.disabled = false;
         }
     }
 
-    /** 轮询登录结果，登录成功/失败/超时后 resolve */
     pollLogin() {
         return new Promise((resolve) => {
             clearInterval(this.pollTimer);
@@ -205,7 +256,6 @@ class FreeGamesApp {
         });
     }
 
-    /** 手动粘贴 Cookie（降级方案） */
     async manualLogin(cookieValue, silent = false) {
         const cookie = (cookieValue !== undefined && cookieValue !== null)
             ? cookieValue : (this.elements.cookieInput.value || '').trim();
@@ -240,7 +290,6 @@ class FreeGamesApp {
         this.showSnackbar('已清除本地登录态显示（可在设置里清除保存的 Cookie）。', 'info');
     }
 
-    /* ---------- 免费游戏列表 ---------- */
 
     async fetchGames(query) {
         this.elements.loading.style.display = 'flex';
@@ -329,7 +378,6 @@ class FreeGamesApp {
         this.elements.pagination.style.display = this.games.length ? 'flex' : 'none';
     }
 
-    /** 让 Steam 安装（下载本体） */
     async install(appid, name) {
         this.log('info', `请求 Steam 安装 ${name || appid}（AppID ${appid}）…`);
         try {
@@ -355,17 +403,9 @@ class FreeGamesApp {
         if (this.busy) return;
         if (!list || !list.length) { this.showSnackbar('没有可入库的游戏。', 'warning'); return; }
 
-        // 入库必须先登录：未登录则自动拉起内置浏览器登录窗口，登录成功后继续入库
         if (!(await this.isLoggedIn())) {
-            this.showSnackbar('请先登录 Steam 账号，正在为你打开登录窗口…', 'warning');
-            this.log('warn', '未登录，先打开 Steam 登录窗口…');
-            const ok = await this.browserLogin();
-            if (!ok) {
-                this.showSnackbar('未登录，已取消入库。', 'warning');
-                this.log('error', '登录未完成，已取消入库。');
-                return;
-            }
-            this.log('success', '登录成功，继续入库。');
+            this.showSnackbar('没检测到登录账号，将按本机 Steam 客户端登录状态入库。', 'warning');
+            this.log('warn', '未读到网页登录态，继续按本机 Steam 登录态尝试入库。');
         }
 
         const appids = list.map(g => g.appid);

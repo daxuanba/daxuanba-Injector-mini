@@ -45,6 +45,7 @@
             </a>
             <a class="nav-item" href="/tools"><span class="material-icons">build</span><span>工具箱</span></a>
             <a class="nav-item" href="/downloader"><span class="material-icons">download</span><span>下载管理</span></a>
+            <a class="nav-item" href="/inject"><span class="material-icons">colorize</span><span>离线注入</span></a>
             <a class="nav-item" href="/settings">
                 <span class="material-icons">settings</span><span>设置</span>
             </a>
@@ -64,25 +65,20 @@
             <h1 class="app-title">免费游戏</h1>
         </header>
         <main class="manager-main-content">
-            <div class="card manager-card">
-                <div class="card-header"><h2>Steam 账号</h2></div>
-                <div class="account-bar" id="accountBar">
-                    <img id="accountAvatar" class="account-avatar" alt="头像" style="display:none"/>
-                    <div class="account-info">
-                        <span id="accountName" class="account-name">未登录</span>
-                        <span id="accountBalance" class="account-balance"></span>
-                    </div>
-                    <div class="account-login" id="accountLogin">
-                        <button class="btn btn-primary" id="loginBtn"><span class="material-icons">login</span> 用内置浏览器登录</button>
-                        <button class="btn btn-text" id="manualToggleBtn">手动粘贴</button>
-                        <button class="btn btn-text" id="logoutBtn" style="display:none">退出</button>
-                    </div>
+            <div class="account-bar" id="accountBar" style="margin-bottom:14px;">
+                <img id="accountAvatar" class="account-avatar" alt="头像" style="display:none"/>
+                <div class="account-info">
+                    <span id="accountName" class="account-name">正在读取本机 Steam 登录状态…</span>
+                    <span id="accountBalance" class="account-balance"></span>
                 </div>
-                <div class="account-manual" id="cookieManual">
-                    <input type="text" id="cookieInput" class="text-field" placeholder="粘贴 steamLoginSecure Cookie">
-                    <button class="btn btn-secondary" id="cookieSubmitBtn"><span class="material-icons">sync</span> 读取</button>
+                <div class="account-login" id="accountLogin">
+                    <button class="btn btn-text" id="avatarToggleBtn" title="显示/隐藏本机头像">
+                        <span class="material-icons">account_circle</span><span class="settings-text">隐藏头像</span>
+                    </button>
+                    <button class="btn btn-text" id="accountReloadBtn">
+                        <span class="material-icons">refresh</span> 重新读取
+                    </button>
                 </div>
-                <div class="input-helper" id="loginHelper">点“用内置浏览器登录”会在应用内置窗口打开 Steam 登录页，登录后自动读取账号名/头像/余额；登录态只存在本机。</div>
             </div>
 
             <div class="card manager-card">

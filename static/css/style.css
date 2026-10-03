@@ -560,9 +560,15 @@ body.dark-theme .checkbox-item input[type="checkbox"]:checked + .checkbox-button
     background-color: var(--md-sys-color-error-container); 
     color: var(--md-sys-color-on-error-container);
 }
-.status-item.warning { 
-    background-color: var(--md-sys-color-warning-container); 
+.status-item.warning {
+    background-color: var(--md-sys-color-warning-container);
     color: var(--md-sys-color-on-warning-container);
+}
+/* 未安装的工具：中性灰，不惊人不报错（别跟真出错混在一起） */
+.status-item.muted {
+    background-color: transparent;
+    color: var(--md-sys-color-on-surface-variant);
+    box-shadow: inset 0 0 0 1px var(--md-sys-color-outline-variant);
 }
 
 .status-icon {
@@ -572,6 +578,7 @@ body.dark-theme .checkbox-item input[type="checkbox"]:checked + .checkbox-button
 .status-item.success .status-icon { color: var(--md-sys-color-success); }
 .status-item.error .status-icon { color: var(--md-sys-color-error); }
 .status-item.warning .status-icon { color: var(--md-sys-color-warning); }
+.status-item.muted .status-icon { color: var(--md-sys-color-on-surface-variant); }
 
 body.dark-theme .status-item.success .status-icon { color: var(--md-sys-color-success); }
 body.dark-theme .status-item.error .status-icon { color: var(--md-sys-color-error-container); }
@@ -579,7 +586,7 @@ body.dark-theme .status-item.warning .status-icon { color: var(--md-sys-color-wa
 
 
 .status-text {
-  flex: 1;
+flex: 1;
   font-size: 14px;
   color: inherit;
 }
@@ -1167,3 +1174,29 @@ body:not(.dark-theme) .log-entry.warning {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(127,127,127,0.45); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(241,196,15,0.55); }
+
+/* 内核下载进度条（下载管理页 + 设置页共用，原来只有下载管理页内联了一份） */
+.k-progress {
+    height: 7px; border-radius: 999px; background: var(--md-sys-color-surface-variant);
+    overflow: hidden; margin-top: 11px; display: none;
+}
+.k-progress.show { display: block; }
+.k-progress > i {
+    display: block; height: 100%; width: 0;
+    background: var(--dx-yellow, #f1c40f); transition: width .25s ease;
+}
+.k-msg {
+    font-size: 12px; margin-top: 7px; color: var(--md-sys-color-on-surface-variant);
+    min-height: 16px; white-space: pre-line; line-height: 1.6;
+}
+
+/* 入库方式切换段（首页 + 下载管理页共用） */
+.mode-seg {
+    display: inline-flex; border-radius: 999px; padding: 3px; gap: 3px;
+    background: var(--md-sys-color-surface-variant); flex-wrap: wrap;
+}
+.mode-seg button {
+    border: 0; background: transparent; cursor: pointer; font-size: 12px; font-weight: 600;
+    padding: 5px 13px; border-radius: 999px; color: var(--md-sys-color-on-surface-variant);
+}
+.mode-seg button.on { background: var(--dx-yellow, #f1c40f); color: #1a1a1a; }

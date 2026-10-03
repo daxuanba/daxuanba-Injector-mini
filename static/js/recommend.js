@@ -1,6 +1,3 @@
-// --- 游戏推荐页：特惠 / 热销 / 新品 / 即将推出 ---
-// 封面图用 Steam 官方给的完整 header_image（带 hash 目录），走 /api/steam/proxy 代理，
-// 拼固定模板对这类新游戏必然 404。
 class RecommendApp {
     constructor() {
         this.elements = {
@@ -16,7 +13,6 @@ class RecommendApp {
         };
         this.pollTimer = null;
         this.busy = false;
-        // 入库日志走本地快照：切页回来日志还在
         this.store = window.DxbTaskLog ? window.DxbTaskLog.local('recommend') : null;
         this.elements.refreshBtn.addEventListener('click', () => this.load());
         this.elements.snackbarClose.addEventListener('click', () => this.hideSnackbar());
@@ -124,9 +120,13 @@ class RecommendApp {
         });
     }
 
-    /* ---------- 登录态 ---------- */
 
     async isLoggedIn() {
+        try {
+            const r = await fetch('/api/steam/account');
+            const d = await r.json();
+            if (d.success && d.account && d.account.logged_in) return true;
+        } catch (e) { /* ignore */ }
         try {
             const r = await fetch('/api/steam/login/status');
             const d = await r.json();
@@ -142,7 +142,6 @@ class RecommendApp {
         return false;
     }
 
-    /** 拉起内置浏览器登录窗口，返回是否登录成功 */
     async browserLogin() {
         try {
             const resp = await fetch('/api/steam/login/start', { method: 'POST' });
@@ -152,7 +151,6 @@ class RecommendApp {
                 this.log('warn', '当前环境没有内置浏览器，无法弹出登录窗口。');
                 return false;
             }
-            // 桌面壳派发失败时如实报错，不要白等 5 分钟
             if (!d.success) {
                 const msg = d.message || '打开登录窗口失败，请到「免费游戏」页手动粘贴 Cookie。';
                 this.showSnackbar(msg, 'error');
@@ -202,7 +200,6 @@ class RecommendApp {
         });
     }
 
-    /* ---------- 入库 / 安装 ---------- */
 
     async install(appid, name) {
         this.log('info', `请求 Steam 安装 ${name || appid}（AppID ${appid}）…`);
@@ -228,17 +225,9 @@ class RecommendApp {
     async inject(appid, name) {
         if (this.busy) return;
 
-        // 入库必须先登录：未登录则自动拉起登录窗口，登录成功后继续入库
         if (!(await this.isLoggedIn())) {
-            this.showSnackbar('请先登录 Steam 账号，正在为你打开登录窗口…', 'warning');
-            this.log('warn', '未登录，先打开 Steam 登录窗口…');
-            const ok = await this.browserLogin();
-            if (!ok) {
-                this.showSnackbar('未登录，已取消入库。', 'warning');
-                this.log('error', '登录未完成，已取消入库。');
-                return;
-            }
-            this.log('success', '登录成功，继续入库。');
+            this.showSnackbar('没检测到网页登录态，将按本机 Steam 客户端登录状态入库。', 'warning');
+            this.log('warn', '未读到网页登录态，继续按本机 Steam 登录态尝试入库。');
         }
 
         this.busy = true;

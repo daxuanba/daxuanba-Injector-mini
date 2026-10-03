@@ -1,4 +1,3 @@
-# --- START OF FILE app.py (MODIFIED WITH AUTO-UPDATE AND CUSTOM REPOS) ---
 
 import asyncio
 import os
@@ -53,7 +52,6 @@ else:
         def _show_console(self): pass
     console_manager = ConsoleManager()
 
-# --- Project Setup ---
 project_root = Path.cwd()
 sys.path.insert(0, str(project_root))
 
@@ -64,16 +62,11 @@ except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
 
-# --- Flask App Initialization ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'dxb-injector-secret-key-v2'
 app.config['USER_DATA_FOLDER'] = project_root / 'userdata'
-# 仅保留一次初始化，并显式指定 threading 模式：
-# 后台线程（安装依赖/跑任务）会通过 patch_log_for_socketio 调用 socketio.emit，
-# 必须运行在 threading 模式下，否则跨线程 emit 会失败。
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# --- GUI Port Prompt ---
 def get_port_from_gui():
     result = {'port': 5000}
     root = tk.Tk()
@@ -103,7 +96,6 @@ def get_port_from_gui():
     return result['port']
 
 
-# --- Pre-startup Config Check ---
 def should_show_console_on_startup():
     config_path = project_root / 'config.json'
     if not config_path.exists(): return False
@@ -115,7 +107,6 @@ def should_show_console_on_startup():
         print(f"启动时读取配置失败: {e}")
         return False
 
-# --- Global Task State & Logging ---
 TASK_STATE = {"status": "idle", "progress": [], "result": None}
 
 def patch_log_for_socketio(logger):
@@ -145,11 +136,9 @@ def _quick_backend():
     return b
 
 
-# ---------------- 沉默浏览器登录 Steam ----------------
-# 桌面壳（dxb_desktop.py）启动时注入 launcher；无 GUI 环境则降级为手动粘贴 Cookie。
 STEAM_LOGIN = {
-    "available": False,   # 桌面壳是否注入内置浏览器登录
-    "status": "idle",     # idle | waiting | success | error
+    "available": False,
+    "status": "idle",
     "message": "",
     "account": None,
 }
@@ -191,7 +180,6 @@ def steam_login_succeeded(cookie: str):
     return {"success": True, "account": account}
 
 
-# ---------------- 以管理员身份重启（写 hosts 加速要用） ----------------
 _elevated_restart = None
 
 
@@ -201,7 +189,6 @@ def register_elevated_restart(fn):
     _elevated_restart = fn if callable(fn) else None
 
 
-# ---------------- 普通重启（免hosts加速等需重启生效的功能用） ----------------
 _normal_restart = None
 
 
@@ -211,7 +198,6 @@ def register_app_restart(fn):
     _normal_restart = fn if callable(fn) else None
 
 
-# ---------------- 关窗（重启/提权时立刻收掉旧窗口，别留两个） ----------------
 _window_closer = None
 
 
@@ -226,9 +212,21 @@ def register_window_closer(fn):
 
 
 def _is_steam_logged_in() -> bool:
-    """入库前的登录态判定：内置浏览器登录成功，或配置里已存过 Cookie。"""
+    """入库前的登录态判定。
+
+    以前只看「内置浏览器 cookie」，用户在 **Steam 客户端**里登录的一律判成未登录，
+    于是入库被拦住、还一直弹登录窗口。现在先认本机 Steam 客户端的登录态
+    （读 config\\loginusers.vdf），那才是真正决定「往哪个账号的库里写」的东西。
+    """
     if STEAM_LOGIN.get("status") == "success" and STEAM_LOGIN.get("account"):
         return True
+    try:
+        b = _quick_backend()
+        b.config = b._load_config_sync() or {}
+        if b.steam_account().get("logged_in"):
+            return True
+    except Exception:
+        pass
     try:
         cfg = _quick_backend()._load_config_sync() or {}
         return bool(str(cfg.get('steam_cookie') or '').strip())
@@ -242,7 +240,6 @@ def _steam_login_required():
                     "available": STEAM_LOGIN.get("available", False),
                     "message": "请先登录 Steam 账号，登录后才能入库。"})
 
-# --- HTML Page Routes ---
 @app.route('/')
 def index(): return render_template('index.html')
 
@@ -252,12 +249,10 @@ def settings_page(): return render_template('settings.html')
 @app.route('/about')
 def about_page(): return render_template('about.html')
 
-# NEW: Route for the file manager page
 @app.route('/manager')
 def manager_page():
     return render_template('manager.html')
 
-# NEW: 手搓独立页面
 @app.route('/recommend')
 def recommend_page():
     return render_template('recommend.html')
@@ -282,7 +277,12 @@ def downloader_page():
     return render_template('downloader.html')
 
 
-# --- Core API Routes ---
+@app.route('/inject')
+def inject_page():
+    """离线注入：启动 Steam（普通 / GreenLuma 隐身 / 注入版）+ 真实模块枚举检测。"""
+    return render_template('inject.html')
+
+
 def background_install_unlocker():
     """后台线程：自动下载安装解锁工具，不阻塞页面初始化。"""
     async def _run():
@@ -307,7 +307,7 @@ def background_install_unlocker():
 
 
 @app.route('/api/initialize', methods=['POST'])
-def initialize_app():  # 改为同步函数
+def initialize_app():
     try:
         async def _init():
             async with DxbBackend() as backend:
@@ -319,13 +319,15 @@ def initialize_app():  # 改为同步函数
                 return {
                     "success": True,
                     "unlocker_type": unlocker_type,
+                    "detected": dict(getattr(backend, 'detected_kernels',
+                                             {'steamtools': False, 'greenluma': False,
+                                              'opensteamtool': False})),
                     "pending_unlocker_install": pending,
                     "steam_path": str(backend.steam_path) if backend.steam_path else "Not Found",
                     "has_token": bool(backend.config.get("Github_Personal_Token", "").strip())
                 }
 
         result = asyncio.run(_init())
-        # 如果标记了后台安装，启动后台线程，不阻塞初始化响应
         if result.get("pending_unlocker_install"):
             threading.Thread(target=background_install_unlocker, daemon=True).start()
         return jsonify(result)
@@ -336,9 +338,8 @@ def initialize_app():  # 改为同步函数
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message})
 
-# NEW: Auto-update check endpoint
 @app.route('/api/check_updates', methods=['POST'])
-def check_updates():  # 改为同步函数
+def check_updates():
     try:
         async def _check():
             async with DxbBackend() as backend:
@@ -360,7 +361,6 @@ def check_updates():  # 改为同步函数
         dummy_backend.log.error(dummy_backend.stack_error(e))
         return jsonify({"success": False, "message": message})
 
-# NEW: Steam 状态（首页状态条：位置 + 内核检测）
 @app.route('/api/steam_status', methods=['GET'])
 def steam_status():
     try:
@@ -374,7 +374,6 @@ def steam_status():
         dummy.log.error(dummy.stack_error(e))
         return jsonify({"success": False, "message": str(e)})
 
-# NEW: 依赖模块状态（OpenSteamTool 内核 / SteamTools / GreenLuma）
 @app.route('/api/dependency/status', methods=['GET'])
 def dependency_status():
     try:
@@ -425,9 +424,6 @@ def dependency_install():
     if kind not in ("opensteamtool", "steamtools", "greenluma"):
         return jsonify({"success": False, "message": "未知的依赖类型。"}), 400
 
-    # GreenLuma 以前只能给 cs.rin.ru 论坛链接 + 打开浏览器，现在有真实可下载源了
-    # （官方 stealth 形态的改写版 user32.dll），直接走下载管理那条安装通道。
-    # SteamTools 是官方 NSIS 安装包：管理员下 /S 静默无窗口，普通权限弹官方安装向导。
     if kind in ("greenluma", "steamtools"):
         threading.Thread(target=_background_kernel_install, args=(kind, force), daemon=True).start()
         if kind == "greenluma":
@@ -450,10 +446,6 @@ def dependency_install():
     return jsonify({"success": True, "message": f"已在后台开始下载/更新 {label}。"})
 
 
-# ==================== 下载管理：内核真实版本检测 + 自动下载安装 ====================
-# 三个内核（OpenSteamTool / SteamTools / GreenLuma）全部纯后端 HTTP 下载，
-# 不开任何浏览器窗口；下完直接释放到 Steam 主目录，可同时共存。
-# 进度不依赖 socket.io（CDN 可能被墙），改用内存态 + 前端轮询，最稳。
 KERNEL_PROGRESS: Dict[str, Dict[str, Any]] = {}
 
 
@@ -516,26 +508,34 @@ def kernel_status():
                 await backend.initialize()
                 hub = KernelHub(backend)
                 local = hub.all_local()
+                want_remote = request.args.get('remote', '1') != '0'
                 remote = {}
-                for k in KERNEL_SPECS:
-                    try:
-                        remote[k] = await hub.remote_latest(k)
-                    except Exception as e:
-                        remote[k] = {"ok": False, "note": str(e)[:120]}
+                if want_remote:
+                    got = await asyncio.gather(
+                        *[hub.remote_latest(k) for k in KERNEL_SPECS],
+                        return_exceptions=True)
+                    for k, r in zip(KERNEL_SPECS.keys(), got):
+                        remote[k] = {"ok": False, "note": str(r)[:120]} if isinstance(r, Exception) else r
                 for k, st in local.items():
+                    if not want_remote:
+                        st['remote_version'] = ''
+                        st['remote_ok'] = False
+                        st['remote_note'] = '未查询（remote=0）'
+                        st['update_state'] = 'unknown'
+                        continue
                     r = remote.get(k) or {}
                     st['remote_version'] = r.get('version') or ''
                     st['remote_ok'] = bool(r.get('ok'))
                     st['remote_note'] = r.get('note') or ''
                     if k == 'greenluma':
-                        # 两种形态各自的最新版，前端按当前形态对比，别拿错版本号
                         st['remote_stealth'] = r.get('stealth_version') or ''
                         st['remote_inject'] = r.get('inject_version') or ''
                         cur = (st.get('mode') or 'stealth')
                         st['remote_version'] = (st['remote_stealth'] if cur == 'stealth'
                                                 else (st['remote_inject'] or st['remote_version']))
-                    st['update_state'] = kernel_update_state(st.get('version') or '',
-                                                             st.get('remote_version') or '')
+                    st['update_state'] = kernel_update_state(
+                        st.get('version') or '', st.get('remote_version') or '',
+                        bool(st.get('installed')))
                 sp = backend.get_steam_path()
                 try:
                     is_admin = bool(DxbBackend.is_admin())
@@ -545,6 +545,8 @@ def kernel_status():
                         "order": list(KERNEL_SPECS.keys()),
                         "steam_path": str(sp) if sp else '',
                         "admin": is_admin,
+                        "probed": want_remote,
+                        "account": backend.steam_account(),
                         "conflict": hub.conflict_check(),
                         "injection": hub.injection_status()}
         return jsonify(asyncio.run(_inner()))
@@ -552,6 +554,55 @@ def kernel_status():
         dummy = DxbBackend()
         dummy.log.error(dummy.stack_error(e))
         return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/updates/check', methods=['GET'])
+def updates_check():
+    """真实检查更新：应用自身 + 每个内核的远端最新版，全部并发，只查不下载。"""
+    try:
+        async def _inner():
+            async with DxbBackend() as backend:
+                patch_log_for_socketio(backend.log)
+                await backend.initialize()
+                return await backend.check_all_updates()
+        r = asyncio.run(_inner())
+        r['success'] = True
+        return jsonify(r)
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/steam/account', methods=['GET'])
+def steam_account_api():
+    """本机 Steam 客户端的登录账号（读 loginusers.vdf，不需要联网也不需要 cookie）"""
+    try:
+        b = DxbBackend()
+        b.config = b._load_config_sync() or {}
+        return jsonify({"success": True, "account": b.steam_account()})
+    except Exception as e:
+        dummy = DxbBackend()
+        dummy.log.error(dummy.stack_error(e))
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/steam/avatar')
+def steam_avatar():
+    """本机 Steam 缓存的头像（config\\avatarcache\\<steamid64>.png），只回本机那个文件"""
+    try:
+        b = DxbBackend()
+        b.config = b._load_config_sync() or {}
+        acc = b.steam_account()
+        p = acc.get('avatar_path') or ''
+        if not p or not os.path.exists(p):
+            return Response(b'', status=404, mimetype='image/png')
+        with open(p, 'rb') as f:
+            data = f.read()
+        return Response(data, mimetype='image/png',
+                        headers={'Cache-Control': 'no-store'})
+    except Exception as e:
+        return Response(b'', status=404, mimetype='image/png')
 
 
 @app.route('/api/kernel/install', methods=['POST'])
@@ -568,7 +619,6 @@ def kernel_install():
     else:
         label = KERNEL_SPECS[kind]['name']
     if KERNEL_SPECS[kind].get('installer'):
-        # SteamTools 是「安装包型」：下完直接跑安装包，管理员下 /S 静默无窗口
         extra = "（安装包型：下完会自动运行官方安装包）"
     else:
         extra = ""
@@ -680,11 +730,10 @@ def net_proxy_route():
                     "message": "已保存。重启应用后后端请求改走该代理。"})
 
 
-# 允许从界面用系统浏览器打开的外部链接（白名单，避免被当成任意 URL 打开器）
 _OPEN_URL_WHITELIST = (
-    "cs.rin.ru",                  # GreenLuma 官方发布页
+    "cs.rin.ru",
     "github.com", "raw.githubusercontent.com", "api.github.com",
-    "go.microsoft.com",           # WebView2 Runtime 官方引导
+    "go.microsoft.com",
     "learn.microsoft.com",
     "store.steampowered.com", "steamcommunity.com",
 )
@@ -711,7 +760,6 @@ def app_open_url():
         return jsonify({"success": False, "message": f"打开失败：{e}"})
 
 
-# NEW: 应用自更新：下载最新安装包并自动打开安装
 @app.route('/api/auto_update', methods=['POST'])
 def auto_update():
     try:
@@ -725,7 +773,6 @@ def auto_update():
                 urls = info.get("download_urls", [])
                 if not urls:
                     return {"success": False, "message": "未找到可下载的安装包。"}
-                # 优先下载 .exe 资产（本应用为单文件 exe）
                 asset = next((u for u in urls if u["name"].lower().endswith(".exe")), urls[0])
                 data = await backend._download_bytes(asset["url"])
                 if not data:
@@ -739,7 +786,6 @@ def auto_update():
                 return {"success": True, "has_update": True, "path": str(tmp)}
         result = asyncio.run(_up())
         if result.get("has_update") and result.get("success"):
-            # 退出当前进程，让新安装包接管
             def kill_process():
                 time.sleep(1.0)
                 os._exit(0)
@@ -751,7 +797,6 @@ def auto_update():
         return jsonify({"success": False, "message": str(e)})
 
 
-# NEW: Lua 手搓（Steam API 抓信息 -> 生成 OpenSteamTool 风格 lua）
 @app.route('/api/craft_lua', methods=['POST'])
 def craft_lua():
     data = request.get_json(silent=True) or {}
@@ -776,7 +821,6 @@ def craft_lua():
         return jsonify({"success": False, "message": str(e)})
 
 
-# NEW: 手搓结果一键入库（写入 Steam config\lua）
 @app.route('/api/craft_import', methods=['POST'])
 def craft_import():
     data = request.get_json(silent=True) or {}
@@ -822,15 +866,13 @@ def download_lua():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# NEW: Get available sources (including custom repos)
 @app.route('/api/sources', methods=['GET'])
-def get_sources():  # 改为同步函数
+def get_sources():
     try:
         async def _get_sources():
             async with DxbBackend() as backend:
                 await backend.initialize()
                 
-                # Built-in sources
                 builtin_sources = {
                     "自动搜索GitHub": "search",
                     "SWA V2": "printedwaste", 
@@ -851,39 +893,39 @@ def get_sources():  # 改为同步函数
                     "GitHub (Cracko298/ManifestHub)": "Cracko298/ManifestHub",
                 }
                 
-                # Custom sources
                 custom_github_repos = backend.get_custom_github_repos()
                 custom_zip_repos = backend.get_custom_zip_repos()
                 
-                # Add custom GitHub repos
                 for repo in custom_github_repos:
                     builtin_sources[f"{repo['name']} (自定义GitHub)"] = repo['repo']
                 
-                # Add custom ZIP repos  
                 for repo in custom_zip_repos:
                     builtin_sources[f"{repo['name']} (自定义ZIP)"] = f"custom_zip_{repo['name']}"
 
-                # 探测所有内置源可用性，剔除不可用，自动选最优
-                availability, recommended = await backend.test_sources()
+                if request.args.get('fast') == '1':
+                    availability = {v: True for v in backend.SOURCE_PROBE}
+                    recommended = next(
+                        (v for v, spec in backend.SOURCE_PROBE.items()
+                         if spec is not None), 'search')
+                else:
+                    availability, recommended = await backend.test_sources()
                 filtered_sources = {
                     name: value for name, value in builtin_sources.items()
                     if availability.get(value, True)
                 }
-                # 自定义源默认视为可用（用户已配置）
                 if recommended is None or recommended not in filtered_sources.values():
-                    # 若推荐项被过滤（不可用），回退到过滤后第一个「内置」可用源；
-                    # 仅从 availability 中筛选内置源，避免把自定义源误当推荐默认。
                     recommended = next(
                         (v for v in filtered_sources.values()
                          if availability.get(v, False)),
                         None,
                     )
-                
+
                 return {
                     "success": True,
                     "sources": filtered_sources,
                     "recommended": recommended,
                     "availability": availability,
+                    "probed": request.args.get('fast') != '1',
                     "custom_github_count": len(custom_github_repos),
                     "custom_zip_count": len(custom_zip_repos)
                 }
@@ -930,8 +972,6 @@ async def _run_unlock_task(app_id, tool_type, use_st_auto_update, add_all_dlc, p
             raise Exception("解锁工具类型未能确定，请检查配置或Steam路径。")
 
         await backend.checkcn()
-        # 需要查 GitHub API 的源（仓库类 + 自动搜索）才校验速率；
-        # steamautocracks_v2 走 steamui 接口，不消耗 GitHub API 额度，排除。
         needs_github_api = (tool_type == "search") or ("/" in tool_type and tool_type != "steamautocracks_v2")
         if needs_github_api and not await backend.check_github_api_rate_limit():
             raise Exception("GitHub API 请求次数已用尽，无法继续。")
@@ -942,7 +982,6 @@ async def _run_unlock_task(app_id, tool_type, use_st_auto_update, add_all_dlc, p
             
         if tool_type == "search":
             backend.log.info(f"正在所有 GitHub 仓库中搜索 AppID: {app_id_extracted}...")
-            # MODIFIED: Use all repos including custom ones
             results = await backend.search_all_repos_for_appid(app_id_extracted)
             if not results:
                 raise Exception(f"在所有 GitHub 仓库中都未找到 AppID {app_id_extracted} 的清单。")
@@ -955,10 +994,8 @@ async def _run_unlock_task(app_id, tool_type, use_st_auto_update, add_all_dlc, p
             
         backend.log.info(f"--- 正在使用源 '{tool_type}' 处理 AppID: {app_id_extracted} ---")
         
-        # 修改这里：添加steamautocracks_v2到zip_sources列表
         zip_sources = ["printedwaste", "cysaw", "furcate", "walftech", "steamdatabase", "steamautocracks_v2", "sudama"]
         
-        # Check for custom zip sources
         if tool_type.startswith("custom_zip_"):
             success = await backend.process_zip_source(app_id_extracted, tool_type, unlocker_type, use_st_auto_update, add_all_dlc, patch_depot_key)
         elif tool_type in zip_sources:
@@ -971,7 +1008,6 @@ async def _run_unlock_task(app_id, tool_type, use_st_auto_update, add_all_dlc, p
         else:
             raise Exception(f"处理 AppID {app_id_extracted} 失败，请检查日志。")
 
-# Workshop task runner
 async def _run_workshop_task(workshop_input, download_resources, copy_to_depot):
     async with DxbBackend() as backend:
         patch_log_for_socketio(backend.log)
@@ -1001,7 +1037,7 @@ def start_task():
     tool_type = data.get('tool_type', 'search')
     use_st_auto_update = data.get('use_st_auto_update', False)
     add_all_dlc = data.get('add_all_dlc', False)
-    patch_depot_key = data.get('patch_depot_key', False)  # NEW: 获取depotkey修补参数
+    patch_depot_key = data.get('patch_depot_key', False)
     
     if not app_id_input:
         return jsonify({"success": False, "message": "请输入 AppID 或链接。"})
@@ -1027,7 +1063,6 @@ def start_task():
     thread.start()
     return jsonify({"success": True, "message": "任务已开始。"})
 
-# Workshop task endpoint
 @app.route('/api/workshop/check', methods=['POST'])
 def workshop_check():
     """下载前检测创意工坊物品是否存在。"""
@@ -1100,7 +1135,6 @@ def get_task_status():
                     "progress": TASK_STATE["progress"][-400:],
                     "result": TASK_STATE["result"]})
 
-# --- NEW: File Manager API ---
 @app.route('/api/manager/files', methods=['GET'])
 def get_managed_files():
     try:
@@ -1134,7 +1168,6 @@ def get_installed_games():
         return jsonify({"success": False, "message": f"扫描已装应用失败: {e}",
                         "games": [], "others": [], "total": 0, "dlc_total": 0})
 
-# --- 免费游戏页 API ---
 @app.route('/api/steam/login/start', methods=['POST'])
 def steam_login_start():
     """拉起内置（沉默）浏览器登录 Steam。"""
@@ -1150,8 +1183,6 @@ def steam_login_start():
     except Exception as e:
         steam_login_failed(f"打开登录窗口失败: {e}")
         return jsonify({"success": False, "available": True, "message": STEAM_LOGIN["message"]})
-    # 桌面壳投递失败（槽未匹配 / 桥已销毁）时必须如实上报，
-    # 否则前端会显示“已打开登录窗口”然后白等 5 分钟 —— 就是用户报的“点了打不开”。
     if ok is False:
         steam_login_failed("无法唤醒内置登录窗口，请改用“手动粘贴”Cookie 登录。")
         return jsonify({"success": False, "available": True, "message": STEAM_LOGIN["message"]})
@@ -1189,7 +1220,6 @@ def steam_image_proxy():
     .../store_item_assets/steam/apps/3892270/<hash>/header.jpg），拼模板必然 404，
     只能按 URL 原样代理。仅放行 Steam CDN 白名单域名，避免变成任意 URL 转发器。
     """
-    # 前端用 encodeURIComponent 传参，Flask 已解码一次，这里不要再 unquote
     url = request.args.get('u', '').strip()
     appid = request.args.get('appid', '').strip()
     data = None
@@ -1235,7 +1265,6 @@ def free_inject():
     names = data.get('names') or {}
     if not appids:
         return jsonify({"success": False, "message": "没有需要入库的游戏。"}), 400
-    # 未登录不允许入库：先让用户用内置浏览器登录 Steam
     if not _is_steam_logged_in():
         return _steam_login_required()
     try:
@@ -1257,7 +1286,6 @@ def free_account():
         backend = DxbBackend()
         backend.log = logging.getLogger(' 大轩巴入库器mini')
         result = backend.free_account_info(cookie)
-        # 记住 cookie 到配置（本地工具，敏感信息自行保管）
         if result.get('success') and cookie:
             cfg = backend._load_config_sync()
             cfg['steam_cookie'] = cookie
@@ -1315,7 +1343,6 @@ def open_manager_folder():
     except Exception as e:
         return jsonify({"success": False, "message": f"打开目录失败: {e}"}), 500
 
-# --- END of File Manager API ---
 
 
 @app.route('/api/config/detailed')
@@ -1343,35 +1370,29 @@ def get_detailed_config():
             "background_brightness": config.get("background_brightness", 100),
             "show_console_on_startup": config.get("show_console_on_startup", False),
             "force_unlocker_type": config.get("force_unlocker_type", "auto"),
-            # 解锁器自动安装
             "auto_install_unlocker": config.get("auto_install_unlocker", True),
             "unlocker_preference": config.get("unlocker_preference", "greenluma"),
             "greenluma_repo": config.get("greenluma_repo", "WinterSamza/GreenLuma_2025"),
             "steamtools_repo": config.get("steamtools_repo", ""),
-            # NEW: 添加自定义清单库配置
             "custom_repos": config.get("Custom_Repos", {"github": [], "zip": []}),
         }})
     except Exception as e:
         return jsonify({"success": False, "message": f"加载详细配置失败: {e}"})
 
 @app.route('/api/config/update', methods=['POST'])
-def update_config():  # 改为同步函数
+def update_config():
     config_path = project_root / 'config.json'
     try:
         data = request.get_json()
         
-        # 确保配置文件存在
         if not config_path.exists():
-            # 创建默认配置
             config_path.parent.mkdir(exist_ok=True, parents=True)
             with open(config_path, 'w', encoding='utf-8') as f:
                 standard_json.dump(DEFAULT_CONFIG, f, indent=2, ensure_ascii=False)
         
-        # 读取当前配置
         with open(config_path, 'r', encoding='utf-8') as f:
             current_config = standard_json.load(f)
         
-        # 更新所有可能的键
         updatable_keys = [
             "github_token", "steam_path", "debug_mode", "logging_files", "disable_logging",
             "background_image_path", "background_blur", "background_saturation",
@@ -1388,33 +1409,28 @@ def update_config():  # 改为同步函数
                 config_key = key_map.get(key, key)
                 current_config[config_key] = data[key]
 
-        # 用户在设置页明确保存过 → 打上 ack 标记，之后 auto_install_unlocker 就按他勾的来，
-        # 不会再被 v2.17 的老配置迁移（把默认开启的自动安装关掉）覆盖。
         if "auto_install_unlocker" in data:
             current_config["auto_install_unlocker_ack"] = True
 
-        # 处理自定义清单库配置
         if "custom_repos" in data:
             current_config["Custom_Repos"] = data["custom_repos"]
 
-        # 保存配置
         with open(config_path, 'w', encoding='utf-8') as f:
             standard_json.dump(current_config, f, indent=2, ensure_ascii=False)
         
-        print(f"配置已保存到: {config_path}")  # 添加调试日志
+        print(f"配置已保存到: {config_path}")
         return jsonify({"success": True, "message": "配置已保存。"})
         
     except Exception as e:
-        print(f"保存配置失败: {e}")  # 添加错误日志
+        print(f"保存配置失败: {e}")
         return jsonify({"success": False, "message": f"保存配置失败: {e}"})
 
 @app.route('/api/config/reset', methods=['POST'])
-def reset_config():  # 改为同步函数
+def reset_config():
     config_path = project_root / 'config.json'
     try:
         existing_bg_settings = {}
         
-        # 保留背景设置
         if config_path.exists():
             with open(config_path, 'r', encoding='utf-8') as f:
                 current_config = standard_json.load(f)
@@ -1423,22 +1439,19 @@ def reset_config():  # 改为同步函数
                 if key in current_config:
                     existing_bg_settings[key] = current_config[key]
         
-        # 创建新配置
         new_config = DEFAULT_CONFIG.copy()
         new_config.update(existing_bg_settings)
         
-        # 确保目录存在
         config_path.parent.mkdir(exist_ok=True, parents=True)
         
-        # 保存配置
         with open(config_path, 'w', encoding='utf-8') as f:
             standard_json.dump(new_config, f, indent=2, ensure_ascii=False)
         
-        print(f"配置已重置并保存到: {config_path}")  # 添加调试日志
+        print(f"配置已重置并保存到: {config_path}")
         return jsonify({"success": True, "message": "配置已重置为默认值 (背景设置已保留)。"})
         
     except Exception as e:
-        print(f"重置配置失败: {e}")  # 添加错误日志
+        print(f"重置配置失败: {e}")
         return jsonify({"success": False, "message": f"重置配置失败: {e}"})
 
 
@@ -1470,7 +1483,6 @@ def steam_launch():
     data = request.get_json(silent=True) or {}
     action = str(data.get('action') or '').strip().lower()
     appid = str(data.get('appid') or '').strip()
-    # 固定入口（无需 appid）：只白名单这几个，避免变成任意 steam:// 转发器
     fixed = {
         'open_downloads': 'steam://open/downloads',
         'open_settings': 'steam://open/settings',
@@ -1487,7 +1499,7 @@ def steam_launch():
         return jsonify({"success": False, "message": "无效的操作。"})
     try:
         if hasattr(os, 'startfile'):
-            os.startfile(url)          # Windows：交给系统协议处理器
+            os.startfile(url)
         else:
             webbrowser.open(url)
         msg = {
@@ -1541,7 +1553,6 @@ def steam_repair():
         return jsonify({"success": False, "message": f"修复失败: {e}", "results": []})
 
 
-# --- Steam 加速（hosts 优选） ---
 @app.route('/api/steam/accel/status', methods=['GET'])
 def steam_accel_status():
     """加速状态：hosts 里是否已有加速块、是否管理员、hosts 是否可写。"""
@@ -1642,7 +1653,6 @@ def accel_restore_route(category):
         return jsonify({"success": False, "message": f"还原失败: {e}"})
 
 
-# ---------------- 免hosts 加速（Chromium host-resolver-rules，免管理员/不改系统hosts） ----------------
 @app.route('/api/accel/<category>/hostsfree/apply', methods=['POST'])
 def accel_hostsfree_apply_route(category):
     try:
@@ -1714,7 +1724,6 @@ def app_restart_elevated():
     """以管理员身份重启本程序：真实检测 + 真实回传 UAC 结果（仅桌面壳可用）。"""
     _privilege_state["last_elevate_at"] = time.time()
 
-    # 1) 真实检测：当前进程是不是已经是管理员
     try:
         already = bool(DxbBackend.is_admin())
     except Exception:
@@ -1724,14 +1733,12 @@ def app_restart_elevated():
         return jsonify({"success": True, "already": True, "level": "admin",
                         "message": f"检测结果：当前进程已是管理员权限（PID {os.getpid()}），无需重启。"})
 
-    # 2) 提权通道是否可用（由桌面壳注入 ShellExecuteW runas）
     if _elevated_restart is None:
         _privilege_state["last_elevate"] = "unavailable"
         return jsonify({"success": False, "available": False, "level": "user",
                         "message": "检测结果：当前不是管理员，且本环境拿不到提权通道。\n"
                                    "请关闭程序，右键 exe →「以管理员身份运行」。"})
 
-    # 3) 真实提权：ShellExecuteW(runas) 会弹 UAC，等用户表态后拿真实返回值
     try:
         ok = bool(_elevated_restart())
     except Exception as e:
@@ -1739,7 +1746,6 @@ def app_restart_elevated():
         return jsonify({"success": False, "level": "user",
                         "message": f"提权失败：{e}"})
     if not ok:
-        # 用户在 UAC 弹窗点了「否」，或被系统策略拦截（ShellExecuteW 返回值 ≤ 32）
         _privilege_state["last_elevate"] = "denied"
         return jsonify({"success": False, "level": "user", "denied": True,
                         "message": "检测结果：提权被拒绝（UAC 弹窗点了「否」，或被系统策略拦截）。\n"
@@ -1752,7 +1758,7 @@ def app_restart_elevated():
 
 
 @app.route('/api/steam/restart', methods=['POST'])
-def restart_steam():  # 改为同步函数
+def restart_steam():
     try:
         async def _restart():
             async with DxbBackend() as backend:
@@ -1790,8 +1796,6 @@ def shutdown():
     print("接收到 HTTP 关闭请求，正在准备关闭服务器...")
 
     def kill_process():
-        # 先尽量把主窗口收掉（新实例已经开好自己的窗口了），再无条件退出进程。
-        # 关窗放在子线程并限时 join：万一 pywebview 的 destroy 卡住，也不会拖住退出。
         try:
             if _window_closer:
                 t = threading.Thread(target=_window_closer, daemon=True)
@@ -1812,11 +1816,9 @@ if __name__ == '__main__':
         except:
             pass 
     
-    # 只调用一次控制台显示检查
     if sys.platform == 'win32' and should_show_console_on_startup():
         console_manager._show_console()
     
-    # 只调用一次端口选择
     port = get_port_from_gui()
     
     print(f"将使用端口: {port}")

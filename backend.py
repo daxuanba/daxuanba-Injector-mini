@@ -18,7 +18,7 @@ import zipfile
 import shutil
 import struct
 import zlib
-import io  # For workshop manifest processing
+import io
 import socket
 import ssl
 import locale
@@ -28,10 +28,9 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.17"  # 当前版本号
+CURRENT_VERSION = "2.20"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
-# --- LOGGING SETUP ---
 LOG_FORMAT = '%(log_color)s%(message)s'
 LOG_COLORS = {
     'INFO': 'cyan',
@@ -40,7 +39,6 @@ LOG_COLORS = {
     'CRITICAL': 'purple',
 }
 
-# --- MODIFIED: Added Custom_Repos setting ---
 DEFAULT_CONFIG = {
     "Github_Personal_Token": "",
     "Custom_Steam_Path": "",
@@ -75,7 +73,6 @@ DEFAULT_CONFIG = {
     "QA5": "ZIP清单库格式: {\"name\": \"显示名称\", \"url\": \"下载URL，用{app_id}作为占位符\"}"
 }
 
-# GreenLuma 官方发布页（作者只在 cs.rin.ru 论坛更新，GitHub 上只有第三方管理器/镜像）
 GREENLUMA_OFFICIAL_URL = "https://cs.rin.ru/forum/viewtopic.php?f=10&t=103709"
 
 class STConverter:
@@ -109,8 +106,6 @@ class STConverter:
         return lua_content, metadata
 
 
-# ---------------- Steam 加速（hosts 优选，模块级配置） ----------------
-# (域名, 分组, 说明) —— 只收录国内直连容易抽风、走 hosts 优选有效的关键域名
 STEAM_ACCEL_DOMAINS = [
     ('store.steampowered.com',           '商店', 'Steam 商店主站'),
     ('checkout.steampowered.com',        '商店', '购物车 / 结算'),
@@ -125,7 +120,6 @@ STEAM_ACCEL_DOMAINS = [
     ('steamcdn-a.akamaihd.net',          'CDN',  'Steam CDN（老域名）'),
 ]
 
-# 国内可直连的 DoH（DNS over HTTPS）源，用标准 dns-json 格式拿真实 IP
 STEAM_ACCEL_DOH = [
     'https://dns.alidns.com/resolve',
     'https://doh.pub/dns-query',
@@ -136,7 +130,6 @@ STEAM_ACCEL_DOH = [
 HOSTS_ACCEL_BEGIN = '# ==== 大轩巴 Steam 加速 BEGIN ===='
 HOSTS_ACCEL_END = '# ==== 大轩巴 Steam 加速 END ===='
 
-# 浏览器加速：开发者常用的公共 CDN / 字体 / 包源（hosts 优选能改善国内访问）
 BROWSER_ACCEL_DOMAINS = [
     ('cdn.jsdelivr.net',            'CDN',  'jsDelivr 公共库（npm/CDN）'),
     ('fastly.jsdelivr.net',         'CDN',  'jsDelivr Fastly 节点'),
@@ -148,7 +141,6 @@ BROWSER_ACCEL_DOMAINS = [
     ('registry.npmjs.org',         'npm',  'npm 官方源'),
 ]
 
-# GitHub 加速：github 全量子域（raw/gist/avatar/release/对象存储等）
 GITHUB_ACCEL_DOMAINS = [
     ('github.com',                  '主站', 'GitHub 网站'),
     ('api.github.com',             'API',  'REST / GraphQL 接口'),
@@ -162,7 +154,6 @@ GITHUB_ACCEL_DOMAINS = [
     ('uploads.github.com',          '上传', '上传接口'),
 ]
 
-# 加速分类表：每个分类有独立的 hosts 块标记，互不干扰
 ACCEL_CATEGORIES = {
     'steam': {
         'label': 'Steam',
@@ -193,14 +184,14 @@ class DxbBackend:
         self.config = {}
         self.steam_path = None
         self.unlocker_type = None
+        self.detected_kernels = {'native': True, 'steamtools': False,
+                                 'greenluma': False, 'opensteamtool': False}
         self.lock = asyncio.Lock()
         self.temp_path = self.project_root / 'temp'
         self.log = self._init_log()
-        self.name_cache: Dict[str, str] = {} # NEW: 添加游戏名称缓存
+        self.name_cache: Dict[str, str] = {}
 
     async def __aenter__(self):
-        # 用户可在设置里填自定义代理（http:// 或 socks5://），留空则走直连/系统环境变量。
-        # 国内直连 Steam 社区经常不通，填了代理后端所有请求都走它，比「只加速浏览器」更管用。
         proxy = ''
         try:
             cfg = self._load_config_sync() or {}
@@ -235,7 +226,6 @@ class DxbBackend:
         if not self.config:
             self.log.warning("无法应用日志配置，因为配置尚未加载。")
             return
-        # 主开关：关闭日志输出（仅保留 ERROR 以上，便于安静运行）
         if self.config.get("disable_logging", False):
             level = logging.ERROR
             self.log.setLevel(level)
@@ -243,7 +233,6 @@ class DxbBackend:
                 if isinstance(handler, logging.StreamHandler):
                     handler.setLevel(level)
             self.log.debug("日志输出已按设置关闭（disable_logging）。")
-            # 清掉文件 handler
             self.log.handlers = [h for h in self.log.handlers if not isinstance(h, logging.FileHandler)]
             return
         is_debug = self.config.get("debug_mode", False)
@@ -273,7 +262,6 @@ class DxbBackend:
             import re
             
             def parse_version(v):
-                # 分离主版本号和后缀
                 match = re.match(r'(\d+(?:\.\d+)*)(.*)', v)
                 if not match:
                     return (0, 0, 0), ''
@@ -281,13 +269,10 @@ class DxbBackend:
                 version_nums = match.group(1)
                 suffix = match.group(2)
                 
-                # 解析版本号
                 parts = version_nums.split('.')
-                # 填充到3位
                 while len(parts) < 3:
                     parts.append('0')
                 
-                # 转换为整数元组
                 version_tuple = tuple(int(p) for p in parts[:3])
                 
                 return version_tuple, suffix
@@ -295,14 +280,11 @@ class DxbBackend:
             v1_tuple, v1_suffix = parse_version(v1)
             v2_tuple, v2_suffix = parse_version(v2)
             
-            # 首先比较主版本号
             if v1_tuple < v2_tuple:
                 return -1
             elif v1_tuple > v2_tuple:
                 return 1
             
-            # 版本号相同，比较后缀
-            # 空后缀被认为是正式版本，高于带后缀的版本
             if not v1_suffix and v2_suffix:
                 return 1
             elif v1_suffix and not v2_suffix:
@@ -326,38 +308,31 @@ class DxbBackend:
         try:
             self.log.info("正在检查更新...")
             
-            # GitHub API URL
             api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
             
-            # 获取 GitHub token（如果有的话）
             github_token = self.config.get("Github_Personal_Token", "").strip()
             headers = {'Authorization': f'Bearer {github_token}'} if github_token else {}
             
-            # 添加 User-Agent 以避免 API 限制
             headers['User-Agent'] = 'DaXuanBa-Rukuqi-Updater'
             
-            # 发送请求
             response = await self.client.get(api_url, headers=headers, timeout=10)
             
             if response.status_code == 404:
-                # 没有发布版本
                 self.log.info("未找到发布版本")
                 return False, {}
             
             response.raise_for_status()
             release_data = response.json()
             
-            # 提取版本信息
             latest_version = release_data.get('tag_name', '').strip()
             if latest_version.startswith('v'):
-                latest_version = latest_version[1:]  # 去掉 'v' 前缀
+                latest_version = latest_version[1:]
             
             release_name = release_data.get('name', '')
             release_body = release_data.get('body', '')
             release_url = release_data.get('html_url', '')
             published_at = release_data.get('published_at', '')
             
-            # 获取下载链接
             download_urls = []
             assets = release_data.get('assets', [])
             for asset in assets:
@@ -367,7 +342,6 @@ class DxbBackend:
                     'size': asset.get('size', 0)
                 })
             
-            # 如果没有 assets，使用 zipball_url
             if not download_urls and release_data.get('zipball_url'):
                 download_urls.append({
                     'name': 'Source code (zip)',
@@ -375,7 +349,6 @@ class DxbBackend:
                     'size': 0
                 })
             
-            # 比较版本
             if self._compare_versions(CURRENT_VERSION, latest_version) < 0:
                 self.log.info(f"发现新版本: {latest_version} (当前版本: {CURRENT_VERSION})")
                 return True, {
@@ -404,6 +377,67 @@ class DxbBackend:
             self.log.warning(f"检查更新失败: {e}")
             return False, {}
 
+    async def check_all_updates(self) -> Dict[str, Any]:
+        """一次性「真实」检查更新：应用自身 + 三个内核的远端最新版本，全部并发。
+
+        返回 {'app': {...}, 'kernels': {kind: {...}}, 'checked_at': ts}
+        每一项都带 ok / local / remote / has_update，探不到就如实说探不到，
+        绝不拿本地版本冒充远端版本。
+        """
+        import time as _t
+        kernels = KernelHub(self)
+        kinds = [k for k in KERNEL_SPECS]
+
+        async def _one(kind: str) -> Tuple[str, Dict[str, Any]]:
+            try:
+                loc = kernels.local_status(kind)
+            except Exception as e:
+                return kind, {"ok": False, "note": f"本地检测失败：{str(e)[:80]}"}
+            try:
+                rem = await kernels.remote_latest(kind)
+            except Exception as e:
+                return kind, {"ok": False, "installed": loc.get("installed", False),
+                              "local": loc.get("version", ""), "note": f"远端查询失败：{str(e)[:80]}"}
+            local_v = loc.get("version") or ""
+            remote_v = rem.get("version") or ""
+            upd = False
+            if loc.get("installed") and local_v and remote_v:
+                upd = self._compare_versions(local_v, remote_v) < 0
+            return kind, {
+                "ok": bool(rem.get("ok")),
+                "installed": bool(loc.get("installed")),
+                "builtin": bool(KERNEL_SPECS[kind].get("builtin")),
+                "local": local_v,
+                "remote": remote_v,
+                "has_update": upd,
+                "repo": rem.get("repo", ""),
+                "url": rem.get("url", ""),
+                "note": rem.get("note", ""),
+            }
+
+        async def _app() -> Dict[str, Any]:
+            try:
+                has, info = await self.check_for_updates()
+                return {"ok": bool(info), "local": CURRENT_VERSION,
+                        "remote": (info or {}).get("latest_version", ""),
+                        "has_update": bool(has),
+                        "url": (info or {}).get("release_url", ""),
+                        "note": "" if has else "已是最新版本"}
+            except Exception as e:
+                return {"ok": False, "local": CURRENT_VERSION, "remote": "",
+                        "has_update": False, "note": f"检查失败：{str(e)[:80]}"}
+
+        app_task = asyncio.ensure_future(_app())
+        k_tasks = [asyncio.ensure_future(_one(k)) for k in kinds]
+        app_res = await app_task
+        k_res = dict(await asyncio.gather(*k_tasks))
+        self.log.info("更新检查完成："
+                      + ("应用有新版 " + str(app_res.get("remote")) if app_res.get("has_update") else "应用已是最新")
+                      + "；内核 " + "、".join(
+                          f"{KERNEL_SPECS[k]['name']}{'可更新' if v.get('has_update') else ('已最新' if v.get('ok') else '未取到')}"
+                          for k, v in k_res.items()))
+        return {"app": app_res, "kernels": k_res, "checked_at": int(_t.time())}
+
     async def initialize(self) -> Literal["steamtools", "greenluma", "conflict", "none", None]:
         if not self.config: self.config = await self.load_config()
         if self.config is None: return None
@@ -418,22 +452,26 @@ class DxbBackend:
 
         force_unlocker = self.config.get("force_unlocker_type", "auto")
 
-        if force_unlocker in ["steamtools", "greenluma", "opensteamtool"]:
+        _plug = self.steam_path / 'config' / 'stplug-in'
+        is_steamtools = ((self.steam_path / 'hid.dll').exists() or
+                         (_plug.is_dir() and any(_plug.glob('*.lua'))))
+        is_greenluma = any((self.steam_path / dll).exists() for dll in [
+            'GreenLuma_2025_x86.dll', 'GreenLuma_2025_x64.dll',
+            'user32.dll', 'DLLInjector.exe'])
+        _lua_dir = self.steam_path / 'config' / 'lua'
+        is_opensteamtool = ((self.steam_path / 'OpenSteamTool.dll').exists() or
+                            (_lua_dir.is_dir() and any(_lua_dir.glob('*.lua'))))
+        self.detected_kernels = {
+            'native': True,
+            'steamtools': is_steamtools,
+            'greenluma': is_greenluma,
+            'opensteamtool': is_opensteamtool,
+        }
+
+        if force_unlocker in ["steamtools", "greenluma", "opensteamtool", "native"]:
             self.unlocker_type = force_unlocker
             self.log.warning(f"已根据配置强制使用解锁工具: {force_unlocker}")
         else:
-            # 注意：config\stplug-in 是本程序自己会建的 lua 输出目录，不能凭它判断装没装，
-            # 否则永远「已检测到 SteamTools」。真判据是 hid.dll（官方安装包独有）或目录里真有 lua。
-            _plug = self.steam_path / 'config' / 'stplug-in'
-            is_steamtools = ((self.steam_path / 'hid.dll').exists() or
-                             (_plug.is_dir() and any(_plug.glob('*.lua'))))
-            is_greenluma = any((self.steam_path / dll).exists() for dll in [
-                'GreenLuma_2025_x86.dll', 'GreenLuma_2025_x64.dll',
-                'user32.dll', 'DLLInjector.exe'])
-            _lua_dir = self.steam_path / 'config' / 'lua'
-            # 同理：config\lua 是我们自己会建的输出目录，必须看里面有没有真 lua
-            is_opensteamtool = ((self.steam_path / 'OpenSteamTool.dll').exists() or
-                                (_lua_dir.is_dir() and any(_lua_dir.glob('*.lua'))))
             if is_steamtools and is_greenluma:
                 self.log.error("环境冲突：同时检测到SteamTools和GreenLuma！请在设置中强制指定一个。")
                 self.unlocker_type = "conflict"
@@ -449,7 +487,6 @@ class DxbBackend:
             else:
                 self.log.warning("未能自动检测到解锁工具。")
                 if self.config.get("auto_install_unlocker", True):
-                    # 不阻塞初始化流程，标记后台安装，页面先出来
                     self._pending_unlocker_install = True
                     self.log.info("将在后台自动下载并安装解锁工具...")
                 self.unlocker_type = "none"
@@ -458,7 +495,6 @@ class DxbBackend:
             (self.steam_path / 'config' / 'stplug-in').mkdir(parents=True, exist_ok=True)
             (self.steam_path / 'AppList').mkdir(parents=True, exist_ok=True)
             (self.steam_path / 'depotcache').mkdir(parents=True, exist_ok=True)
-            # Create config/depotcache for workshop manifests
             (self.steam_path / 'config' / 'depotcache').mkdir(parents=True, exist_ok=True)
         except Exception as e:
             self.log.error(f"创建Steam子目录时失败: {e}")
@@ -580,7 +616,6 @@ class DxbBackend:
         ext_dir = self.temp_path / 'opensteamtool_extract'
         if not await self._download_and_extract(download_url, ext_dir):
             return None
-        # 复制核心 dll 到 Steam 根目录
         copied = False
         for dll in ext_dir.rglob('OpenSteamTool.dll'):
             shutil.copy2(dll, sp / dll.name)
@@ -589,13 +624,10 @@ class DxbBackend:
             shutil.copy2(dll, sp / dll.name)
         for dll in ext_dir.rglob('xinput1_4.dll'):
             shutil.copy2(dll, sp / dll.name)
-        # 导入检测到的 Steam 主文件夹：确保 config\\lua 目录存在
         lua_dir = sp / 'config' / 'lua'
         lua_dir.mkdir(parents=True, exist_ok=True)
-        # 若压缩包内已有 lua 示例，也一并复制
         for lua in ext_dir.rglob('*.lua'):
             shutil.copy2(lua, lua_dir / lua.name)
-        # 写版本标记
         tag = await self._fetch_release_tag(repo)
         try:
             (sp / 'opensteamtool_version.txt').write_text(tag or asset_name, encoding='utf-8')
@@ -627,7 +659,6 @@ class DxbBackend:
             return None
         download_url, asset_name = asset
         ext_dir = self.temp_path / 'steamtools_extract'
-        # 优先尝试 zip；若资产是 7z 则用 _download_and_extract 的 zip 分支会失败，给出提示
         ok = False
         if asset_name.lower().endswith('.zip'):
             ok = await self._download_and_extract(download_url, ext_dir)
@@ -663,7 +694,7 @@ class DxbBackend:
             low = (asset_name or '').lower()
             if low.endswith('.7z'):
                 try:
-                    import py7zr  # 可选依赖，缺失时降级提示手动安装
+                    import py7zr
                 except Exception:
                     self.log.warning("发布包是 7z 但缺少 py7zr，无法自动解压，请手动安装。")
                     return False
@@ -713,7 +744,6 @@ class DxbBackend:
             return None
         download_url, asset_name = asset
 
-        # 部分镜像只发单文件 GreenLuma.exe（自注入式），直接放进 Steam 根目录
         if asset_name.lower().endswith('.exe'):
             data = await self._download_bytes(download_url)
             if not data:
@@ -750,7 +780,6 @@ class DxbBackend:
             except Exception as e:
                 self.log.error(f"释放 {dll.name} 失败: {e}")
         if not copied:
-            # 兼容其它命名/分支：只收名字里带 greenluma 的 DLL，避免污染 Steam 目录
             for dll in sorted(ext_dir.rglob('*.dll')):
                 if 'greenluma' in dll.name.lower():
                     try:
@@ -763,7 +792,6 @@ class DxbBackend:
             shutil.rmtree(ext_dir, ignore_errors=True)
             return None
 
-        # AppList：GreenLuma 的解锁目标清单目录，包里有就一并释放
         for extra in ('AppList', 'AppList_x64'):
             src_d = ext_dir / extra
             if src_d.is_dir():
@@ -772,14 +800,12 @@ class DxbBackend:
                     self.log.info(f"已释放 {extra} 目录到 Steam 根目录。")
                 except Exception as e:
                     self.log.warning(f"释放 {extra} 失败: {e}")
-        # DLLInjector / GreenLuma.exe / 配置 ini 等随包释放（不覆盖 Steam 自身文件）
         for pat in ('GreenLuma*.exe', 'DLLInjector*.exe', '*.ini'):
             for f in sorted(ext_dir.glob(pat)):
                 try:
                     shutil.copy2(f, sp / f.name)
                 except Exception:
                     pass
-        # AppList 是 GreenLuma 的解锁目标目录，缺失时先建好空目录，避免用户手动找路径
         try:
             (sp / 'AppList').mkdir(exist_ok=True)
         except Exception:
@@ -809,7 +835,6 @@ class DxbBackend:
     async def gen_config_file(self):
         config_path = self.project_root / 'config.json'
         try:
-        # 确保目录存在
             config_path.parent.mkdir(exist_ok=True, parents=True)
         
             with open(config_path, mode="w", encoding="utf-8") as f:
@@ -840,12 +865,10 @@ class DxbBackend:
 
         try:
             async with aiofiles.open(config_path, mode="r", encoding="utf-8") as f:
-                # --- MODIFIED: Load config and merge with defaults to handle new keys ---
                 user_config = json.loads(await f.read())
                 config = DEFAULT_CONFIG.copy()
                 config.update(user_config)
                 
-                # --- NEW: Ensure Custom_Repos structure exists ---
                 if 'Custom_Repos' not in config:
                     config['Custom_Repos'] = {"github": [], "zip": []}
                 elif not isinstance(config['Custom_Repos'], dict):
@@ -893,7 +916,6 @@ class DxbBackend:
         """定位 Steam 安装目录。多路探测，任一命中即可：
         自定义路径 → 注册表(HKCU/HKLM 32+64) → 常见默认位置。
         单一来源失败就整体“识别不出来”，所以必须逐个兜底。"""
-        # 1) 用户手工指定的路径优先（存在才用，否则继续自动探测）
         try:
             custom = str(self.config.get("Custom_Steam_Path") or "").strip()
             if custom:
@@ -903,7 +925,6 @@ class DxbBackend:
                 self.log.warning(f"配置里的 Steam 路径不存在：{custom}，继续自动探测。")
         except Exception:
             pass
-        # 2) 注册表
         for cand in self._steam_registry_paths():
             try:
                 p = Path(cand)
@@ -911,7 +932,6 @@ class DxbBackend:
                     return p
             except Exception:
                 continue
-        # 3) 常见安装位置兜底（注册表被清过、绿色版 Steam 都靠这一步救回来）
         for cand in (r'C:\Program Files (x86)\Steam', r'C:\Program Files\Steam',
                      r'D:\Steam', r'E:\Steam', r'D:\Program Files (x86)\Steam'):
             try:
@@ -922,6 +942,62 @@ class DxbBackend:
                 continue
         self.log.error('获取Steam路径失败。请检查Steam是否正确安装，或在设置页手动指定 Steam 路径。')
         return None
+
+    def steam_account(self) -> Dict[str, Any]:
+        """返回 {logged_in, steamid64, accountid, steam3, persona, avatar_path, most_recent}"""
+        out = {"logged_in": False, "steamid64": "", "accountid": "", "steam3": "",
+               "persona": "", "avatar_path": "", "most_recent": False}
+        sp = self.get_steam_path()
+        if not sp or not sp.exists():
+            out["error"] = "没有检测到 Steam 目录"
+            return out
+        lf = sp / 'config' / 'loginusers.vdf'
+        if not lf.exists():
+            out["error"] = f"没有 {lf}（Steam 从没登录过这台机器？）"
+            return out
+        try:
+            data = vdf.loads(lf.read_text(encoding='utf-8', errors='ignore'))
+        except Exception as e:
+            out["error"] = f"解析 loginusers.vdf 失败：{e}"
+            return out
+        users = data.get('users') or {}
+        best = None
+        for key, u in users.items():
+            if not isinstance(u, dict):
+                continue
+            sid64 = str(u.get('Steam64') or u.get('steamid64') or '')
+            if not sid64 and str(key).isdigit():
+                sid64 = str(key)
+            try:
+                acc = int(u.get('AccountID') or u.get('accountid') or 0)
+            except Exception:
+                acc = 0
+            if best is None or (u.get('MostRecent') in (1, '1', True)
+                                and not best.get('_recent')):
+                best = dict(u); best['_recent'] = u.get('MostRecent') in (1, '1', True)
+                best['_sid64'] = sid64; best['_acc'] = acc
+        if not best:
+            out["error"] = "loginusers.vdf 里没有账号记录"
+            return out
+        sid64 = best.get('_sid64', '')
+        acc = best.get('_acc', 0)
+        out.update({
+            "logged_in": True,
+            "steamid64": sid64,
+            "accountid": str(acc),
+            "steam3": str(acc) if acc else "",
+            "persona": str(best.get('PersonaName') or ''),
+            "most_recent": bool(best.get('_recent')),
+        })
+        if sid64:
+            av = sp / 'config' / 'avatarcache' / f'{sid64}.png'
+            if av.exists():
+                out["avatar_path"] = str(av)
+        if not out["avatar_path"] and acc:
+            cands = sorted((sp / 'userdata').glob(f'{acc}*')) if (sp / 'userdata').is_dir() else []
+            if cands:
+                out["userdata_dir"] = str(cands[0])
+        return out
 
     def get_steam_status(self) -> Dict:
         """检测 Steam 路径与已安装内核，供首页状态条显示。
@@ -935,7 +1011,6 @@ class DxbBackend:
                     "steamtools": False, "greenluma": False, "opensteamtool": False}
         is_steamtools = (sp / 'config' / 'stplug-in').is_dir()
         is_greenluma = any(sp.glob('GreenLuma*.dll'))
-        # OpenSteamTool：Steam 根目录的 OpenSteamTool.dll 或 config\\lua 目录
         is_opensteamtool = (sp / 'OpenSteamTool.dll').exists() or (sp / 'config' / 'lua').is_dir()
         if is_steamtools:
             kernel = "steamtools"
@@ -1019,10 +1094,9 @@ class DxbBackend:
                 "repo": repo, "manual_only": not repo,
                 "official_url": GREENLUMA_OFFICIAL_URL}
 
-    # 已知“非游戏”的运行库/工具 AppID：商店详情拿不到时据此过滤，避免误当游戏
     _NON_GAME_APPIDS = {
-        '228980',   # Steamworks Common Redistributables
-        '1070560', '1391110', '1628350',  # Steam Linux Runtime 系列
+        '228980',
+        '1070560', '1391110', '1628350',
     }
 
     def _steam_library_roots(self, sp: Path) -> List[Path]:
@@ -1101,8 +1175,6 @@ class DxbBackend:
                              "② 是否有权限读取（试试用管理员身份运行）；"
                              "③ 到「设置」页手动指定 Steam 路径。")}
 
-        # ⚠️ appdetails 一次传多个 appid（逗号）会返回 HTTP 400（2026-09 实测），
-        #    必须逐个查；用线程池并发，避免装了几十个游戏时串行卡死。
         appids = list(installed.keys())
         details: Dict[str, Dict] = {}
         try:
@@ -1116,7 +1188,7 @@ class DxbBackend:
             self.log.warning(f"查询商店详情失败: {e}")
 
         games = []
-        dlcs = {}  # parent_appid -> [{appid,name}]
+        dlcs = {}
         others = []
         for appid, meta in installed.items():
             d = details.get(appid, {})
@@ -1124,13 +1196,10 @@ class DxbBackend:
             fgame = d.get('fullgame')
             gtype = (d.get('type') or '').lower()
             if fgame and str(fgame.get('appid')) != appid:
-                # 这是 DLC，归入父游戏
                 dlcs.setdefault(str(fgame.get('appid')), []).append({"appid": appid, "name": name})
             elif gtype in ('game', 'application', 'demo'):
                 games.append({"appid": appid, "name": name, "dlcs": []})
             elif not d:
-                # 详情查不到（超时/被拦）不能据此判定它不是游戏，
-                # 用 acf 里的名字兜底，排除已知运行库后当游戏显示
                 if appid in self._NON_GAME_APPIDS:
                     others.append({"appid": appid, "name": name})
                 else:
@@ -1138,13 +1207,11 @@ class DxbBackend:
             else:
                 others.append({"appid": appid, "name": name})
 
-        # 把已装的 DLC 挂到对应游戏下
         dlc_count = 0
         for g in games:
             owned = dlcs.get(g['appid'], [])
             g['dlcs'] = owned
             dlc_count += len(owned)
-        # 父游戏未在已装列表中的 DLC（孤儿）归到 others
         parented = {g['appid'] for g in games}
         for parent, lst in dlcs.items():
             if parent not in parented:
@@ -1156,13 +1223,7 @@ class DxbBackend:
                 "total": len(games), "dlc_total": dlc_count,
                 "steam_path": str(sp), "libraries": [str(r) for r in roots]}
 
-    # ---------------- Steam 下载管理 ----------------
-    # Steam 的下载 / 更新状态全在 appmanifest_*.acf 的 StateFlags 位里（EAppState）：
-    #   1=未安装  2=需要更新  4=已完整安装  8=排队待更新  32=文件缺失  128=文件损坏
-    #   256=更新中  512=已暂停  1024=更新已开始  2048=卸载中  32768=校验中
-    #   65536=写入文件  131072=预分配  262144=下载中  524288=落盘(staging)
     _ACF_ACTIVE_BITS = (256 | 1024 | 2048 | 32768 | 65536 | 131072 | 262144 | 524288 | 1048576)
-    # 顺序即优先级：越靠前越是“正在进行中”，最后才轮到已安装/未安装
     _ACF_STATE_TEXT = [
         (2048, '正在卸载'), (262144, '正在下载'), (524288, '正在安装'),
         (65536, '正在写入文件'), (131072, '正在预分配'), (32768, '正在校验文件'),
@@ -1231,7 +1292,6 @@ class DxbBackend:
                 is_active = bool(flags & self._ACF_ACTIVE_BITS) \
                     or (bool(flags & 2) and not installed) \
                     or (appid in downloading)
-                # 落盘阶段看 staged，下载阶段看 BytesDownloaded；都没有就退回磁盘占用
                 if flags & 524288 and to_stage > 0:
                     cur, tot = staged, to_stage
                 else:
@@ -1261,7 +1321,6 @@ class DxbBackend:
                 })
         active = sorted([i for i in items if i['active']], key=lambda x: x['name'].lower())
         done_all = [i for i in items if not i['active']]
-        # 运行库类（Steamworks Redistributable 之类）单独归一组，不污染游戏列表
         runtime = sorted([i for i in done_all if i['appid'] in self._NON_GAME_APPIDS],
                          key=lambda x: x['name'].lower())
         done = sorted([i for i in done_all if i['appid'] not in self._NON_GAME_APPIDS],
@@ -1311,7 +1370,6 @@ class DxbBackend:
                 "removed_files": removed_files, "removed_dirs": removed_dirs,
                 "backup_dir": str(backup_dir)}
 
-    # ---------------- Steam 环境诊断 / 一键修复 ----------------
     def _steam_registry_paths(self) -> List[str]:
         """从注册表挖 Steam 安装路径（HKCU 主 + HKLM 32/64 位兜底）。"""
         out: List[str] = []
@@ -1337,7 +1395,6 @@ class DxbBackend:
             return False
         try:
             kw = {'creationflags': 0x08000000} if hasattr(subprocess, 'CREATE_NO_WINDOW') else {}
-            # 中文 Windows 的 tasklist 输出是 GBK，用UTF-8解会直接 UnicodeDecodeError
             r = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq steam.exe', '/NH'],
                                capture_output=True, text=True, timeout=15,
                                encoding='gbk', errors='ignore', **kw)
@@ -1401,7 +1458,6 @@ class DxbBackend:
         except Exception:
             return False
 
-    # ================= Steam 加速（hosts 优选） =================
 
     @property
     def _hosts_file(self) -> Path:
@@ -1415,8 +1471,6 @@ class DxbBackend:
         except Exception:
             return False
 
-    # 早期版本写进配置的 GreenLuma 默认仓库（实测 GitHub 404，不是真实镜像）——
-    # 一律按「未配置」处理，走诚实的官方下载页引导，而不是让按钮报一个 404。
     _DEAD_GREENLUMA_REPOS = {
         'wintersamza/greenluma_2025', 'wintersamza/greenluma', 'greenluma/2025',
         'greenluma_2025/greenluma_2025',
@@ -1533,7 +1587,7 @@ class DxbBackend:
         ip = (ip or '').strip()
         if not ip:
             return True
-        if ':' in ip:                      # IPv6 一律不处理
+        if ':' in ip:
             return True
         p = ip.split('.')
         if len(p) != 4:
@@ -1656,7 +1710,6 @@ class DxbBackend:
         want = set(domains or [])
         targets = [t for t in cat['domains'] if not want or t[0] in want] or list(cat['domains'])
 
-        # 1) 并发查多个 DoH 源，合并候选池
         pool: Dict[str, List[str]] = {}
         with ThreadPoolExecutor(max_workers=16) as ex:
             futs = {ex.submit(self._doh_query, p, d): d
@@ -1672,20 +1725,16 @@ class DxbBackend:
                     if ip not in bucket:
                         bucket.append(ip)
 
-        # 系统解析兜底：保证候选池里至少有当前在用的 IP，结果不会比现状更差
         for d, _, _ in targets:
             bucket = pool.setdefault(d, [])
             for ip in self._system_resolve(d):
                 if ip not in bucket:
                     bucket.append(ip)
 
-        # 剔除回环 / 内网地址：那是本地反代（Steam 社区 302 / Steam++）留下的产物，
-        # 测起来最快，但写进 hosts 等于把流量导回本机，反而绕死。
         local_accel = self._detect_local_accel()
         for d in list(pool):
             pool[d] = [ip for ip in pool[d] if not self._is_local_ip(ip)]
 
-        # 2) 并发测速
         probed: Dict[str, List[Dict]] = {d: [] for d, _, _ in targets}
         with ThreadPoolExecutor(max_workers=32) as ex:
             job = {}
@@ -1707,7 +1756,6 @@ class DxbBackend:
             cands = sorted(probed.get(d, []),
                            key=lambda x: (not x.get('ok'), x.get('score', 1e9)))
             alive = [c for c in cands if c.get('ok')]
-            # 全部候选都是「证书对不上」→ 这个域名被 DNS 污染了，hosts 优选救不了它
             poisoned = bool(cands) and not alive and all(
                 c.get('error') == 'cert_mismatch' for c in cands)
             if alive:
@@ -1801,9 +1849,6 @@ class DxbBackend:
         return {'success': True, 'category': category, 'removed': n, 'dns_flushed': flushed,
                 'message': f'已移除加速记录（{n} 条）' + ('，DNS 缓存已刷新' if flushed else '')}
 
-    # ---------------- 免hosts 加速（Chromium host-resolver-rules） ----------------
-    # 不改系统 hosts、不需管理员：把每个域名 MAP 到优选 IP，由内置浏览器(Chromium)
-    # 在解析阶段直接走优选 IP。其余域名 MAP * * 走系统默认解析，不影响本机回环。
     def accel_hostsfree_apply(self, category: str, entries: List[Dict]) -> Dict:
         """保存某分类的「域名→IP」映射到 config，供启动时注入 Chromium --host-resolver-rules。"""
         cat = ACCEL_CATEGORIES.get(category, ACCEL_CATEGORIES['steam'])
@@ -1853,7 +1898,7 @@ class DxbBackend:
                 rules.append(f'MAP {d} {ip}')
         if not rules:
             return ''
-        rules.append('MAP * *')  # 其余域名走系统默认解析
+        rules.append('MAP * *')
         return ','.join(rules)
 
     def steam_diagnose(self) -> Dict:
@@ -1868,7 +1913,6 @@ class DxbBackend:
             if fix:
                 fixes.append(fix)
 
-        # 1) 安装路径
         sp = self.get_steam_path()
         sp_ok = bool(sp and sp.exists())
         detail = str(sp) if sp_ok else '找不到 Steam 目录'
@@ -1877,7 +1921,6 @@ class DxbBackend:
             detail += ('（注册表候选：' + ' / '.join(reg) + '）') if reg else '（注册表里也没有记录，请手动指定）'
         add('steam_path', 'Steam 安装路径', sp_ok, detail)
 
-        # 2) 进程
         running = self._steam_running()
         add('steam_running', 'Steam 客户端进程', True,
             '正在运行' if running else '未运行（新入库的清单要重启 Steam 才生效）',
@@ -1886,7 +1929,6 @@ class DxbBackend:
             fixes.append({"id": "restart_steam", "name": "重启 Steam",
                           "desc": "清掉旧缓存状态，让新入库的清单立即生效"})
 
-        # 3) 目录写权限
         if sp_ok:
             writable = False
             probe = sp / '.dxb_write_test'
@@ -1904,7 +1946,6 @@ class DxbBackend:
                 '可写入，入库不受影响' if writable
                 else '不可写入 —— 请用管理员身份运行本程序，或把 Steam 装到非系统盘')
 
-        # 4) 磁盘空间
         if sp_ok:
             try:
                 du = shutil.disk_usage(str(sp))
@@ -1916,7 +1957,6 @@ class DxbBackend:
             except Exception:
                 pass
 
-        # 5) 内核（入库方式）
         try:
             st = self.get_steam_status()
             kernel = st.get('kernel', 'none')
@@ -1928,7 +1968,6 @@ class DxbBackend:
         except Exception:
             pass
 
-        # 6) hosts 屏蔽
         hosts_hits = self._hosts_steam_entries()
         add('hosts', 'hosts 屏蔽检查', not hosts_hits,
             '未发现屏蔽 Steam 的记录' if not hosts_hits
@@ -1938,8 +1977,6 @@ class DxbBackend:
             fixes.append({"id": "fix_hosts", "name": "注释掉 hosts 里的 Steam 记录",
                           "desc": "改写前会备份 hosts 到 userdata，可随时还原"})
 
-        # 6.5) 本地反代型加速器（Steam 社区 302 / Steam++ / Watt Toolkit）
-        #      这类工具把域名解析到 127.0.0.1 并在本地 443 监听，与 hosts 优选互斥。
         la = self._detect_local_accel()
         la_proc = la.get('process') or '本地加速器'
         la_pid = f'（PID {la["pid"]}）' if la.get('pid') else ''
@@ -1950,7 +1987,6 @@ class DxbBackend:
                   '它和「Steam 加速」的 hosts 优选会互相覆盖，建议二选一。'),
             level='ok' if not la['active'] else 'warn')
 
-        # 7) 下载缓存体积
         if sp_ok:
             hc = sp / 'appcache' / 'httpcache'
             if hc.is_dir():
@@ -1963,7 +1999,6 @@ class DxbBackend:
                     fixes.append({"id": "clean_httpcache", "name": "清理 Steam 网页缓存",
                                   "desc": "删除 appcache/httpcache，Steam 会自动重建（安全，需先关掉 Steam）"})
 
-        # 8) 下载残留
         if sp_ok:
             residue = []
             for root in self._steam_library_roots(sp):
@@ -1983,7 +2018,6 @@ class DxbBackend:
                 fixes.append({"id": "clean_downloading", "name": "清理下载残留",
                               "desc": f'删除 {len(residue)} 个孤儿下载缓存目录（不碰已安装的游戏）'})
 
-        # 9) 网络连通性
         store_ok = self._net_probe('https://store.steampowered.com/login/')
         api_ok = self._net_probe('https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/')
         add('network', 'Steam 服务连通性', store_ok or api_ok,
@@ -2004,7 +2038,7 @@ class DxbBackend:
         actions = [str(a) for a in (actions or [])]
         results: List[Dict] = []
         sp = self.get_steam_path()
-        self.steam_path = sp          # restart_steam 依赖这个属性
+        self.steam_path = sp
 
         def rec(action, ok, message):
             results.append({"action": action, "success": bool(ok), "message": message})
@@ -2079,7 +2113,6 @@ class DxbBackend:
         return {"success": ok_all, "results": results,
                 "message": '修复完成。' if ok_all else '部分修复项未成功，请看下面的明细。'}
 
-    # --- 免费游戏页 ---
     def free_games_list(self, query: str = "", max_items: int = 400) -> Dict:
         """用 Steam 官方搜索接口（maxprice=free）分页抓取免费游戏，最多 max_items 个。
         AppID 从 logo URL 的 /apps/<id>/ 中提取。"""
@@ -2144,7 +2177,6 @@ class DxbBackend:
                     games.append({
                         "appid": appid,
                         "name": (it.get('name') or '').strip(),
-                        # 官方给了带 hash 目录的完整图片地址，拼模板会 404，必须原样交给代理
                         "image": (it.get('header_image') or it.get('large_capsule_image')
                                   or it.get('small_capsule_image') or ''),
                         "discount_percent": it.get('discount_percent') or 0,
@@ -2161,9 +2193,6 @@ class DxbBackend:
             self.log.error(f"获取推荐数据失败: {self.stack_error(e)}")
             return {"success": False, "message": f"获取推荐数据失败: {e}", "sections": []}
 
-    # 封面图多 CDN / 多路径回退（2026-09 实测国内均可直连）
-    # 注意：新游戏的图片在 store_item_assets 的 hash 子目录下（.../apps/<id>/<hash>/header.jpg），
-    #       拼固定模板必然 404，所以模板全失败后要用 appdetails 拿官方 header_image 兜底。
     _STEAM_IMG_HOSTS = (
         'https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/header.jpg',
         'https://cdn.akamai.steamstatic.com/steam/apps/{id}/header.jpg',
@@ -2171,7 +2200,6 @@ class DxbBackend:
         'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg',
         'https://steamcdn-a.akamaihd.net/steam/apps/{id}/header.jpg',
         'https://media.st.dl.eccdnx.com/steam/apps/{id}/header.jpg',
-        # 新游戏 header.jpg 常不存在，以下为同目录回退
         'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{id}/header_schinese.jpg',
         'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{id}/capsule_616x353.jpg',
         'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{id}/capsule_231x87.jpg',
@@ -2180,7 +2208,6 @@ class DxbBackend:
         'https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900.jpg',
     )
 
-    # 允许代理的图片域名后缀（避免本地服务被当成任意 URL 转发器）
     _IMG_ALLOW_SUFFIX = (
         '.steamstatic.com', '.akamaihd.net', '.eccdnx.com',
     )
@@ -2291,7 +2318,6 @@ class DxbBackend:
                         continue
         except Exception as e:
             self.log.warning(f'获取封面失败 {appid}: {e}')
-        # 模板全失败：用 appdetails 拿官方图片地址
         info = self._steam_appdetails_one(appid)
         for key in ('header_image', 'capsule_image', 'capsule_imagev5', 'background'):
             u = info.get(key)
@@ -2311,7 +2337,6 @@ class DxbBackend:
             import httpx as _httpx
             name, avatar = "", ""
             with _httpx.Client(verify=False, timeout=30, follow_redirects=True) as cli:
-                # 个人资料
                 try:
                     pr = cli.get("https://steamcommunity.com/my/profile?json=1", headers=headers)
                     if pr.ok:
@@ -2320,13 +2345,12 @@ class DxbBackend:
                         avatar = pj.get('avatarFull') or pj.get('avatar') or avatar
                 except Exception as e:
                     self.log.warning(f"获取 Steam 个人资料失败: {e}")
-                # 钱包余额
                 balance, currency = None, ""
                 try:
                     wr = cli.get("https://store.steampowered.com/api/userwalletinfo/v1/", headers=headers)
                     if wr.ok:
                         wj = wr.json()
-                        balance = wj.get('wallet_balance')  # 单位：分
+                        balance = wj.get('wallet_balance')
                         currency = wj.get('wallet_country') or wj.get('currency') or ""
                 except Exception as e:
                     self.log.warning(f"获取钱包余额失败: {e}")
@@ -2378,7 +2402,6 @@ class DxbBackend:
             self.log.error(f"免费游戏入库失败: {self.stack_error(e)}")
             return {"success": False, "message": f"入库失败: {e}", "injected": 0, "skipped": 0}
 
-    # --- NEW: File Manager Methods ---
 
     async def _fetch_game_name_for_manager(self, appid: str) -> str:
         """为文件管理器异步获取游戏名称，并使用缓存。现在使用小黑盒API。"""
@@ -2389,17 +2412,14 @@ class DxbBackend:
 
         url = f"https://api.xiaoheihe.cn/game/share_game_detail?appid={appid}"
         try:
-            # 使用现有client
             response = await self.client.get(url, headers={'User-Agent': 'DaXuanBa-Rukuqi/1.0'})
             response.raise_for_status()
             html_content = response.text
             
-            # 使用正则表达式从HTML中提取<title>标签的内容
             title_match = re.search(r'<title>(.*?)</title>', html_content, re.IGNORECASE)
             
             if title_match:
                 name = title_match.group(1).strip()
-                # 小黑盒的标题可能包含 "-小黑盒" 后缀，需要移除
                 if " - 小黑盒" in name:
                     name = name.replace(" - 小黑盒", "").strip()
                 self.name_cache[appid] = name
@@ -2418,22 +2438,17 @@ class DxbBackend:
         file_data = {"st": [], "gl": [], "assistant": []}
         all_appids_to_fetch = set()
 
-        # 1. 扫描文件并收集AppID
         st_path = self.steam_path / 'config' / 'stplug-in'
         gl_path = self.steam_path / 'AppList'
 
-        # SteamTools
         if st_path.exists():
             file_data['st'], st_appids = self._scan_st_files(st_path)
             all_appids_to_fetch.update(st_appids)
 
-        # GreenLuma
         if gl_path.exists():
             file_data['gl'], gl_appids = self._scan_generic_files(gl_path, ".txt")
             all_appids_to_fetch.update(gl_appids)
 
-        # 2. 批量获取游戏名称
-        # 过滤掉已在缓存中的AppID
         appids_to_fetch = [appid for appid in all_appids_to_fetch if appid not in self.name_cache]
         if appids_to_fetch:
             tasks = [self._fetch_game_name_for_manager(appid) for appid in appids_to_fetch]
@@ -2441,7 +2456,6 @@ class DxbBackend:
             for appid, name in zip(appids_to_fetch, results):
                 self.name_cache[appid] = name
 
-        # 3. 将获取到的名称填充回数据
         for category in file_data:
             for item in file_data[category]:
                 if item['appid'] in self.name_cache:
@@ -2467,7 +2481,6 @@ class DxbBackend:
             if st_lua_path.exists():
                 data.append({"filename": "steamtools.lua", "appid": "N/A", "game_name": "SteamTools核心文件", "status": "core_file"})
                 content = st_lua_path.read_text(encoding='utf-8', errors='ignore')
-                # --- CRITICAL FIX: Use a more general regex to find all appids ---
                 unlocked_appids = set(re.findall(r'addappid\s*\(\s*(\d+)', content))
                 for appid in unlocked_appids:
                     if appid not in file_data_map:
@@ -2487,22 +2500,18 @@ class DxbBackend:
             for filename in files:
                 file_path = directory / filename
 
-                # 对于GreenLuma，读取TXT文件内容获取AppID
                 if extension == ".txt":
                     try:
                         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                             content = f.read().strip()
-                            # 尝试将文件内容解析为AppID
                             if content.isdigit():
                                 appid = content
                             else:
-                                # 如果内容不是纯数字，使用文件名作为备用
                                 appid = Path(filename).stem
                     except Exception as e:
                         self.log.warning(f"读取GreenLuma文件 {filename} 失败: {e}")
                         appid = Path(filename).stem
                 else:
-                    # 对于其他文件类型，使用文件名
                     appid = Path(filename).stem
 
                 if appid.isdigit():
@@ -2511,7 +2520,6 @@ class DxbBackend:
         except Exception as e:
             self.log.error(f"扫描目录 {directory} 失败: {e}")
 
-        # 按AppID数字大小排序
         data.sort(key=lambda x: int(x.get('appid', 0)) if x.get('appid', '0').isdigit() else 0, reverse=True)
         return data, appids
     
@@ -2533,16 +2541,13 @@ class DxbBackend:
         
         for item in items:
             try:
-                # 步骤1: 如果是ST类型，清理 steamtools.lua 中的解锁条目
                 if file_type == 'st' and item.get('status') != 'core_file' and item.get('appid', 'N/A').isdigit():
                     self._modify_st_lua_for_delete(item['appid'])
 
-                # 步骤2: 清理物理文件和关联的 manifest
                 filename = item.get('filename')
                 if filename and "缺少" not in filename:
                     file_path = base_path / filename
                     if file_path.exists() and file_path.is_file():
-                        # --- NEW: Logic to clean up associated manifest files ---
                         if file_type == 'st' and filename.endswith('.lua'):
                             try:
                                 content = file_path.read_text(encoding='utf-8', errors='ignore')
@@ -2561,7 +2566,6 @@ class DxbBackend:
                             except Exception as e:
                                 self.log.error(f"清理 {filename} 的清单时失败: {e}")
                         
-                        # 删除主文件
                         os.remove(file_path)
                         deleted_count += 1
             except Exception as e:
@@ -2585,22 +2589,18 @@ class DxbBackend:
 
         try:
             content = st_lua_path.read_text(encoding='utf-8', errors='ignore')
-            # 匹配 addappid(XXX, 1) 或 addappid(XXX) 两种形式
             pattern = re.compile(r'^\s*addappid\s*\(\s*' + re.escape(appid) + r'[^)]*\)\s*$', re.MULTILINE)
             new_content, count = pattern.subn('', content)
             
             if count > 0:
-                # 清理空行
                 new_content_cleaned = "\n".join(line for line in new_content.splitlines() if line.strip())
                 st_lua_path.write_text(new_content_cleaned + "\n" if new_content_cleaned else "", encoding='utf-8')
                 self.log.info(f"已从 steamtools.lua 移除 AppID {appid} 的解锁条目。")
         except Exception as e:
             self.log.error(f"修改 steamtools.lua 以删除 AppID {appid} 时失败: {e}")
-            raise # 重新抛出异常，让上层捕获
+            raise
             
-    # --- END OF File Manager Methods ---
 
-    # --- NEW: Custom repository support functions ---
     def get_custom_github_repos(self) -> List[Dict]:
         """获取自定义GitHub仓库列表"""
         custom_repos = self.config.get("Custom_Repos", {}).get("github", [])
@@ -2621,7 +2621,6 @@ class DxbBackend:
         
         for repo in custom_repos:
             if isinstance(repo, dict) and 'name' in repo and 'url' in repo:
-                # 验证URL中是否包含{app_id}占位符
                 if '{app_id}' in repo['url']:
                     validated_repos.append(repo)
                 else:
@@ -2636,7 +2635,6 @@ class DxbBackend:
         repo_name = repo_config.get('name', '未知仓库')
         url_template = repo_config.get('url', '')
         
-        # 替换占位符
         download_url = url_template.replace('{app_id}', app_id)
         
         return await self._process_zip_manifest_generic(app_id, download_url, f"自定义ZIP库 ({repo_name})", self.unlocker_type, False, add_all_dlc, patch_depot_key)
@@ -2647,15 +2645,8 @@ class DxbBackend:
         custom_repos = [repo['repo'] for repo in self.get_custom_github_repos()]
         return builtin_repos + custom_repos
 
-    # ============================================================
-    # 清单源可用性探测（测试所有清单，剔除不可用，自动选最优）
-    # 每个内置源映射一个"根可达性"探针 URL + 质量权重(越大越优先)
-    #   None 探针 => 始终可用（如自动搜索 search）
-    # ============================================================
     SOURCE_PROBE: Dict[str, Any] = {
-        # 自动搜索：始终可用，权重最高（兜底）
         "search": None,
-        # GitHub 仓库源（探测 github.com 仓库页可达性，不耗 API rate）
         "Auiowu/ManifestAutoUpdate":      ("https://github.com/Auiowu/ManifestAutoUpdate", 95),
         "SteamAutoCracks/ManifestHub":    ("https://github.com/SteamAutoCracks/ManifestHub", 90),
         "ikun0014/ManifestHub":           ("https://github.com/ikun0014/ManifestHub", 88),
@@ -2664,44 +2655,70 @@ class DxbBackend:
         "Cyberbolt/ManifestAutoUpdate":   ("https://github.com/Cyberbolt/ManifestAutoUpdate", 80),
         "Fairyvmos/bruh-hub":             ("https://github.com/Fairyvmos/bruh-hub", 78),
         "Cracko298/ManifestHub":          ("https://github.com/Cracko298/ManifestHub", 75),
-        # ZIP 直链源（探测服务根域名可达性）
         "printedwaste":                   ("https://api.printedwaste.com/", 70),
         "steamdatabase":                  ("https://steamdatabase.s3.eu-north-1.amazonaws.com/", 68),
         "furcate":                        ("https://furcate.eu/", 64),
         "cysaw":                          ("https://cysaw.top/", 60),
         "walftech":                       ("https://walftech.com/", 55),
-        # 特殊源（走 steamui / ddxnb API）
         "steamautocracks_v2":             ("https://steamui.com/", 50),
         "sudama":                         ("https://steam.ddxnb.cn/", 52),
         "buqiuren":                       ("https://steamui.com/", 50),
     }
 
-    # 探测结果缓存（300s），避免每次切页都重探
     _source_test_cache: Dict[str, Any] = {"ts": 0.0, "availability": None, "recommended": None}
+    _SOURCE_CACHE_FILE = "source_probe_cache.json"
+    _SOURCE_CACHE_TTL = 6 * 3600
+
+    @staticmethod
+    def _load_source_cache() -> Dict[str, Any]:
+        """读落盘的源探测缓存（跨进程，省掉每次启动的 3-8 秒探测）。
+        「全部源都不可用」这种结果一定是网络/代理异常，直接丢弃，不能让用户
+        一开机就只剩兜底源。"""
+        try:
+            p = Path(tempfile.gettempdir()) / DxbBackend._SOURCE_CACHE_FILE
+            if p.exists() and (time.time() - p.stat().st_mtime) < DxbBackend._SOURCE_CACHE_TTL:
+                d = json.loads(p.read_text(encoding="utf-8"))
+                av = d.get("availability")
+                if av and any(av.get(v) for v in av):
+                    d["ts"] = time.time()
+                    return d
+        except Exception:
+            pass
+        return {"ts": 0.0, "availability": None, "recommended": None}
+
+    @staticmethod
+    def _save_source_cache(cache: Dict[str, Any]) -> None:
+        try:
+            p = Path(tempfile.gettempdir()) / DxbBackend._SOURCE_CACHE_FILE
+            p.write_text(json.dumps({"availability": cache.get("availability"),
+                                     "recommended": cache.get("recommended")},
+                                    ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
     async def _probe_one_source(self, value: str, url: str):
         """探测单个源根域名可达性（连接失败/超时 => 不可用）"""
         try:
-            r = await self.client.get(url, timeout=8.0, follow_redirects=True)
+            r = await self.client.get(url, timeout=3.0, follow_redirects=True)
             return value, (r.status_code < 500)
         except Exception:
             return value, False
 
     async def test_sources(self) -> Tuple[Dict[str, bool], str | None]:
         """并发探测所有内置源；返回 {value: 可用布尔} 与推荐源 value。
-        缓存 300s 内复用。"""
+        进程内缓存 300s、落盘缓存 6h。"""
         now = time.time()
         cache = DxbBackend._source_test_cache
+        if not cache.get("availability"):
+            cache.update(DxbBackend._load_source_cache())
         if cache.get("availability") and (now - cache.get("ts", 0.0)) < 300:
             return cache["availability"], cache["recommended"]
 
         results: Dict[str, bool] = {}
-        # 始终可用源
         for value, spec in DxbBackend.SOURCE_PROBE.items():
             if spec is None:
                 results[value] = True
 
-        # 并发探测其余源
         tasks = {
             value: asyncio.create_task(self._probe_one_source(value, spec[0]))
             for value, spec in DxbBackend.SOURCE_PROBE.items() if spec is not None
@@ -2711,33 +2728,38 @@ class DxbBackend:
             results[v] = ok
             self.log.info(f"清单源探测 {v}: {'可用' if ok else '不可用(剔除)'}")
 
-        # 推荐：可用源中权重最高者（排除 search 等 spec=None 的兜底源）
         avail = [v for v, ok in results.items()
                  if ok and DxbBackend.SOURCE_PROBE.get(v) is not None]
         avail.sort(key=lambda v: DxbBackend.SOURCE_PROBE[v][1], reverse=True)
         recommended = avail[0] if avail else None
 
+        if not avail:
+            self.log.warning("所有清单源探测均失败（疑似断网/代理异常），本次按全部可用处理且不写入缓存")
+            results = {v: True for v in results}
+            recommended = next((v for v, spec in DxbBackend.SOURCE_PROBE.items()
+                                if spec is not None), "search")
+            return results, recommended
+
         cache.update(ts=now, availability=results, recommended=recommended)
+        DxbBackend._save_source_cache(cache)
         return results, recommended
 
-    # NEW: HTTP helper function for safe requests with retry mechanism
     async def http_get_safe(self, url: str, timeout: int = 30, max_retries: int = 3, retry_delay: float = 1.0) -> httpx.Response | None:
         """安全的HTTP GET请求，带错误处理和重试机制"""
         last_exception = None
         
         for attempt in range(max_retries):
             try:
-                # Use different timeout strategies for different attempts
                 current_timeout = timeout if attempt == 0 else min(timeout * (attempt + 1), 60)
                 
                 response = await self.client.get(url, timeout=current_timeout)
                 if response.status_code == 200:
-                    if attempt > 0:  # Log successful retry
+                    if attempt > 0:
                         self.log.info(f"HTTP请求在第 {attempt + 1} 次尝试后成功: {url}")
                     return response
                 else:
                     self.log.warning(f"HTTP请求失败，状态码: {response.status_code} - {url} (尝试 {attempt + 1}/{max_retries})")
-                    if response.status_code in [429, 503, 502, 504]:  # Retry on server errors
+                    if response.status_code in [429, 503, 502, 504]:
                         if attempt < max_retries - 1:
                             await asyncio.sleep(retry_delay * (attempt + 1))
                             continue
@@ -2768,16 +2790,13 @@ class DxbBackend:
         self.log.error(f"HTTP请求在 {max_retries} 次尝试后仍然失败: {url} - 最后异常: {last_exception}")
         return None
 
-    # NEW: Updated DLC retrieval function with better error handling
     async def get_dlc_ids_safe(self, appid: str) -> List[str]:
         """安全的DLC ID获取函数，支持多数据源回退 (ddxnb -> steamcmd -> steam store)"""
         self.log.info(f"正在获取 AppID {appid} 的DLC信息...")
 
-        # 通用解析函数 (ddxnb 和 steamcmd 结构一致)
         def parse_steamcmd_style_json(json_data: dict) -> List[str]:
             try:
                 info = json_data.get("data", {}).get(str(appid), {})
-                # 尝试不同的字段位置，兼顾 info 和 extended 信息
                 dlc_str = info.get("extended", {}).get("listofdlc", "") or info.get("common", {}).get("listofdlc", "")
                 if dlc_str:
                     return sorted(filter(str.isdigit, map(str.strip, dlc_str.split(","))), key=int)
@@ -2785,7 +2804,6 @@ class DxbBackend:
                 pass
             return []
 
-        # 1. 尝试 ddxnb 源 (国内优化)
         self.log.debug(f"尝试从 ddxnb源 获取 AppID {appid} 的DLC...")
         data = await self.http_get_safe(f"https://steam.ddxnb.cn/v1/info/{appid}", timeout=20, max_retries=2)
         if data:
@@ -2800,7 +2818,6 @@ class DxbBackend:
         else:
             self.log.warning(f"无法从 ddxnb源 获取 AppID {appid} 的数据")
 
-        # 2. 尝试 SteamCMD API (原源)
         self.log.debug(f"尝试从 SteamCMD API 获取 AppID {appid} 的DLC...")
         data = await self.http_get_safe(f"https://api.steamcmd.net/v1/info/{appid}", timeout=20, max_retries=2)
         if data:
@@ -2815,7 +2832,6 @@ class DxbBackend:
         else:
             self.log.warning(f"无法从 SteamCMD API 获取 AppID {appid} 的数据")
         
-        # 3. 降级：使用官方 API (兜底)
         self.log.debug(f"尝试从 Steam 官方 API 获取 AppID {appid} 的DLC...")
         api_variants = [
             f"https://store.steampowered.com/api/appdetails?appids={appid}&l=schinese",
@@ -2842,12 +2858,10 @@ class DxbBackend:
         self.log.info(f"未找到 AppID {appid} 的DLC信息（已尝试所有数据源）")
         return []
 
-    # NEW: Updated depot retrieval function with better error handling
     async def get_depots_safe(self, appid: str) -> List[Tuple[str, str, int, str]]:
         """安全的Depot获取函数，返回 (depot_id, manifest_id, size, source) 元组列表"""
         self.log.info(f"正在获取 AppID {appid} 的Depot信息...")
         
-        # 通用解析函数 (适用于 ddxnb 和 steamcmd)
         def parse_steamcmd_style_depots(json_data: dict) -> List[Tuple[str, str, int, str]]:
             out = []
             try:
@@ -2870,7 +2884,6 @@ class DxbBackend:
                 pass
             return out
 
-        # 1. 尝试 ddxnb 源 (国内优化)
         self.log.debug(f"尝试从 ddxnb源 获取 AppID {appid} 的Depot...")
         data = await self.http_get_safe(f"https://steam.ddxnb.cn/v1/info/{appid}", timeout=20, max_retries=2)
         if data:
@@ -2886,7 +2899,6 @@ class DxbBackend:
         else:
             self.log.warning(f"无法从 ddxnb源 获取 AppID {appid} 的Depot数据")
 
-        # 2. 尝试 SteamCMD API (原源)
         self.log.debug(f"尝试从 SteamCMD API 获取 AppID {appid} 的Depot...")
         data = await self.http_get_safe(f"https://api.steamcmd.net/v1/info/{appid}", timeout=20, max_retries=2)
         if data:
@@ -2900,7 +2912,6 @@ class DxbBackend:
         else:
             self.log.warning(f"无法从 SteamCMD API 获取 AppID {appid} 的Depot数据")
         
-        # 3. 降级：使用官方 API (兜底)
         self.log.debug(f"尝试从 Steam 官方 API 获取 AppID {appid} 的Depot...")
         api_variants = [
             f"https://store.steampowered.com/api/appdetails?appids={appid}&l=schinese",
@@ -2939,19 +2950,16 @@ class DxbBackend:
         self.log.info(f"未找到 AppID {appid} 的Depot信息（已尝试所有数据源）")
         return []
 
-    # Workshop-related methods
     def extract_workshop_id(self, input_text: str) -> str | None:
         """Extract workshop ID from URL or direct ID input"""
         input_text = input_text.strip()
         if not input_text:
             return None
         
-        # Try to match URL pattern
         url_match = re.search(r"https?://steamcommunity\.com/sharedfiles/filedetails/\?id=(\d+)", input_text)
         if url_match:
             return url_match.group(1)
         
-        # If it's just digits, treat as direct ID
         if input_text.isdigit():
             return input_text
         
@@ -3075,7 +3083,6 @@ class DxbBackend:
                     if int(d.get('result', 0)) != 1:
                         return {"exists": False, "title": "", "consumer_app_id": None,
                                 "banned": False, "reason": d.get('banned_text') or "物品不存在或已删除"}
-                    # 已存在性：本地是否已有该工坊资源
                     consumer_app_id = str(d.get('consumer_app_id'))
                     title = d.get('title', '未知标题')
                     local_exists = False
@@ -3107,7 +3114,6 @@ class DxbBackend:
         
         for attempt in range(max_retries):
             try:
-                # Step 1: 获取 session token
                 session_token = await self._get_session_token()
                 if not session_token:
                     self.log.error("无法获取会话令牌")
@@ -3116,7 +3122,6 @@ class DxbBackend:
                         continue
                     return None
                 
-                # Step 2: 请求下载代码
                 self.log.info(f"正在请求清单下载链接... [Depot: {depot_id}, Manifest: {manifest_id}]")
                 
                 request_payload = {
@@ -3133,7 +3138,6 @@ class DxbBackend:
                     "Content-Type": "application/json"
                 }
                 
-                # 等待避免频率限制
                 await asyncio.sleep(2)
                 
                 code_response = await self.client.post(
@@ -3176,7 +3180,6 @@ class DxbBackend:
                 
                 self.log.info(f"获取到下载链接")
                 
-                # Step 3: 下载清单文件
                 self.log.info("正在下载清单文件...")
                 manifest_response = await self.client.get(download_url, timeout=180)
                 
@@ -3188,10 +3191,8 @@ class DxbBackend:
                 
                 manifest_content = manifest_response.content
                 
-                # Step 4: 处理文件内容（检查是否为ZIP）
                 final_content = None
                 
-                # 检查是否为ZIP文件
                 if manifest_content.startswith(b'PK\x03\x04'):
                     self.log.info("检测到ZIP文件，正在自动解压...")
                     try:
@@ -3238,15 +3239,13 @@ class DxbBackend:
             self.log.error(f"无法从输入中提取有效的创意工坊ID: {workshop_input}")
             return False
 
-        # Get depot and manifest info
         details = await self.get_workshop_depot_info(workshop_id)
         if not details:
-            return False  # 错误已在 get_workshop_depot_info 中记录
+            return False
 
         consumer_app_id, hcontent_file, title, file_url, file_name = details
         success_count = 0
 
-        # 1. 下载创意工坊资源文件（如果用户选择且官方提供直链）
         if download_resources:
             if file_url:
                 downloaded = await self._download_workshop_resource(file_url, consumer_app_id, workshop_id, file_name)
@@ -3255,7 +3254,6 @@ class DxbBackend:
             else:
                 self.log.warning("该创意工坊物品未提供官方资源直链，将跳过资源下载。可勾选“写入 depotcache 清单”让 Steam 客户端下载。")
 
-        # 2. 下载 manifest 到 depotcache
         if copy_to_depot:
             manifest_content = await self.download_workshop_manifest(consumer_app_id, hcontent_file)
             if manifest_content:
@@ -3296,7 +3294,6 @@ class DxbBackend:
                 await f.write(data)
             self.log.info(f"资源文件已保存到: {out_path} ({len(data)} 字节)")
 
-            # 如果是 zip 则自动解压
             if file_name.lower().endswith('.zip'):
                 try:
                     import zipfile
@@ -3349,7 +3346,6 @@ class DxbBackend:
         
         for attempt in range(max_retries):
             try:
-                # 获取session token
                 session_token = await self._get_buqiuren_session_token()
                 if not session_token:
                     self.log.error("无法获取会话令牌")
@@ -3358,7 +3354,6 @@ class DxbBackend:
                         continue
                     return False
                 
-                # 请求下载链接
                 self.log.info(f"正在请求清单下载链接... [Depot: {depot_id}, Manifest: {manifest_id}]")
                 
                 request_payload = {
@@ -3375,7 +3370,6 @@ class DxbBackend:
                     "Content-Type": "application/json"
                 }
                 
-                # 等待避免频率限制
                 await asyncio.sleep(random.uniform(2, 5))
                 
                 code_response = await self.client.post(
@@ -3418,7 +3412,6 @@ class DxbBackend:
                 
                 self.log.info(f"获取到下载链接")
                 
-                # 下载清单文件
                 self.log.info("正在下载清单文件...")
                 manifest_response = await self.client.get(download_url, timeout=180)
                 
@@ -3430,7 +3423,6 @@ class DxbBackend:
                 
                 manifest_content = manifest_response.content
                 
-                # 处理文件内容（检查是否为ZIP）
                 final_content = None
                 
                 if manifest_content.startswith(b'PK\x03\x04'):
@@ -3458,7 +3450,6 @@ class DxbBackend:
                         continue
                     return False
                 
-                # 保存文件到depotcache目录
                 if self.unlocker_type in ("steamtools", "opensteamtool"):
                     st_depot_path = self.steam_path / 'config' / 'depotcache'
                     gl_depot_path = self.steam_path / 'depotcache'
@@ -3472,7 +3463,6 @@ class DxbBackend:
                     (gl_depot_path / output_filename).write_bytes(final_content)
                     self.log.info(f"清单已保存到: {gl_depot_path / output_filename}")
                 else:
-                    # GreenLuma
                     depot_path = self.steam_path / 'depotcache'
                     depot_path.mkdir(parents=True, exist_ok=True)
                     (depot_path / output_filename).write_bytes(final_content)
@@ -3500,14 +3490,12 @@ class DxbBackend:
         current_time = time.time()
         one_day_seconds = 86400
 
-        # 1. 尝试读取缓存
         if cache_file.exists():
             try:
                 async with aiofiles.open(cache_file, 'r', encoding='utf-8') as f:
                     cache_content = json.loads(await f.read())
                 
                 last_update = cache_content.get('timestamp', 0)
-                # 检查是否过期
                 if current_time - last_update < one_day_seconds:
                     self.log.info(f"使用本地缓存的密钥库 (上次更新: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_update))})")
                     return cache_content.get('data', {})
@@ -3516,11 +3504,9 @@ class DxbBackend:
             except Exception as e:
                 self.log.warning(f"读取本地缓存失败，将重新下载: {e}")
 
-        # 2. 下载新数据
         url = "https://api.993499094.xyz/depotkeys.json"
         try:
             self.log.info(f"正在从 Sudama API ({url}) 下载全量密钥库...")
-            # 数据量可能较大，使用较大的超时
             response = await self.client.get(url, timeout=120)
             response.raise_for_status()
             
@@ -3530,7 +3516,6 @@ class DxbBackend:
                 self.log.error("API 返回的数据格式不正确 (应为 JSON 对象)")
                 return {}
 
-            # 3. 写入缓存
             cache_data = {
                 "timestamp": current_time,
                 "data": data
@@ -3543,7 +3528,6 @@ class DxbBackend:
 
         except Exception as e:
             self.log.error(f"下载 Sudama 数据失败: {self.stack_error(e)}")
-            # 下载失败时的兜底：如果有过期的缓存，尽量使用过期的
             if cache_file.exists():
                 try:
                     self.log.warning("网络获取失败，尝试使用旧的本地缓存...")
@@ -3554,7 +3538,6 @@ class DxbBackend:
             return {}
 
 
-# --- SUDAMA REPO START ---
     async def _get_sudama_data(self) -> Dict[str, str]:
         """从 sudama API 获取所有密钥数据 (兼容性包装)"""
         return await self._get_cached_sudama_data()
@@ -3564,7 +3547,6 @@ class DxbBackend:
         try:
             self.log.info(f'正从 Sudama 库处理 AppID {app_id} 的清单...')
             
-            # 1. 获取 Depot 和 Manifest 信息 (使用现有的 SteamUI/DDXNB 接口)
             depot_manifest_map = await self._get_depots_and_manifests_from_steamui(app_id)
             if not depot_manifest_map:
                 self.log.error(f"未能从 API 获取到 AppID {app_id} 的 depot 信息")
@@ -3572,13 +3554,11 @@ class DxbBackend:
             
             self.log.info(f"获取到 {len(depot_manifest_map)} 个 depot 及其 manifest")
 
-            # 2. 获取 Sudama 的所有密钥数据 (改为调用缓存函数)
             sudama_keys = await self._get_cached_sudama_data()
             if not sudama_keys:
                 self.log.error("无法获取 Sudama 密钥库数据")
                 return False
 
-            # 3. 匹配 Depot 与 Key
             valid_depots = {}
             for depot_id in depot_manifest_map.keys():
                 if depot_id in sudama_keys:
@@ -3593,9 +3573,7 @@ class DxbBackend:
                 self.log.warning(f"AppID {app_id} 没有在 Sudama 库中找到任何有效的 depot 密钥")
                 return False
 
-            # 4. 根据解锁工具类型处理 (复用 ManifestHub V2 的逻辑)
             if unlocker_type in ("steamtools", "opensteamtool"):
-                # 将 sudama_keys 作为 depotkeys_data 传入，以便复用修补逻辑
                 return await self._process_steamautocracks_v2_for_steamtools(
                     app_id, valid_depots, depot_manifest_map, use_st_auto_update, add_all_dlc, patch_depot_key, sudama_keys
                 )
@@ -3612,7 +3590,6 @@ class DxbBackend:
         try:
             self.log.info(f'正从 清单不求人库 处理 AppID {app_id} 的清单...')
             
-            # 使用steamui API获取depot和manifest信息（复用现有逻辑）
             depot_manifest_map = await self._get_depots_and_manifests_from_steamui(app_id)
             if not depot_manifest_map:
                 self.log.error(f"未能从 steamui API 获取到 AppID {app_id} 的 depot 信息，请检查APP ID是否正确或API请求问题")
@@ -3620,7 +3597,6 @@ class DxbBackend:
             
             self.log.info(f"从 steamui API 获取到 {len(depot_manifest_map)} 个 depot 及其 manifest")
             
-            # 下载所有depot的清单
             success_count = 0
             total_count = len(depot_manifest_map)
             
@@ -3628,13 +3604,11 @@ class DxbBackend:
                 self.log.info(f"处理进度: {i}/{total_count}")
                 depot_name = f"Depot {depot_id}"
                 
-                # 使用不求人接口下载
                 if await self._download_manifest_buqiuren(depot_id, manifest_id, depot_name):
                     success_count += 1
                 else:
                     self.log.warning(f"下载 depot {depot_id} 的清单失败")
                 
-                # 添加延迟避免频率限制
                 if i < total_count:
                     delay = random.uniform(10, 20)
                     self.log.info(f"等待 {delay:.1f} 秒后继续...")
@@ -3651,7 +3625,6 @@ class DxbBackend:
             self.log.error(f'处理不求人库清单时出错: {self.stack_error(e)}')
             return False
 
-    # NEW: DepotKey patching methods
     async def download_depotkeys_json(self) -> Dict | None:
         """
         获取 DepotKeys 数据。
@@ -3666,7 +3639,6 @@ class DxbBackend:
         try:
             self.log.info(f'正从 SteamAutoCracks/ManifestHub(2) 处理 AppID {app_id} 的清单...')
             
-            # 1. 从 steamui API 获取 depot 和 manifest 信息
             depot_manifest_map = await self._get_depots_and_manifests_from_steamui(app_id)
             if not depot_manifest_map:
                 self.log.error(f"未能从 steamui API 获取到 AppID {app_id} 的 depot 信息，请检查APP ID是否正确或API请求问题")
@@ -3674,7 +3646,6 @@ class DxbBackend:
             
             self.log.info(f"从 steamui API 获取到 {len(depot_manifest_map)} 个 depot 及其 manifest")
             
-            # 2. 下载 depotkeys.json（复用现有方法）
             if 'IS_CN' not in os.environ:
                 self.log.info("检测网络环境以优化下载源选择...")
                 await self.checkcn()
@@ -3684,12 +3655,10 @@ class DxbBackend:
                 self.log.error("无法获取 depotkeys 数据")
                 return False
             
-            # 3. 匹配 depot 与 depotkey
             valid_depots = {}
             for depot_id in depot_manifest_map.keys():
                 if depot_id in depotkeys_data:
                     depotkey = depotkeys_data[depot_id]
-                    # 检查 depotkey 是否有效（不为空字符串）
                     if depotkey and str(depotkey).strip():
                         valid_depots[depot_id] = str(depotkey).strip()
                         self.log.info(f"找到 depot {depot_id} 的有效 depotkey: {depotkey}")
@@ -3702,7 +3671,6 @@ class DxbBackend:
                 self.log.warning(f"AppID {app_id} 没有找到任何有效的 depot 密钥，这是正常情况，可能此APP ID没有创意工坊密钥或者暂未收录，不影响本体使用")
                 return False
             
-            # 4. 根据解锁工具类型处理
             if unlocker_type in ("steamtools", "opensteamtool"):
                 return await self._process_steamautocracks_v2_for_steamtools(app_id, valid_depots, depot_manifest_map, use_st_auto_update, add_all_dlc, patch_depot_key, depotkeys_data)
             else:
@@ -3721,7 +3689,6 @@ class DxbBackend:
 
             data = response.json()
             
-            # Check for success status in the API response
             if data.get("status") != "success" or not data.get("data"):
                 self.log.error(f"备用API返回错误或无数据 for AppID {app_id}，请检查APP ID是否正确或API请求问题")
                 return {}
@@ -3760,8 +3727,7 @@ class DxbBackend:
 
     async def _get_depots_and_manifests_from_steamui(self, app_id: str) -> Dict[str, str]:
         """从 steamui API 获取 depot 和对应的 manifest 信息，失败时使用备用API"""
-        # 1. 尝试主API (steamui.com)
-        vdf_content = "" # Initialize to ensure it exists for logging on failure
+        vdf_content = ""
         try:
             self.log.info(f"正从主API (steamui.com) 获取 AppID {app_id} 的信息...")
             url = f"https://steamui.com/api/get_appinfo.php?appid={app_id}"
@@ -3770,12 +3736,11 @@ class DxbBackend:
             
             vdf_content = response.text
             
-            import vdf # Local import to avoid dependency issues if VDF is not always used
+            import vdf
             data = vdf.loads(vdf_content)
             
             depot_manifest_map = {}
             
-            # First-level check for depots
             for key, value in data.items():
                 if key.isdigit() and isinstance(value, dict):
                     if 'manifests' in value and value['manifests']:
@@ -3786,7 +3751,6 @@ class DxbBackend:
                                 manifest_id = public_manifest['gid']
                                 depot_manifest_map[key] = manifest_id
             
-            # Fallback checks for different VDF structures if first-level fails
             if not depot_manifest_map:
                 if 'depots' in data:
                     depots = data['depots']
@@ -3818,8 +3782,6 @@ class DxbBackend:
                 self.log.info(f"从主API (steamui.com) 成功获取 {len(depot_manifest_map)} 个 depot。")
                 return depot_manifest_map
             else:
-                # This case means the request was successful but no depots were found.
-                # We should raise an exception to trigger the fallback.
                 raise ValueError("主API响应成功，但未解析到任何depot信息，请检查APP ID是否正确或API请求问题")
 
         except Exception as e:
@@ -3828,7 +3790,6 @@ class DxbBackend:
                 self.log.warning(f"主API返回内容预览: {vdf_content[:300]}...")
             self.log.info("正在尝试备用API (steam.ddxnb.cn)...")
         
-        # 2. 如果主API失败，调用备用API
         return await self._get_depots_and_manifests_from_ddxnb(app_id)
 
     async def _process_steamautocracks_v2_for_steamtools(self, app_id: str, valid_depots: Dict[str, str], depot_manifest_map: Dict[str, str], use_st_auto_update: bool, add_all_dlc: bool, patch_depot_key: bool, depotkeys_data: Dict) -> bool:
@@ -3839,35 +3800,26 @@ class DxbBackend:
             lua_filename = f"{app_id}.lua"
             lua_filepath = stplug_path / lua_filename
             
-            # 检查是否启用了自动更新模式
             is_auto_update_mode = use_st_auto_update
             
-            # 生成 lua 文件内容
             lines = []
             
-            # 第一行：主游戏 appid
             lines.append(f'addappid({app_id})')
             
-            # 添加所有有效的 depot 及其密钥
             for depot_id, depotkey in valid_depots.items():
                 lines.append(f'addappid({depot_id}, 1, "{depotkey}")')
             
-            # 添加 setManifestid 行（使用从 steamui API 获取的 manifest 信息）
             manifest_lines = []
             for depot_id in valid_depots.keys():
                 if depot_id in depot_manifest_map:
                     manifest_id = depot_manifest_map[depot_id]
-                    # 根据是否启用自动更新决定是否注释掉 manifest 行
                     if is_auto_update_mode:
-                        # 自动更新模式：注释掉 setManifestid 行
                         manifest_lines.append(f'--setManifestid({depot_id}, "{manifest_id}")')
                         self.log.info(f"添加注释的 manifest 映射（自动更新模式）: depot {depot_id} -> manifest {manifest_id}")
                     else:
-                        # 固定版本模式：正常添加 setManifestid 行
                         manifest_lines.append(f'setManifestid({depot_id}, "{manifest_id}")')
                         self.log.info(f"添加 manifest 映射（固定版本）: depot {depot_id} -> manifest {manifest_id}")
             
-            # 写入文件
             async with aiofiles.open(lua_filepath, mode="w", encoding="utf-8") as lua_file:
                 await lua_file.write('\n'.join(lines) + '\n')
                 if manifest_lines:
@@ -3876,11 +3828,9 @@ class DxbBackend:
             
             self.log.info(f"已为SteamTools生成解锁文件: {lua_filename}")
             
-            # 处理 DLC
             if add_all_dlc:
                 await self._add_free_dlcs_to_lua(app_id, lua_filepath)
             
-            # 处理创意工坊密钥修补（复用已下载的 depotkeys_data）
             if patch_depot_key:
                 self.log.info("开始修补创意工坊depotkey...")
                 await self._patch_lua_with_existing_depotkeys(app_id, lua_filepath, depotkeys_data)
@@ -3894,15 +3844,12 @@ class DxbBackend:
     async def _process_steamautocracks_v2_for_greenluma(self, app_id: str, valid_depots: Dict[str, str]) -> bool:
         """为 GreenLuma 处理 SteamAutoCracks/ManifestHub(2) 清单"""
         try:
-            # GreenLuma needs the depotkeys merged into config.vdf
             depots_config = {'depots': {depot_id: {"DecryptionKey": key} for depot_id, key in valid_depots.items()}}
             
-            # Merge depotkeys
             config_vdf_path = self.steam_path / 'config' / 'config.vdf'
             if await self.depotkey_merge(config_vdf_path, depots_config):
                 self.log.info("已将密钥合并到 config.vdf")
             
-            # Add app IDs to GreenLuma
             gl_ids = list(valid_depots.keys())
             gl_ids.append(app_id)
             await self.greenluma_add(list(set(gl_ids)))
@@ -3917,14 +3864,12 @@ class DxbBackend:
     async def _patch_lua_with_existing_depotkeys(self, app_id: str, lua_file_path: Path, depotkeys_data: Dict) -> bool:
         """使用已有的 depotkeys 数据修补 LUA 文件（避免重复下载）"""
         try:
-            # 检查 app_id 是否在 depotkeys 中
             if app_id not in depotkeys_data:
                 self.log.warning(f"没有此AppID的depotkey: {app_id}，这是正常情况，可能此APP ID没有创意功放密钥或者暂未收录，不影响本体使用")
                 return False
             
             depotkey = depotkeys_data[app_id]
             
-            # 检查 depotkey 是否有效
             if not depotkey or not str(depotkey).strip():
                 self.log.warning(f"AppID {app_id} 的 depotkey 为空或无效，跳过修补: '{depotkey}，，这是正常情况，可能此APP ID没有创意功放密钥或者暂未收录，不影响本体使用'")
                 return False
@@ -3932,7 +3877,6 @@ class DxbBackend:
             depotkey = str(depotkey).strip()
             self.log.info(f"找到 AppID {app_id} 的有效 depotkey: {depotkey}")
             
-            # 读取现有 LUA 文件
             if not lua_file_path.exists():
                 self.log.error(f"LUA文件不存在: {lua_file_path}")
                 return False
@@ -3940,29 +3884,23 @@ class DxbBackend:
             async with aiofiles.open(lua_file_path, 'r', encoding='utf-8') as f:
                 lua_content = await f.read()
             
-            # 解析行
             lines = lua_content.strip().split('\n')
             new_lines = []
             app_id_line_removed = False
             
-            # 移除现有的 addappid({app_id}) 行并添加带 depotkey 的新行
             for line in lines:
                 line = line.strip()
-                # 检查是否是需要替换的简单 addappid 行
                 if line == f"addappid({app_id})":
-                    # 替换为带 depotkey 的版本
                     new_lines.append(f'addappid({app_id},1,"{depotkey}")')
                     app_id_line_removed = True
                     self.log.info(f"已替换: addappid({app_id}) -> addappid({app_id},1,\"{depotkey}\")")
                 else:
                     new_lines.append(line)
             
-            # 如果没有找到简单的 addappid 行，添加 depotkey 版本
             if not app_id_line_removed:
                 new_lines.append(f'addappid({app_id},1,"{depotkey}")')
                 self.log.info(f"已添加新的 depotkey 条目: addappid({app_id},1,\"{depotkey}\")")
             
-            # 写回文件
             async with aiofiles.open(lua_file_path, 'w', encoding='utf-8') as f:
                 await f.write('\n'.join(new_lines) + '\n')
             
@@ -3976,34 +3914,28 @@ class DxbBackend:
     async def patch_lua_with_depotkey(self, app_id: str, lua_file_path: Path) -> bool:
         """Patch LUA file with depotkey from SteamAutoCracks repository"""
         try:
-            # Ensure network environment is detected for mirror selection
             if 'IS_CN' not in os.environ:
                 self.log.info("检测网络环境以优化下载源选择...")
                 await self.checkcn()
             
-            # Download depotkeys.json
             depotkeys_data = await self.download_depotkeys_json()
             if not depotkeys_data:
                 self.log.error("无法获取 depotkeys 数据，跳过 depotkey 修补。")
                 return False
             
-            # Check if app_id exists in depotkeys
             if app_id not in depotkeys_data:
                 self.log.warning(f"没有此AppID的depotkey: {app_id}，，这是正常情况，可能此APP ID没有创意功放密钥或者暂未收录，不影响本体使用")
                 return False
             
             depotkey = depotkeys_data[app_id]
             
-            # FIXED: Check if depotkey is valid (not empty, not None, not just whitespace)
             if not depotkey or not str(depotkey).strip():
                 self.log.warning(f"AppID {app_id} 的 depotkey 为空或无效，跳过修补: '{depotkey}，这是正常情况，可能此APP ID没有创意功放密钥或者暂未收录，不影响本体使用'")
                 return False
             
-            # Make sure depotkey is string and strip whitespace
             depotkey = str(depotkey).strip()
             self.log.info(f"找到 AppID {app_id} 的有效 depotkey: {depotkey}")
             
-            # Read existing LUA file
             if not lua_file_path.exists():
                 self.log.error(f"LUA文件不存在: {lua_file_path}")
                 return False
@@ -4011,29 +3943,23 @@ class DxbBackend:
             async with aiofiles.open(lua_file_path, 'r', encoding='utf-8') as f:
                 lua_content = await f.read()
             
-            # Parse lines
             lines = lua_content.strip().split('\n')
             new_lines = []
             app_id_line_removed = False
             
-            # Remove existing addappid({app_id}) line and add new one with depotkey
             for line in lines:
                 line = line.strip()
-                # Check if this is the simple addappid line we need to replace
                 if line == f"addappid({app_id})":
-                    # Replace with depotkey version
                     new_lines.append(f'addappid({app_id},1,"{depotkey}")')
                     app_id_line_removed = True
                     self.log.info(f"已替换: addappid({app_id}) -> addappid({app_id},1,\"{depotkey}\")")
                 else:
                     new_lines.append(line)
             
-            # If we didn't find the simple addappid line, add the depotkey version
             if not app_id_line_removed:
                 new_lines.append(f'addappid({app_id},1,"{depotkey}")')
                 self.log.info(f"已添加新的 depotkey 条目: addappid({app_id},1,\"{depotkey}\")")
             
-            # Write back to file
             async with aiofiles.open(lua_file_path, 'w', encoding='utf-8') as f:
                 await f.write('\n'.join(new_lines) + '\n')
             
@@ -4044,7 +3970,6 @@ class DxbBackend:
             self.log.error(f"修补 LUA depotkey 时出错: {self.stack_error(e)}")
             return False
 
-    # Original methods continue...
     def restart_steam(self) -> bool:
         if not self.steam_path:
             self.log.error("无法重启 Steam：未找到 Steam 路径。")
@@ -4055,11 +3980,20 @@ class DxbBackend:
             return False
         try:
             self.log.info("正在尝试关闭正在运行的 Steam 进程...")
-            result = subprocess.run(["taskkill", "/F", "/IM", "steam.exe"], capture_output=True,
-                                    text=True, encoding='gbk', errors='ignore', check=False)
-            if result.returncode == 0: self.log.info("成功关闭 Steam 进程。")
-            elif result.returncode == 128: self.log.info("未找到正在运行的 Steam 进程，将直接启动。")
-            else: self.log.warning(f"关闭 Steam 时遇到问题 (返回码: {result.returncode})。错误信息: {result.stderr.strip()}")
+            res = close_steam()
+            if res.get("already_closed"):
+                self.log.info("未找到正在运行的 Steam 进程，将直接启动。")
+            elif res.get("forced"):
+                self.log.warning("Steam 没有自己退出，已强制结束进程。")
+                try:
+                    hc = Path(os.environ.get('LOCALAPPDATA', '')) / 'Steam' / 'htmlcache'
+                    if hc.is_dir():
+                        shutil.rmtree(hc, ignore_errors=True)
+                        self.log.info("已清理可能被强杀写坏的 htmlcache。")
+                except Exception:
+                    pass
+            else:
+                self.log.info("Steam 已正常退出。")
             self.log.info("等待 3 秒以确保 Steam 完全关闭...")
             time.sleep(3)
             self.log.info(f"正在尝试从 '{steam_exe_path}' 启动 Steam...")
@@ -4147,18 +4081,14 @@ class DxbBackend:
         而 gh-proxy.org / cdn.gh-proxy.org / edgeone / fastgit / gh.llkk.cc / gh.akass.cn
         这些老代理全部超时或 404，所以把它们放到末尾做兜底。"""
         urls = [
-            # 直连（实测国内可通）
             f'https://raw.githubusercontent.com/{repo}/{sha}/{path}',
-            # jsDelivr 三个节点，国内基本稳定
             f'https://cdn.jsdelivr.net/gh/{repo}@{sha}/{path}',
             f'https://fastly.jsdelivr.net/gh/{repo}@{sha}/{path}',
             f'https://gcore.jsdelivr.net/gh/{repo}@{sha}/{path}',
-            # 现役可用代理
             f'https://gh-proxy.com/https://raw.githubusercontent.com/{repo}/{sha}/{path}',
             f'https://ghps.cc/https://github.com/{repo}/{sha}/{path}',
             f'https://ghproxy.cn/https://raw.githubusercontent.com/{repo}/{sha}/{path}',
             f'https://ghproxy.net/https://raw.githubusercontent.com/{repo}/{sha}/{path}',
-            # 兜底（可能已失效）
             f'https://gh-proxy.org/https://github.com/{repo}/{sha}/{path}',
             f'https://edgeone.gh-proxy.org/https://github.com/{repo}/{sha}/{path}',
             f'https://cdn.gh-proxy.org/https://github.com/{repo}/{sha}/{path}',
@@ -4202,16 +4132,13 @@ class DxbBackend:
             self.log.error(f"从 api.steamcmd.net 获取 AppID {appid} 数据失败: {e}")
             return {}
 
-    # UPDATED: Use new safe functions for DLC retrieval
     async def _get_dlc_ids(self, appid: str) -> List[str]:
         """获取DLC ID列表，使用新的安全函数"""
         return await self.get_dlc_ids_safe(appid)
 
-    # UPDATED: Use new safe functions for depot retrieval  
     async def _get_depots(self, appid: str) -> List[Dict]:
         """获取Depot信息列表，转换为旧格式兼容"""
         depot_tuples = await self.get_depots_safe(appid)
-        # Convert to old format for compatibility
         return [
             {
                 "depot_id": depot_id,
@@ -4275,7 +4202,6 @@ class DxbBackend:
         except Exception as e:
             self.log.error(f"添加无密钥DLC时出错: {self.stack_error(e)}")
 
-    # MODIFIED: Added patch_depot_key parameter
     async def _process_zip_manifest_generic(self, app_id: str, download_url: str, source_name: str, unlocker_type: str, use_st_auto_update: bool, add_all_dlc: bool, patch_depot_key: bool = False) -> bool:
         zip_path = self.temp_path / f'{app_id}.zip'
         extract_path = self.temp_path / app_id
@@ -4283,7 +4209,6 @@ class DxbBackend:
             self.temp_path.mkdir(exist_ok=True, parents=True)
             self.log.info(f'正从 {source_name} 下载 AppID {app_id} 的清单...')
 
-            # 对已知不稳定源增加重试
             max_retries = 3 if 'cysaw' in source_name.lower() else 2
             last_error = None
             response = None
@@ -4344,7 +4269,6 @@ class DxbBackend:
                 if add_all_dlc:
                     await self._add_free_dlcs_to_lua(app_id, lua_filepath)
 
-                # NEW: Apply depotkey patch if requested
                 if patch_depot_key:
                     self.log.info("开始修补创意工坊depotkey...")
                     await self.patch_lua_with_depotkey(app_id, lua_filepath)
@@ -4376,14 +4300,78 @@ class DxbBackend:
             if zip_path.exists(): zip_path.unlink(missing_ok=True)
             if extract_path.exists(): shutil.rmtree(extract_path)
 
+    def _native_userdata_dir(self) -> Path | None:
+        sp = self.get_steam_path()
+        if not sp or not sp.exists():
+            return None
+        acct = self.steam_account()
+        acc = str(acct.get("accountid") or "").strip()
+        if acc and (sp / 'userdata' / acc).is_dir():
+            return sp / 'userdata' / acc
+        ud = sp / 'userdata'
+        if ud.is_dir():
+            cands = [p for p in ud.iterdir() if p.is_dir() and p.name not in ('0', 'anonymous')]
+            if len(cands) == 1:
+                return cands[0]
+            if cands:
+                return max(cands, key=lambda p: p.stat().st_mtime)
+        return None
+
+    async def native_unlock(self, app_id: str, game_name: str = "") -> bool:
+        """把 app_id 写进 Steam 账号的 localconfig.vdf 完成「入库」。"""
+        app_id = str(app_id or '').strip()
+        if not app_id.isdigit():
+            self.log.error(f"AppID 无效：{app_id!r}")
+            return False
+        ud = self._native_userdata_dir()
+        if not ud:
+            self.log.error("自研入库失败：找不到 userdata 目录，"
+                           "请先在这台电脑上登录一次 Steam 客户端。")
+            return False
+        cfg = ud / 'config' / 'localconfig.vdf'
+        try:
+            cfg.parent.mkdir(parents=True, exist_ok=True)
+            if cfg.exists():
+                data = vdf.loads(cfg.read_text(encoding='utf-8', errors='ignore'))
+                bak = cfg.with_suffix('.vxbak')
+                if not bak.exists():
+                    shutil.copy2(cfg, bak)
+            else:
+                data = {'UserLocalConfigStore': {'Software': {'Valve': {'Steam': {}}}}}
+            store = data.setdefault('UserLocalConfigStore', {})
+            sw = store.setdefault('Software', {})
+            valve = sw.setdefault('Valve', {})
+            steam = valve.setdefault('Steam', {})
+            apps = steam.setdefault('Apps', {})
+            entry = apps.setdefault(app_id, {})
+            if not isinstance(entry, dict):
+                entry = {}
+                apps[app_id] = entry
+            entry['LastPlayed'] = str(entry.get('LastPlayed') or 0)
+            entry['Playtime'] = str(entry.get('Playtime') or 0)
+            entry['FlatpakAppID'] = str(entry.get('FlatpakAppID') or '')
+            if game_name:
+                entry['DisplayName'] = game_name
+            entry['DXBUnlockedBy'] = 'native'
+            cfg.write_text(vdf.dumps(data, pretty=True), encoding='utf-8')
+            self.log.info(f"自研入库完成：{app_id}"
+                          + (f"（{game_name}）" if game_name else "")
+                          + f" → {cfg}")
+            return True
+        except Exception as e:
+            self.log.error(f"自研入库失败（写 {cfg} 出错）：{self.stack_error(e)}")
+            return False
+
     async def process_zip_source(self, app_id: str, tool_type: str, unlocker_type: str, use_st_auto_update: bool, add_all_dlc: bool, patch_depot_key: bool = False) -> bool:
+        if unlocker_type == 'native':
+            return await self.native_unlock(app_id)
         source_map = {
             "printedwaste": "https://api.printedwaste.com/gfk/download/{app_id}",
             "cysaw": "https://cysaw.top/uploads/{app_id}.zip",
             "furcate": "https://furcate.eu/files/{app_id}.zip",
             "walftech": "https://walftech.com/proxy.php?url=https%3A%2F%2Fsteamgames554.s3.us-east-1.amazonaws.com%2F{app_id}.zip",
             "steamdatabase": "https://steamdatabase.s3.eu-north-1.amazonaws.com/{app_id}.zip",
-            "steamautocracks_v2": "special",  # 特殊处理标识
+            "steamautocracks_v2": "special",
             "buqiuren": "special",
             "sudama": "special"
         }
@@ -4396,7 +4384,6 @@ class DxbBackend:
             "steamautocracks_v2": "SteamAutoCracks/ManifestHub(2)"
         }
         
-        # 特殊处理 steamautocracks_v2
         if tool_type == "steamautocracks_v2":
             return await self.process_steamautocracks_v2_manifest(app_id, unlocker_type, use_st_auto_update, add_all_dlc, patch_depot_key)
         if tool_type == "buqiuren":
@@ -4405,7 +4392,6 @@ class DxbBackend:
         if tool_type == "sudama":
             return await self.process_sudama_manifest(app_id, unlocker_type, use_st_auto_update, add_all_dlc, patch_depot_key)
             
-        # Check for custom zip repos
         custom_zip_repos = self.get_custom_zip_repos()
         for repo_config in custom_zip_repos:
             if tool_type == f"custom_zip_{repo_config['name']}":
@@ -4432,7 +4418,6 @@ class DxbBackend:
             self.log.error(f'从 {url} 获取信息时发生意外错误: {self.stack_error(e)}')
             return None
             
-    # MODIFIED: Updated to use all github repos including custom ones
     async def search_all_repos_for_appid(self, app_id: str, repos: List[str] = None) -> List[Dict]:
         """Search for app_id in all GitHub repositories (builtin + custom)"""
         if repos is None:
@@ -4456,8 +4441,9 @@ class DxbBackend:
                 return {'repo': repo, 'sha': r_json['commit']['sha'], 'tree': r2_json['tree'], 'update_date': r_json["commit"]["commit"]["author"]["date"]}
         return None
 
-    # MODIFIED: Added patch_depot_key parameter
     async def process_github_manifest(self, app_id: str, repo: str, unlocker_type: str, use_st_auto_update: bool, add_all_dlc: bool, patch_depot_key: bool = False) -> bool:
+        if unlocker_type == 'native':
+            return await self.native_unlock(app_id)
         github_token = self.config.get("Github_Personal_Token", "")
         headers = {'Authorization': f'Bearer {github_token}'} if github_token else None
         
@@ -4525,7 +4511,6 @@ class DxbBackend:
             if add_all_dlc:
                 await self._add_free_dlcs_to_lua(app_id, lua_filepath)
 
-            # NEW: Apply depotkey patch if requested
             if patch_depot_key:
                 self.log.info("开始修补创意工坊depotkey...")
                 await self.patch_lua_with_depotkey(app_id, lua_filepath)
@@ -4565,7 +4550,6 @@ class DxbBackend:
         if not appid or not appid.isdigit():
             raise ValueError("无效的 AppID，请输入数字或 Steam 链接。")
         info: Dict[str, Any] = {"appid": appid, "name": "", "depots": [], "depotkeys": {}, "manifests": {}}
-        # 1. 游戏名（Steam 官方商店 appdetails）
         try:
             headers = {'User-Agent': 'DaXuanBa-Injector'}
             d = await self._fetch_store_appdetails(appid, headers)
@@ -4573,7 +4557,6 @@ class DxbBackend:
                 info["name"] = d.get("name", "")
         except Exception as e:
             self.log.warning(f"获取游戏名失败: {e}")
-        # 2. depot + manifest（SteamCMD 官方 appinfo 镜像，数据源头为 Valve 官方）
         depot_manifest: Dict[str, str] = {}
         try:
             raw = await self._get_steamcmd_api_data(appid) or {}
@@ -4581,7 +4564,7 @@ class DxbBackend:
             depots_cfg = info_root.get("depots", {}) or {}
             for dep_id, dep_cfg in depots_cfg.items():
                 if not str(dep_id).isdigit() or not isinstance(dep_cfg, dict):
-                    continue  # 跳过非数字键（如 branchmeta 等）
+                    continue
                 gid = str((dep_cfg.get("manifests", {}) or {}).get("public", {}).get("gid", "") or "")
                 depot_manifest[str(dep_id)] = gid
             if depot_manifest:
@@ -4590,7 +4573,6 @@ class DxbBackend:
                 self.log.warning("SteamCMD 官方 appinfo 中未找到 depot 信息。")
         except Exception as e:
             self.log.warning(f"获取 depot/manifest 失败: {e}")
-        # 3. 生成 lua（不含任何第三方密钥）
         lines = [
             "-- 大轩巴入库器mini · 手搓 OpenSteamTool lua（官方源）",
             f"-- AppID: {appid}" + (f"  名称: {info['name']}" if info['name'] else ""),
@@ -4627,18 +4609,15 @@ class DxbBackend:
                 return 100
             if q in n or n in q:
                 return 80
-            # 子序列匹配（允许漏字）
             it = iter(n)
             if all(c in it for c in q):
                 return 60
-            # 分词命中（按空格/标点切后的任一片段包含）
             for tok in re.split(r'[\s\-_]+', q):
                 if len(tok) >= 2 and tok in n:
                     return 40
             return 10
         scored = [(score(it), it) for it in items]
         scored.sort(key=lambda x: x[0], reverse=True)
-        # 仅保留有一定相关度的结果，避免无关项
         return [it for s, it in scored if s >= 10]
 
     async def find_appid_by_name(self, game_name: str) -> List[Dict]:
@@ -4647,7 +4626,6 @@ class DxbBackend:
             self.log.info(f"正在尝试搜索游戏: {game_name}")
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-            # 1. 如果输入是纯数字，直接当作 AppID 返回详情
             if game_name.isdigit():
                 appid = game_name
                 detail = await self._fetch_store_appdetails(appid, headers)
@@ -4655,7 +4633,6 @@ class DxbBackend:
                     self.log.info(f"直接命中 AppID: {appid}")
                     return [detail]
 
-            # 2. Steam 官方搜索：多区域/多语言尝试
             steam_regions = [
                 {'l': 'schinese', 'cc': 'CN'},
                 {'l': 'english', 'cc': 'US'},
@@ -4686,13 +4663,11 @@ class DxbBackend:
                     self.log.debug(f"Steam 搜索 ({region}) 失败: {e}")
                     continue
 
-            # 3. SteamDB 搜索备用
             self.log.info("Steam 官方搜索无结果，尝试 SteamDB 搜索...")
             steamdb_results = await self._search_steamdb(game_name, headers)
             if steamdb_results:
                 return steamdb_results
 
-            # 4. 小黑盒备用
             self.log.info("尝试小黑盒备用搜索...")
             fallback = await self._find_appid_fallback(game_name, headers)
             if fallback:
@@ -4787,21 +4762,7 @@ class DxbBackend:
                     self.log.error(f'重命名失败 {file.name}: {e}')
 
 
-# =====================================================================
-# 下载管理：三个内核的「真实版本检测 + 自动下载 + 自动安装」
-#   - OpenSteamTool：GitHub Releases（取 *-Release.zip，别拿 29MB 的 Debug）
-#                   → 下完解压，把 DLL 释放到 Steam 主目录（无窗口）
-#   - GreenLuma   ：两种形态，都是下载后直接释放，全程无窗口、无管理员
-#                   · 隐身版（默认）：官方 stealth 形态的改写版 user32.dll
-#                   · 注入版：GreenLuma_2025_x64.dll + DLLInjector.exe
-#                   → 由应用自己从上游/镜像下载，不允许手工丢文件
-#   - SteamTools  ：steamtools.net 官方 NSIS 安装包 st-setup-<ver>.exe
-#                   → 这是三个里唯一的「安装包」：下载完就直接运行它
-#                     （管理员：/S 静默、无窗口；普通权限：弹官方安装向导）
-# 全部纯后端 HTTP，不开任何浏览器窗口。
-# =====================================================================
 
-# GitHub 下载加速前缀（下载 release 资产 / raw 文件时按顺序回退）
 GH_DL_PROXIES = [
     "",
     "https://gh-proxy.com/",
@@ -4810,53 +4771,52 @@ GH_DL_PROXIES = [
     "https://ghproxy.net/",
 ]
 
-# wuhu 仓库里 GreenLuma 2025 的文件（master 分支，实测 raw/jsDelivr/gh-proxy 全通）
 GREENLUMA_REPO = "ehgen0ng/wuhu"
 GREENLUMA_BRANCH = "master"
 GREENLUMA_DIR = "archive/go/utils/GreenLuma"
 GREENLUMA_FILES = ["DLLInjector.exe", "GreenLuma_2025_x64.dll", "DLLInjector.ini", "GreenLuma2025.txt"]
 
-# ---------------------------------------------------------------- GreenLuma 隐身版
-# 注入版（上面那份）的问题：DLLInjector 是靠「特征码扫描 steam.exe」挂钩的，
-# 一旦 Steam 自动更新，特征码对不上就直接失败（实测会卡在 Failed to get InternalGetInt）。
-# 隐身版换了个思路：GreenLuma 官方出的 stealth 形态本身就是一份改写过的 user32.dll，
-# 放到 Steam 主目录，Steam 启动时自己会加载它 → 不需要注入器、不需要管理员、没有窗口，
-# 也不依赖特征码匹配 Steam 版本，对新 Steam 明显更耐用。
-# 来源：Cranch-fur/GreenLuma-GUI 的 release（包内 GreenLuma.dll 即官方 stealth DLL，未加密）。
 GREENLUMA_STEALTH_REPO = "Cranch-fur/GreenLuma-GUI"
 GREENLUMA_STEALTH_ASSET_EXT = ".zip"
-GREENLUMA_STEALTH_INNER = "GreenLuma.dll"     # 压缩包内文件名
-GREENLUMA_STEALTH_DLL = "user32.dll"          # 落到 Steam 主目录时用的名字
-GREENLUMA_STEALTH_BAK = "user32.dll.dxb_bak"  # 原文件备份名
+GREENLUMA_STEALTH_INNER = "GreenLuma.dll"
+GREENLUMA_STEALTH_DLL = "user32.dll"
+GREENLUMA_STEALTH_BAK = "user32.dll.dxb_bak"
 GREENLUMA_STEALTH_MARKER = "greenluma_stealth_version.txt"
-GREENLUMA_STEALTH_MIN_SIZE = 60000            # 体积下限，防拿到错误文件
+GREENLUMA_STEALTH_MIN_SIZE = 60000
 
-# ---------------------------------------------------------------- SteamTools 官方安装包
-# SteamTools（稳定入库）官方只在 steamtools.net 发布，且只发 NSIS 安装包
-# st-setup-<ver>.exe（约 10MB）。站点是 Cloudflare 后面的 SPA，直链藏在
-# /assets/index-*.js 里，所以版本检测分两步：下载页 → 找到 bundle → 正则扒出
-# res/st-setup-<ver>.exe。NSIS 支持 /S 静默安装；安装包自己会从注册表
-# HKCU\Software\Valve\Steam\SteamPath 找到 Steam 目录（本机 d:\fnaf 已登记），
-# 往主目录放代理 DLL（hid.dll / XInput1_4.dll / dwmapi.dll）并建 config\stplug-in。
 STEAMTOOLS_SITE = "https://steamtools.net"
 STEAMTOOLS_PAGE = STEAMTOOLS_SITE + "/download"
 STEAMTOOLS_RES_RE = re.compile(r'res/st-setup-([0-9]+(?:\.[0-9]+)+)\.exe', re.I)
 STEAMTOOLS_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-# 曾经写死过、但早就 404 的仓库值一律当「没配」，避免老配置把自动安装带沟里
 _DEAD_STEAMTOOLS_REPOS = {"steamtools/staupdater"}
 
-# 下发物扩展名是 exe 且 spec 标了 installer → 当天装包直接跑，不再当压缩包解
 INSTALLER_EXT = ".exe"
 
 KERNEL_SPECS: Dict[str, Dict[str, Any]] = {
+    "native": {
+        "name": "自研入库（无需内核）",
+        "short": "不装任何 DLL，程序直接写 Steam 库",
+        "desc": "程序自己把 AppID 写进本机 Steam 账号的库清单（localconfig.vdf），"
+                "不需要装 OpenSteamTool / SteamTools / GreenLuma 任何一个，"
+                "不往 Steam 目录丢任何 DLL，Steam 绝对不会因此起不来。"
+                "代价是不带 depot 密钥：入库能成功，之后 Steam 下载时会因为缺密钥失败。",
+        "source": "builtin",
+        "builtin": True,
+        "repos": [],
+        "asset_prefer": [],
+        "asset_exts": [],
+        "target": "none",
+        "marker": "",
+        "extra_dirs": [],
+    },
     "opensteamtool": {
         "name": "OpenSteamTool",
         "short": "清单导入内核",
         "desc": "装到 Steam 主目录，lua 清单目录 config\\lua。与 SteamTools 二选一。",
         "source": "github",
         "repos": ["OpenSteam001/OpenSteamTool"],
-        "asset_prefer": ["release"],          # 优先 Release.zip（Debug 包 29MB 且带调试符号）
+        "asset_prefer": ["release"],
         "asset_exts": [".zip", ".7z"],
         "target": "steam_root",
         "marker": "opensteamtool_version.txt",
@@ -4870,13 +4830,13 @@ KERNEL_SPECS: Dict[str, Dict[str, Any]] = {
                 "管理员下 /S 静默安装、全程无窗口；普通权限则弹官方安装向导让你自己点。"
                 "装完 Steam 主目录会有 hid.dll / XInput1_4.dll / dwmapi.dll，"
                 "config\\stplug-in 放 lua 清单。",
-        "source": "official",                 # steamtools.net 官方安装包（不是 GitHub 仓库）
+        "source": "official",
         "site": STEAMTOOLS_SITE,
-        "repos": [],                          # 只有官方站不通时才用自填镜像兜底
+        "repos": [],
         "asset_prefer": [],
-        "asset_exts": [INSTALLER_EXT],        # 下发物就是安装包本身
-        "installer": True,                    # ← 跑安装程序，不解析压缩包
-        "silent_args": ["/S"],                # NSIS 静默开关；仅管理员下使用
+        "asset_exts": [INSTALLER_EXT],
+        "installer": True,
+        "silent_args": ["/S"],
         "target": "stplug",
         "marker": "steamtools_version.txt",
         "extra_dirs": [],
@@ -4901,13 +4861,68 @@ KERNEL_SPECS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def close_steam(timeout: int = 45) -> Dict[str, Any]:
+    """关闭 Steam：先请它自己退（-shutdown），退不掉才 taskkill /F。
+
+    为什么不能一上来就 /F：被强杀的 Steam 会留下半成品
+    %LOCALAPPDATA%\\Steam\\htmlcache，下次启动 CEF 起不来（不弹窗、日志刷
+    "Failed creating offscreen shared JS context" + GPU 崩溃循环）。这是实测踩过的坑。
+    """
+    pids = []
+    try:
+        r = run_hidden(['tasklist', '/fi', 'imagename eq steam.exe', '/nh'], timeout=20)
+        for line in (r.stdout or "").splitlines():
+            m = re.search(r'steam\.exe\s+(\d+)', line, re.I)
+            if m:
+                pids.append(int(m.group(1)))
+    except Exception:
+        pass
+    if not pids:
+        return {"ok": True, "already_closed": True, "forced": False}
+
+    try:
+        exe = None
+        sp = _current_steam_root()
+        if sp and (sp / 'steam.exe').exists():
+            exe = str(sp / 'steam.exe')
+        if exe:
+            subprocess.Popen([exe, '-shutdown'], cwd=str(sp),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    for _ in range(int(timeout / 1.5)):
+        time.sleep(1.5)
+        r = run_hidden(['tasklist', '/fi', 'imagename eq steam.exe', '/nh'], timeout=15)
+        if 'steam.exe' not in (r.stdout or "").lower():
+            return {"ok": True, "already_closed": False, "forced": False}
+
+    r = run_hidden(['taskkill', '/F', '/IM', 'steam.exe'], timeout=30)
+    time.sleep(1.0)
+    return {"ok": True, "already_closed": False, "forced": True,
+            "raw": (r.stdout or '').strip()[:200]}
+
+
+def _current_steam_root() -> Path | None:
+    """尽力定位 Steam 根目录（给 close_steam 用，拿不到就返回 None）。"""
+    try:
+        for cand in (r'C:\Program Files (x86)\Steam', r'C:\Program Files\Steam',
+                     r'D:\Steam', r'E:\Steam'):
+            p = Path(cand)
+            if (p / 'steam.exe').exists():
+                return p
+    except Exception:
+        pass
+    return None
+
+
 def run_hidden(args, cwd=None, timeout: int = 120):
     """无窗口跑子进程并取回输出。
 
     中文 Windows 下 tasklist/taskkill/net 输出是 GBK，text=True 默认按 UTF-8 解会炸，
     所以统一按系统首选编码解码 + errors='ignore'。
     """
-    flags = 0x08000000 if sys.platform == 'win32' else 0      # CREATE_NO_WINDOW
+    flags = 0x08000000 if sys.platform == 'win32' else 0
     si = None
     if sys.platform == 'win32':
         si = subprocess.STARTUPINFO()
@@ -4926,10 +4941,6 @@ def run_hidden(args, cwd=None, timeout: int = 120):
         return _R()
 
 
-# =====================================================================
-# 进程模块枚举：判断 steam.exe 到底加载了谁家的 user32.dll
-# （隐身版 GreenLuma 没有日志、界面上也看不出来，这是唯一可靠的判据）
-# =====================================================================
 _TH32CS_SNAPMODULE = 0x00000008
 _TH32CS_SNAPMODULE32 = 0x00000010
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -4988,7 +4999,6 @@ class KernelHub:
             self.b.client = c
         return c
 
-    # ---------------------------------------------------------- 本地状态
     def local_status(self, kind: str) -> Dict[str, Any]:
         spec = KERNEL_SPECS.get(kind)
         if not spec:
@@ -4999,6 +5009,17 @@ class KernelHub:
                                "steam_path": str(sp) if sp else None, "files": [], "applist": 0}
         if not sp or not sp.exists():
             out["error"] = "没有检测到 Steam 目录"
+            return out
+        if kind == "native":
+            acct = self.b.steam_account()
+            out["installed"] = True
+            out["builtin"] = True
+            out["version"] = CURRENT_VERSION
+            out["account"] = acct
+            out["files"] = []
+            out["note"] = ("程序自带能力，无需下载安装"
+                           + (f"；已识别本机 Steam 账号 {acct.get('persona') or acct.get('steamid64')}"
+                              if acct.get("logged_in") else "；未读到本机登录账号，仍可写入库清单"))
             return out
         if kind == "greenluma":
             inject_files = [n for n in ["GreenLuma_2025_x64.dll", "DLLInjector.exe", "LumaCore.dll"]
@@ -5017,7 +5038,6 @@ class KernelHub:
             out["modes"] = list(KERNEL_SPECS['greenluma'].get("modes") or [])
             out["mode"] = ("stealth" if out["stealth"]["installed"]
                            else ("inject" if out["inject"]["installed"] else ""))
-            # 版本号以「实际装上的那种形态」为准，别拿另一个形态的版本号糊弄
             out["version"] = (out["stealth"]["version"] if out["stealth"]["installed"]
                               else (out["inject"]["version"] if out["inject"]["installed"] else ""))
         elif kind == "steamtools":
@@ -5030,13 +5050,11 @@ class KernelHub:
                     lua_n = sum(1 for _ in d.glob('*.lua'))
                 except Exception:
                     st_files, lua_n = [], 0
-            # config\stplug-in 是程序固定会建的 lua 输出目录，凭它判断装没装会永远「已安装」。
-            # hid.dll 是官方安装包独有的代理 DLL，拿它当硬证据；其次是目录里真有 lua。
             proxies = [n for n in ('hid.dll', 'XInput1_4.dll', 'dwmapi.dll') if (sp / n).exists()]
             out["files"] = st_files + [n for n in proxies if n not in st_files]
             out["lua_count"] = lua_n
             out["installed"] = bool((sp / 'hid.dll').exists() or lua_n)
-        else:  # opensteamtool
+        else:
             lua = sp / 'config' / 'lua'
             dll_ok = (sp / 'OpenSteamTool.dll').exists()
             lua_ok = lua.is_dir() and any(lua.glob('*.lua'))
@@ -5058,16 +5076,17 @@ class KernelHub:
     def all_local(self) -> Dict[str, Any]:
         return {k: self.local_status(k) for k in KERNEL_SPECS}
 
-    # ---------------------------------------------------------- 远端最新版
     async def remote_latest(self, kind: str) -> Dict[str, Any]:
         """查远端最新版本（纯 API/HTTP，不开浏览器）。返回 {ok, version, url, note}"""
         spec = KERNEL_SPECS.get(kind)
         if not spec:
             return {"ok": False, "error": "未知内核"}
+        if spec.get("builtin"):
+            return {"ok": True, "version": CURRENT_VERSION, "repo": "builtin",
+                    "note": "程序自带，无需下载"}
         if spec.get("source") == "wuhu":
             return await self._remote_greenluma()
         if spec.get("source") == "official":
-            # SteamTools：官方安装包优先；只有官方站不通、且用户自己填了镜像仓库时才兜底
             off = await self._steamtools_latest()
             custom = self._steamtools_repo_override()
             if off.get("ok") or not custom:
@@ -5179,7 +5198,6 @@ class KernelHub:
             self.log.warning(f"查询 GreenLuma 隐身版失败：{e}")
             return "", ""
 
-    # ---------------------------------------------------------- 底层网络
     async def _latest_release(self, repo: str, spec: Dict) -> Tuple[str, Tuple[str, str] | None]:
         api = f"https://api.github.com/repos/{repo}/releases/latest"
         token = (self.b.config.get("Github_Personal_Token") or "").strip()
@@ -5195,7 +5213,7 @@ class KernelHub:
         best = None
         prefer = [p.lower() for p in (spec.get("asset_prefer") or [])]
         exts = [e.lower() for e in (spec.get("asset_exts") or [])]
-        for want in prefer:                       # 先按「偏好关键词」挑（release 优先）
+        for want in prefer:
             for a in assets:
                 nm = str(a.get("name") or "")
                 if want in nm.lower() and any(nm.lower().endswith(e) for e in exts):
@@ -5203,7 +5221,7 @@ class KernelHub:
                     break
             if best:
                 break
-        if not best:                              # 再退化成「任意符合后缀的」
+        if not best:
             for a in assets:
                 nm = str(a.get("name") or "")
                 if any(nm.lower().endswith(e) for e in exts):
@@ -5235,15 +5253,21 @@ class KernelHub:
         return ""
 
     async def _download_to(self, url: str, dest: Path, on_progress=None, label: str = "") -> bool:
-        """下载（带镜像回退 + 真实进度）。url 为 github 链接时自动尝试加速前缀。"""
+        """下载（带镜像回退 + 真实进度）。url 为 github 链接时自动尝试加速前缀。
+
+        steamtools.net 挂在 Cloudflare 后面，**裸请求（无 UA）一律 403**，
+        所以这里统一带浏览器 UA，别的地方漏带就会下不到安装包。
+        """
         cands = [url]
         if "github.com" in url or "raw.githubusercontent.com" in url:
             cands = [p + url for p in GH_DL_PROXIES]
+        headers = {"User-Agent": STEAMTOOLS_UA}
         dest.parent.mkdir(parents=True, exist_ok=True)
         last_err = ""
         for i, u in enumerate(cands):
             try:
-                async with self._client().stream("GET", u, follow_redirects=True, timeout=180) as r:
+                async with self._client().stream("GET", u, headers=headers,
+                                                follow_redirects=True, timeout=180) as r:
                     if r.status_code != 200:
                         last_err = f"HTTP {r.status_code}"
                         continue
@@ -5264,7 +5288,6 @@ class KernelHub:
         self.log.error(f"下载失败（{len(cands)} 个通道都试过）：{last_err}")
         return False
 
-    # ---------------------------------------------------------- 安装
     def _extract(self, archive: Path, out_dir: Path) -> bool:
         """解压 zip / 7z（7z 需要可选依赖 py7zr）。"""
         name = archive.name.lower()
@@ -5301,13 +5324,11 @@ class KernelHub:
                     shutil.copy2(p, dst / p.name)
                     placed.append(p.name)
             return placed
-        # steam_root：优先按清单里的文件名挑，挑了不到就把顶层文件都放过去
         wanted = [n.lower() for n in spec.get("root_files", [])]
         found = {}
         for p in src_dir.rglob('*'):
             if p.is_file() and p.name.lower() in wanted:
                 found[p.name.lower()] = p
-        # GreenLuma 包可能叫别的年份/架构，宽松兜底
         if kind == "greenluma":
             for p in src_dir.rglob('*'):
                 if p.is_file() and (p.name.lower().startswith('greenluma') or
@@ -5319,7 +5340,6 @@ class KernelHub:
         for p in found.values():
             shutil.copy2(p, sp / p.name)
             placed.append(p.name)
-        # 主目录里 GreenLuma 的 ini 需要重写成绝对路径（跳过交互式设置工具）
         if kind == "greenluma" and (sp / 'DLLInjector.exe').exists():
             self._write_dllinjector_ini(sp)
         for d in spec.get("extra_dirs", []):
@@ -5419,7 +5439,6 @@ class KernelHub:
         except Exception as e:
             self.log.warning(f"写 DLLInjector.ini 失败：{e}")
 
-    # ---------------------------------------------------------- 安装包（exe）
     def _downloads_dir(self) -> Path:
         """安装包落地目录：exe 同目录的 downloads\\，重启后还在，用户能自己重跑。"""
         d = Path(getattr(self.b, 'project_root', None) or Path.cwd()) / 'downloads'
@@ -5455,7 +5474,7 @@ class KernelHub:
                 si.wShowWindow = 0
                 p = subprocess.Popen(
                     [str(exe)] + args, cwd=str(exe.parent), startupinfo=si,
-                    creationflags=0x08000000,          # CREATE_NO_WINDOW
+                    creationflags=0x08000000,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
                 return {"success": False, "admin": True, "silent": True,
@@ -5477,7 +5496,6 @@ class KernelHub:
                                 if rc == 0 else
                                 f"静默安装返回码 {rc}，不一定装成功了，"
                                 f"可以到 downloads 目录手动双击 {exe.name} 跑一遍看看。")}
-        # 非管理员：交给官方安装向导（ShellExecute，脱离本进程，用户的点击不会被我们打断）
         try:
             os.startfile(str(exe))
         except Exception as e:
@@ -5498,6 +5516,9 @@ class KernelHub:
         spec = KERNEL_SPECS.get(kind)
         if not spec:
             return {"success": False, "message": "未知内核"}
+        if spec.get("builtin"):
+            return {"success": True, "version": CURRENT_VERSION, "files": [],
+                    "message": "自研入库无需安装，已直接可用（不往 Steam 目录写任何文件）。"}
         sp = self.b.get_steam_path()
         if not sp or not sp.exists():
             return {"success": False, "message": "没有检测到 Steam 目录，先在设置页指定 Steam 路径。"}
@@ -5536,7 +5557,6 @@ class KernelHub:
             prog(92, "释放到 Steam 主目录")
             placed = self._copy_to_steam(kind, tmp, sp)
             remote = await self._remote_greenluma()
-            # 注入版的版本号必须用注入版自己的，别把隐身版的 1.8.7 写到注入版标记里
             ver = remote.get("inject_version") or remote.get("version") or "GreenLuma 2025"
             try:
                 (sp / spec["marker"]).write_text(ver, encoding='utf-8')
@@ -5547,7 +5567,6 @@ class KernelHub:
             self.log.info(f"GreenLuma 已装到 Steam 主目录：{placed}")
             return {"success": True, "message": f"GreenLuma 已安装到 {sp}", "version": ver, "files": placed}
 
-        # GitHub 发布包两个内核（OpenSteamTool / SteamTools）
         latest = await self.remote_latest(kind)
         if not latest.get("ok") or not latest.get("url"):
             return {"success": False, "message": latest.get("note") or "没有可用的下载源"}
@@ -5557,7 +5576,6 @@ class KernelHub:
         if not await self._download_to(url, arc, on_progress=lambda p, m: prog(2 + int(p * 0.73), m), label=f" {aname}"):
             return {"success": False, "message": "下载失败，检查网络/加速后重试。"}
 
-        # 下发物是安装包 → 直接跑官方安装程序，不当压缩包解（SteamTools 走这条）
         if spec.get("installer") and str(aname).lower().endswith(INSTALLER_EXT):
             keep = self._downloads_dir() / str(aname)
             kept = True
@@ -5568,11 +5586,28 @@ class KernelHub:
             prog(76, "运行官方安装包")
             res = self.run_installer(keep, spec.get("silent_args") or [])
             if res.get("success"):
-                try:
-                    (sp / spec["marker"]).write_text(str(latest.get("version") or aname),
-                                                     encoding='utf-8')
-                except Exception:
-                    pass
+                landed = [n for n in ('hid.dll', 'XInput1_4.dll', 'dwmapi.dll')
+                          if (sp / n).exists()]
+                if not landed:
+                    try:
+                        reg = self.b._steam_registry_paths()
+                    except Exception:
+                        reg = []
+                    where = reg[0] if reg else "注册表里记录的 Steam 目录"
+                    msg = (f"安装程序跑完了，但 {sp} 下没有任何 SteamTools 组件 —— "
+                           f"它多半按 {where} 装到别的 Steam 去了。请确认设置里的 Steam 路径，"
+                           f"或把程序以管理员身份运行后重试。")
+                    self.log.error(msg)
+                    res["success"] = False
+                    res["message"] = msg
+                    res["landed"] = []
+                else:
+                    try:
+                        (sp / spec["marker"]).write_text(str(latest.get("version") or aname),
+                                                         encoding='utf-8')
+                    except Exception:
+                        pass
+                    res["landed"] = landed
             res.update({"version": str(latest.get("version") or aname),
                         "files": [str(aname)], "installer": str(keep)})
             if kept:
@@ -5600,7 +5635,8 @@ class KernelHub:
         """单通道下载（wuhu raw 已经带多镜像列表，这里不再加前缀）。"""
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            r = await self._client().get(url, timeout=60, follow_redirects=True)
+            r = await self._client().get(url, timeout=60, follow_redirects=True,
+                                         headers={"User-Agent": STEAMTOOLS_UA})
             if r.status_code == 200 and r.content:
                 dest.write_bytes(r.content)
                 return True
@@ -5625,7 +5661,6 @@ class KernelHub:
         arc = tmp / (filename or 'pkg.zip')
         arc.write_bytes(data)
 
-        # 本地安装包通道：直接跑安装程序（管理员静默）
         if str(filename or '').lower().endswith(INSTALLER_EXT):
             keep = self._downloads_dir() / Path(filename).name
             kept = True
@@ -5667,7 +5702,6 @@ class KernelHub:
             return {"success": False, "message": "包里没找到可释放的文件，确认你传的是正确的安装包。"}
         return {"success": True, "message": f"已从本地包安装 {KERNEL_SPECS[kind]['name']}", "files": placed}
 
-    # -------------------------------------------------- GreenLuma 隐身版
     def _steam_pids(self) -> List[int]:
         """当前 steam.exe 的 PID 列表（tasklist 输出是 GBK，按系统编码解）。"""
         r = run_hidden(['tasklist', '/FI', 'imagename eq steam.exe', '/FO', 'CSV', '/NH'], timeout=25)
@@ -5733,7 +5767,6 @@ class KernelHub:
                 return {"success": False, "message": "拿不到 GreenLuma 隐身版下载地址（网络不通或仓库不可达）。"}
             prog(12, f"下载 GreenLuma {ver or ''} 隐身版")
             zp = tmp / ('greenluma_stealth' + GREENLUMA_STEALTH_ASSET_EXT)
-            # 下载自己的进度是 0-100，映射到 12-68 这一段，不然会和后面的「解包 72%」打架回跳
             if not await self._download_to(url, zp,
                                            on_progress=lambda p, m: prog(12 + int(p * 0.56), m),
                                            label=" GreenLuma 隐身版"):
@@ -5802,7 +5835,6 @@ class KernelHub:
                            + ("原来的 user32.dll 已从备份还原。" if restored else "")
                            + "\n\n重启 Steam 后生效。"}
 
-    # ---------------------------------------------------------- 注入 / 启动
     def greenluma_log_tail(self, lines: int = 40) -> List[str]:
         """读 GreenLuma 自己写的日志（判断注入到底走到哪一步的真凭据）。"""
         sp = self.b.get_steam_path()
@@ -5847,10 +5879,21 @@ class KernelHub:
         return out
 
     def injection_status(self) -> Dict[str, Any]:
-        """真实检测：steam.exe 是否在跑、有没有加载 GreenLuma（注入版 / 隐身版）。"""
-        out = {"steam_running": False, "injected": False, "modules": [], "stealth": False}
+        """真实检测：steam.exe 是否在跑、有没有加载 GreenLuma（注入版 / 隐身版）。
+
+        module_details 是给「离线注入」页用的模块明细：同一个 user32.dll 会被 Steam
+        同时加载两份（System32 一份、Steam 目录一份），只有 Steam 目录那份才是 GreenLuma
+        隐身版，所以必须按「完整路径是否在 Steam 根目录下」区分，光看模块名会认错。
+        """
+        out = {"steam_running": False, "injected": False, "modules": [],
+               "stealth": False, "module_details": [], "steam_path": ""}
         if sys.platform != 'win32':
             return out
+        try:
+            sp = self.b.get_steam_path()
+            out["steam_path"] = str(sp) if sp else ""
+        except Exception:
+            pass
         r = run_hidden(['tasklist', '/fi', 'imagename eq steam.exe', '/m'], timeout=25)
         text = r.stdout or ""
         out["steam_running"] = 'steam.exe' in text.lower()
@@ -5858,12 +5901,31 @@ class KernelHub:
         for m in re.finditer(r'(GreenLuma[\w.\-]*\.dll|LumaCore[\w.\-]*\.dll)', text, re.I):
             if m.group(1) not in mods:
                 mods.append(m.group(1))
-        # 隐身版没有自己的模块名（它就叫 user32.dll），只能按「加载路径」判定
         if out["steam_running"] and self.stealth_loaded():
             out["stealth"] = True
             mods.append(f"{GREENLUMA_STEALTH_DLL}（隐身版）")
         out["modules"] = mods
         out["injected"] = bool(mods)
+        out["module_details"] = self.steam_module_details()
+        return out
+
+    def steam_module_details(self) -> List[Dict[str, Any]]:
+        """枚举 steam.exe 实际加载的模块，标出哪些来自 Steam 根目录（= 内核 DLL）。"""
+        out: List[Dict[str, Any]] = []
+        sp = None
+        try:
+            sp = self.b.get_steam_path()
+        except Exception:
+            pass
+        root = str(sp).lower().rstrip('\\/') if sp else ''
+        for pid in self._steam_pids():
+            for name, path in process_modules(pid):
+                low = (path or '').lower()
+                is_dxb = bool(root) and low.startswith(root + '\\') and (
+                    low.endswith('user32.dll') or 'greenluma' in low or 'lumacore' in low
+                    or low.endswith('opensteamtool.dll') or 'steamtools' in low)
+                if is_dxb or low.endswith('user32.dll') or 'greenluma' in low:
+                    out.append({"pid": pid, "module": name, "path": path, "from_steam": is_dxb})
         return out
 
     def _launch_plain(self, sp: Path, kind: str, conflict: Dict[str, Any]) -> Dict[str, Any]:
@@ -5871,7 +5933,7 @@ class KernelHub:
         exe = sp / 'steam.exe'
         if not exe.exists():
             return {"success": False, "message": f"没找到 {exe}"}
-        run_hidden(['taskkill', '/F', '/IM', 'steam.exe'], timeout=30)   # 换内核前先退干净
+        close_steam()
         time.sleep(1.2)
         try:
             subprocess.Popen([str(exe)], cwd=str(sp))
@@ -5880,7 +5942,6 @@ class KernelHub:
         if kind != 'stealth':
             return {"success": True, "message": "已启动 Steam（内核 DLL 会随进程自动加载）。",
                     "injection": self.injection_status()}
-        # 隐身版：盯一会儿，确认真是 Steam 目录下那份 user32.dll 被加载了，别嘴上说成功
         loaded = False
         for _ in range(8):
             time.sleep(2)
@@ -5911,10 +5972,9 @@ class KernelHub:
         """DLLInjector.exe 无窗口注入启动（注入版；对 Steam 版本敏感）。"""
         if not injector.exists():
             return {"success": False, "message": "没找到 DLLInjector.exe，先在下载管理里装 GreenLuma（注入版）。"}
-        run_hidden(['taskkill', '/F', '/IM', 'steam.exe'], timeout=30)   # 注入前必须先退干净
+        close_steam()
         time.sleep(1.5)
         run_hidden([str(injector)], cwd=str(sp), timeout=60)
-        # 注入后 steam.exe 会先起 bootstrap，慢的时候十几秒才稳住，多盯几次再下结论
         st = self.injection_status()
         for _ in range(6):
             time.sleep(2)
@@ -5979,9 +6039,6 @@ class KernelHub:
         return self._launch_plain(sp, 'normal', conflict)
 
 
-# =====================================================================
-# 网络自检：真实测「直连」到底通不通（回答“为什么非要加速”）
-# =====================================================================
 NET_PROBE_TARGETS = [
     ("Steam 商店", "https://store.steampowered.com/api/appdetails?appids=730"),
     ("Steam 社区", "https://steamcommunity.com/"),
@@ -5999,16 +6056,21 @@ def _ver_tuple(v: str):
     return tuple(int(x) for x in m.group(1).split('.'))
 
 
-def kernel_update_state(local: str, remote: str) -> str:
-    """返回 inner: none（无远端信息）/ latest（已是最新）/ update（可更新）/ unknown"""
+def kernel_update_state(local: str, remote: str, installed: bool = True) -> str:
+    """返回 none（没远端信息）/ install（没装，有新版可装）/ latest（已是最新）/ update（可更新）/ unknown
+
+    「没装过」和「装了但版本旧」是两回事：以前一律显示「可更新」，
+    用户会看到「可更新」但 SteamTools 压根没装，纯粹误导。
+    """
     if not remote:
         return "none"
+    if not installed:
+        return "install"
     if not local:
-        return "update"          # 没装过就算可安装
+        return "unknown"
     lt, rt = _ver_tuple(local), _ver_tuple(remote)
     if lt == (0,) or rt == (0,):
         return "unknown"
-    # 对齐位数再比，避免 (1,4) vs (1,4,0) 误判
     n = max(len(lt), len(rt))
     lt = lt + (0,) * (n - len(lt))
     rt = rt + (0,) * (n - len(rt))

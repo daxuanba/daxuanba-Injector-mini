@@ -1,15 +1,16 @@
-// --- START OF FILE static/js/app.js (MODIFIED WITH WORKSHOP SUPPORT AND DEPOTKEY PATCH) ---
 
 class DxbWebApp {
     constructor() {
         this.socket = null;
         this.taskStatus = 'idle';
         this.unlockerType = null;
+        this.forceUnlocker = 'auto';
+        this._choiceBound = false;
         this.currentAppId = null;
         this.pollTimeout = null;
         this.stAutoUpdateContext = null; 
         this.addAllDlcContext = null;
-        this.patchDepotKeyContext = null; // NEW: 添加 depotkey修补上下文
+        this.patchDepotKeyContext = null;
         this.isWorkshopMode = false;
         this.initialize();
     }
@@ -28,7 +29,7 @@ class DxbWebApp {
             searchResultsContainer: document.getElementById('searchResultsContainer'),
             stAutoUpdateGroup: document.getElementById('stAutoUpdateGroup'),
             addAllDlcGroup: document.getElementById('addAllDlcGroup'),
-            patchDepotKeyGroup: document.getElementById('patchDepotKeyGroup'), // NEW: 添加 depotkey修补组
+            patchDepotKeyGroup: document.getElementById('patchDepotKeyGroup'),
             progressContainer: document.getElementById('progressContainer'),
             clearLogBtn: document.getElementById('clearLogBtn'),
             snackbar: document.getElementById('snackbar'),
@@ -41,14 +42,12 @@ class DxbWebApp {
             gameImageContainer: document.getElementById('gameImageContainer'),
             gameHeaderImage: document.getElementById('gameHeaderImage'),
             gameImagePlaceholder: document.getElementById('gameImagePlaceholder'),
-            // 创意工坊相关元素
             workshopModeBtn: document.getElementById('workshopModeBtn'),
             unlockCardIcon: document.getElementById('unlockCardIcon'),
             unlockCardTitle: document.getElementById('unlockCardTitle'),
             modeIndicator: document.getElementById('modeIndicator'),
             gameModeOptions: document.getElementById('gameModeOptions'),
             workshopModeOptions: document.getElementById('workshopModeOptions'),
-            // Steam 状态条元素
             steamPathText: document.getElementById('steamPathText'),
             steamKernelText: document.getElementById('steamKernelText'),
             steamToolsText: document.getElementById('steamToolsText'),
@@ -59,7 +58,6 @@ class DxbWebApp {
         this.initializeBackend();
         this.setupMutationObserver();
 
-        // 日志/任务状态跨页持久：切走再回来，任务继续跑，日志与进度原样恢复
         if (window.DxbTaskLog) {
             window.DxbTaskLog.mount(this.elements.progressContainer, (status) => this.applyTaskState(status));
             this.restoreUiState();
@@ -67,7 +65,6 @@ class DxbWebApp {
     }
 
     initializeSocket() {
-        // socket.io 走的是公网 CDN，国内可能加载失败；失败也不能影响页面其它功能
         if (typeof io !== 'function') {
             console.warn('socket.io 未加载，改用轮询获取日志。');
             return;
@@ -80,13 +77,11 @@ class DxbWebApp {
         }
         this.socket.on('connect', () => console.log('Connected to server.'));
         this.socket.on('disconnect', () => this.showSnackbar('Disconnected from server.', 'error'));
-        // 有新日志时触发一次同步（内容以服务端缓冲为准，天然去重）
         this.socket.on('task_progress', () => {
             if (window.DxbTaskLog) window.DxbTaskLog.triggerSync();
         });
     }
 
-    /** 根据服务端任务状态恢复界面（切换页面回来时不重启任务、不丢进度） */
     applyTaskState(status) {
         if (status === 'running') {
             this.taskStatus = 'running';
@@ -147,7 +142,6 @@ class DxbWebApp {
         this.elements.clearLogBtn.addEventListener('click', () => this.clearLogs());
         this.elements.snackbarClose.addEventListener('click', () => this.hideSnackbar());
 
-        // 创意工坊模式切换
         this.elements.workshopModeBtn.addEventListener('click', () => this.toggleWorkshopMode());
 
         this.elements.unlockForm.addEventListener('change', (event) => {
@@ -169,14 +163,12 @@ class DxbWebApp {
         });
     }
 
-    // 切换创意工坊模式
     toggleWorkshopMode() {
         this.isWorkshopMode = !this.isWorkshopMode;
         this.updateModeUI();
         this.resetForm();
     }
 
-    // 更新界面根据当前模式
     updateModeUI() {
         const workshopBtn = this.elements.workshopModeBtn;
         const cardIcon = this.elements.unlockCardIcon;
@@ -189,7 +181,6 @@ class DxbWebApp {
         const appIdInput = this.elements.appIdInput;
 
         if (this.isWorkshopMode) {
-            // 切换到创意工坊模式
             workshopBtn.innerHTML = '<span class="material-icons">build_circle</span>游戏入库';
             workshopBtn.title = '切换到游戏入库模式';
             cardIcon.textContent = 'extension';
@@ -197,12 +188,10 @@ class DxbWebApp {
             modeIndicator.style.display = 'block';
             gameModeOptions.style.display = 'none';
             workshopModeOptions.style.display = 'block';
-            // 保持游戏搜索卡片始终显示
             appIdLabel.textContent = '创意工坊物品链接或ID';
             appIdHelper.textContent = '支持创意工坊链接或数字ID，例如: https://steamcommunity.com/sharedfiles/filedetails/?id=123456789';
             appIdInput.placeholder = '例如: 创意工坊链接或物品ID';
         } else {
-            // 切换到游戏模式
             workshopBtn.innerHTML = '<span class="material-icons">extension</span>创意工坊资源下载';
             workshopBtn.title = '切换到创意工坊资源下载';
             cardIcon.textContent = 'build_circle';
@@ -210,7 +199,6 @@ class DxbWebApp {
             modeIndicator.style.display = 'none';
             gameModeOptions.style.display = 'block';
             workshopModeOptions.style.display = 'none';
-            // 保持游戏搜索卡片始终显示
             appIdLabel.textContent = 'App ID / 链接';
             appIdHelper.textContent = '请先通过左侧搜索或其它方式获取AppID。';
             appIdInput.placeholder = '例如: 730 或 Steam 链接';
@@ -243,12 +231,13 @@ class DxbWebApp {
                 this.unlockerType = data.unlocker_type;
                 this.elements.configStatus.innerHTML = this.generateConfigStatusHTML(data);
                 this.elements.unlockBtn.disabled = false;
-                
+                this.setupUnlockerChoice(data);
+
                 const showStOptions = this.unlockerType === 'steamtools';
                 this.elements.stAutoUpdateGroup.style.display = showStOptions ? 'block' : 'none';
                 this.elements.addAllDlcGroup.style.display = showStOptions ? 'block' : 'none';
-                this.elements.patchDepotKeyGroup.style.display = showStOptions ? 'block' : 'none'; // NEW: 显示depotkey修补选项
-                
+                this.elements.patchDepotKeyGroup.style.display = showStOptions ? 'block' : 'none';
+
                 await this.loadSources();
                 this.loadSteamStatus();
             } else {
@@ -259,49 +248,108 @@ class DxbWebApp {
         }
     }
 
+    setupUnlockerChoice(data) {
+        const box = document.getElementById('unlockerChoice');
+        if (!box) { return; }
+        const detected = data.detected || {};
+        const force = this.forceUnlocker || 'auto';
+        const LABELS = { steamtools: 'SteamTools', greenluma: 'GreenLuma',
+                         opensteamtool: 'OpenSteamTool', native: '自研入库' };
+        box.querySelectorAll('button[data-kind]').forEach(b => {
+            const k = b.dataset.kind;
+            b.classList.toggle('on', k === force);
+            if (k !== 'auto' && detected[k] === false && k !== 'native') {
+                b.title = '本机没检测到 ' + (LABELS[k] || k) + '，选了会先去「下载管理」装';
+            } else {
+                b.title = '';
+            }
+        });
+        if (this._choiceBound) { return; }
+        this._choiceBound = true;
+        box.addEventListener('click', async (ev) => {
+            const btn = ev.target.closest('button[data-kind]');
+            if (!btn) { return; }
+            const kind = btn.dataset.kind;
+            this.forceUnlocker = kind;
+            box.querySelectorAll('button[data-kind]').forEach(b => b.classList.toggle('on', b === btn));
+            const r = await fetch('/api/config/update', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force_unlocker_type: kind })
+            });
+            const d = await r.json();
+            if (d.success) {
+                this.snackbar && this.snackbar(`已切换入库方式：${kind === 'auto' ? '自动' : (LABELS[kind] || kind)}`);
+                const init = await (await fetch('/api/initialize', { method: 'POST' })).json();
+                if (init.success) {
+                    this.unlockerType = init.unlocker_type;
+                    this.elements.configStatus.innerHTML = this.generateConfigStatusHTML(init);
+                    const showSt = this.unlockerType === 'steamtools';
+                    this.elements.stAutoUpdateGroup.style.display = showSt ? 'block' : 'none';
+                    this.elements.addAllDlcGroup.style.display = showSt ? 'block' : 'none';
+                    this.elements.patchDepotKeyGroup.style.display = showSt ? 'block' : 'none';
+                    this.setupUnlockerChoice(init);
+                }
+            } else if (this.showSnackbar) {
+                this.showSnackbar(d.message || '切换失败', 'error');
+            }
+        });
+    }
+
     generateConfigStatusHTML(config) {
         const items = [];
         const unlockerStatusMap = {
             'steamtools': { class: 'success', text: '已检测到 SteamTools', icon: 'check_circle' },
             'greenluma': { class: 'success', text: '已检测到 GreenLuma', icon: 'check_circle' },
+            'opensteamtool': { class: 'success', text: '已检测到 OpenSteamTool', icon: 'check_circle' },
             'conflict': { class: 'error', text: '冲突: 同时检测到两种工具!', icon: 'error' },
             'none': { class: 'warning', text: '未检测到解锁工具。', icon: 'warning' },
         };
-        const status = unlockerStatusMap[config.unlocker_type] || unlockerStatusMap.none;
-        items.push(`<div class="status-item ${status.class}"><span class="material-icons status-icon">${status.icon}</span><span class="status-text">${status.text}</span></div>`);
+        const detected = config.detected;
+        if (detected && typeof detected === 'object') {
+            const LABELS = { steamtools: 'SteamTools', greenluma: 'GreenLuma', opensteamtool: 'OpenSteamTool', native: '自研入库' };
+            const active = config.unlocker_type;
+            Object.keys(LABELS).forEach(key => {
+                const on = !!detected[key];
+                const text = on
+                    ? `已检测到 ${LABELS[key]}${active === key ? '（使用中）' : ''}`
+                    : `未安装 ${LABELS[key]}`;
+                items.push(`<div class="status-item ${on ? 'success' : 'muted'}"><span class="material-icons status-icon">${on ? 'check_circle' : 'cancel'}</span><span class="status-text">${text}</span></div>`);
+            });
+            if (active === 'conflict') {
+                items.push(`<div class="status-item error"><span class="material-icons status-icon">error</span><span class="status-text">冲突: 同时检测到两种工具!</span></div>`);
+            } else if (active === 'none') {
+                items.push(`<div class="status-item warning"><span class="material-icons status-icon">warning</span><span class="status-text">没装解锁工具，去「下载管理」页装一个</span></div>`);
+            }
+        } else {
+            const status = unlockerStatusMap[config.unlocker_type] || unlockerStatusMap.none;
+            items.push(`<div class="status-item ${status.class}"><span class="material-icons status-icon">${status.icon}</span><span class="status-text">${status.text}</span></div>`);
+        }
         const steamPathStatus = config.steam_path !== 'Not Found' ? { class: 'success', text: `Steam 路径: ${config.steam_path}`, icon: 'check_circle' } : { class: 'error', text: '未找到 Steam 路径!', icon: 'error' };
         items.push(`<div class="status-item ${steamPathStatus.class}"><span class="material-icons status-icon">${steamPathStatus.icon}</span><span class="status-text">${steamPathStatus.text}</span></div>`);
         return items.join('');
     }
 
-    // FIXED: 修复后的 loadSources 方法，从后端获取包含自定义仓库的完整源列表
     async loadSources() {
         try {
-            // 显示加载状态
             this.elements.toolTypeGroup.innerHTML = '<div class="loading">正在加载清单源...</div>';
-            
-            // 从后端获取所有可用的源（包括自定义仓库）
-            const response = await fetch('/api/sources');
+
+            const response = await fetch('/api/sources?fast=1');
             if (!response.ok) throw new Error(`Server responded with ${response.status}`);
-            
+
             const data = await response.json();
             if (data.success) {
                 this.renderSourceList(data.sources, data.recommended);
-                // 如果有自定义仓库，显示提示信息
                 const customCount = (data.custom_github_count || 0) + (data.custom_zip_count || 0);
                 if (customCount > 0) {
                     console.log(`已加载 ${customCount} 个自定义清单源`);
                     this.showSnackbar(`已加载 ${customCount} 个自定义清单源`, 'success');
                 }
-                if (data.recommended) {
-                    this.showSnackbar('已自动选择最优可用清单源', 'info');
-                }
+                this.refreshSourceAvailability();
             } else {
                 throw new Error(data.message || '获取清单源失败');
             }
         } catch (error) {
             console.error('加载清单源失败:', error);
-            // 回退到硬编码的内置源
             const fallbackSources = {
                 "自动搜索GitHub": "search",
                 "SWA V2": "printedwaste",
@@ -322,6 +370,20 @@ class DxbWebApp {
             };
             this.renderSourceList(fallbackSources, 'search');
             this.showSnackbar('加载自定义清单源失败，使用默认源', 'warning');
+        }
+    }
+
+    async refreshSourceAvailability() {
+        try {
+            const resp = await fetch('/api/sources');
+            if (!resp.ok) return;
+            const d = await resp.json();
+            if (d.success && d.probed) {
+                this.renderSourceList(d.sources, d.recommended);
+                if (d.recommended) this.showSnackbar('已自动选择最优可用清单源', 'info');
+            }
+        } catch (e) {
+            console.warn('清单源可用性刷新失败（保留首屏列表）:', e);
         }
     }
 
@@ -360,7 +422,6 @@ class DxbWebApp {
         }
     }
 
-    // 首页 Steam 状态条：位置 + 内核 + SteamTools
     async loadSteamStatus() {
         try {
             const response = await fetch('/api/steam_status');
@@ -471,7 +532,6 @@ class DxbWebApp {
             return; 
         }
 
-        // 根据模式处理不同的任务类型
         if (this.isWorkshopMode) {
             await this.startWorkshopTask(formData);
         } else {
@@ -479,7 +539,6 @@ class DxbWebApp {
         }
     }
 
-    // 处理创意工坊资源下载任务
     async startWorkshopTask(formData) {
         const downloadResources = formData.get('workshopDownloadResources') === 'on';
         const copyToDepot = formData.get('workshopCopyToDepot') === 'on';
@@ -495,7 +554,6 @@ class DxbWebApp {
         this.addLogEntry('info', `--- 开始下载创意工坊资源: '${this.currentAppId}' ---`);
 
         try {
-            // 下载前先检测物品是否存在，避免无效下载
             this.addLogEntry('info', '正在检测创意工坊物品是否存在...');
             const checkResp = await fetch('/api/workshop/check', {
                 method: 'POST',
@@ -540,23 +598,22 @@ class DxbWebApp {
         }
     }
 
-    // 原有的游戏任务处理逻辑
     async startGameTask(formData) {
         let toolType = formData.get('toolType');
         let useStAutoUpdate;
         let addAllDlc;
-        let patchDepotKey; // NEW: 添加 depotkey修补参数
+        let patchDepotKey;
 
         const searchResultChoice = document.querySelector('input[name="searchResult"]:checked');
         if (searchResultChoice) {
             toolType = searchResultChoice.value;
             useStAutoUpdate = this.stAutoUpdateContext;
             addAllDlc = this.addAllDlcContext;
-            patchDepotKey = this.patchDepotKeyContext; // NEW: 从上下文获取
+            patchDepotKey = this.patchDepotKeyContext;
         } else {
             useStAutoUpdate = formData.get('stAutoUpdate') === 'on';
             addAllDlc = formData.get('addAllDlc') === 'on';
-            patchDepotKey = formData.get('patchDepotKey') === 'on'; // NEW: 从表单获取
+            patchDepotKey = formData.get('patchDepotKey') === 'on';
         }
 
         if (!toolType) { this.showSnackbar('请选择一个清单源。', 'error'); return; }
@@ -585,7 +642,7 @@ class DxbWebApp {
                     tool_type: toolType,
                     use_st_auto_update: useStAutoUpdate,
                     add_all_dlc: addAllDlc,
-                    patch_depot_key: patchDepotKey, // NEW: 传递depotkey修补参数
+                    patch_depot_key: patchDepotKey,
                 }),
             });
             const data = await response.json();
@@ -616,7 +673,7 @@ class DxbWebApp {
                     else { 
                         this.stAutoUpdateContext = null; 
                         this.addAllDlcContext = null; 
-                        this.patchDepotKeyContext = null; // NEW: 清空depotkey上下文
+                        this.patchDepotKeyContext = null;
                         this.setFormDisabled(false); 
                     }
                     if (data.result?.message) { this.showSnackbar(data.result.message, data.result.success ? 'success' : 'error'); }
@@ -624,20 +681,20 @@ class DxbWebApp {
                 }
                 if (Date.now() - pollStartTime > maxPollDuration) {
                     clearInterval(pollInterval); clearTimeout(this.pollTimeout); this.taskStatus = 'idle'; this.setFormDisabled(false);
-                    this.stAutoUpdateContext = null; this.addAllDlcContext = null; this.patchDepotKeyContext = null; // NEW: 清空上下文
+                    this.stAutoUpdateContext = null; this.addAllDlcContext = null; this.patchDepotKeyContext = null;
                     this.showSnackbar('任务超时，请检查网络或重试。', 'error'); this.addLogEntry('error', '任务超时，可能由于网络问题或服务器无响应。');
                 }
             } catch (error) {
                 console.error('Status polling error:', error);
                 clearInterval(pollInterval); clearTimeout(this.pollTimeout); this.taskStatus = 'idle'; this.setFormDisabled(false);
-                this.stAutoUpdateContext = null; this.addAllDlcContext = null; this.patchDepotKeyContext = null; // NEW: 清空上下文
+                this.stAutoUpdateContext = null; this.addAllDlcContext = null; this.patchDepotKeyContext = null;
                 this.showSnackbar(`轮询状态失败: ${error.message}`, 'error'); this.addLogEntry('error', `轮询状态失败: ${error.message}`);
             }
         }, 1500);
 
         this.pollTimeout = setTimeout(() => {
             clearInterval(pollInterval); this.taskStatus = 'idle'; this.setFormDisabled(false);
-            this.stAutoUpdateContext = null; this.addAllDlcContext = null; this.patchDepotKeyContext = null; // NEW: 清空上下文
+            this.stAutoUpdateContext = null; this.addAllDlcContext = null; this.patchDepotKeyContext = null;
             this.showSnackbar('任务超时，请检查网络或重试。', 'error'); this.addLogEntry('error', '任务超时，可能由于网络问题或服务器无响应。');
         }, maxPollDuration);
     }
@@ -646,7 +703,7 @@ class DxbWebApp {
         const sources = result.sources;
         this.stAutoUpdateContext = result.context?.use_st_auto_update ?? false;
         this.addAllDlcContext = result.context?.add_all_dlc ?? false;
-        this.patchDepotKeyContext = result.context?.patch_depot_key ?? false; // NEW: 保存depotkey上下文
+        this.patchDepotKeyContext = result.context?.patch_depot_key ?? false;
         
         let html = '<label class="input-label">请从搜索结果中选择一个源:</label>';
         sources.forEach((source, index) => {
@@ -660,7 +717,6 @@ class DxbWebApp {
         this.elements.unlockBtn.disabled = true;
     }
 
-    /** 新任务开始：清掉上一轮日志（含跨页快照） */
     newTaskLog() {
         if (window.DxbTaskLog) { window.DxbTaskLog.clear(); return; }
         this.elements.progressContainer.innerHTML = '';
@@ -693,7 +749,6 @@ class DxbWebApp {
         const allCheckboxes = this.elements.unlockForm.querySelectorAll('input[type="checkbox"]');
         allCheckboxes.forEach(checkbox => checkbox.disabled = disabled);
 
-        // 在任务运行时禁用模式切换按钮
         if (this.elements.workshopModeBtn) {
             this.elements.workshopModeBtn.disabled = disabled;
         }
@@ -717,10 +772,9 @@ class DxbWebApp {
         this.currentAppId = null;
         this.stAutoUpdateContext = null; 
         this.addAllDlcContext = null;
-        this.patchDepotKeyContext = null; // NEW: 重置depotkey上下文
+        this.patchDepotKeyContext = null;
         this.setImageState(false);
         
-        // 重置时也更新界面状态
         this.updateModeUI();
     }
 }

@@ -42,6 +42,7 @@
             <a class="nav-item" href="/recommend"><span class="material-icons">local_fire_department</span><span>推荐</span></a>
             <a class="nav-item" href="/tools"><span class="material-icons">build</span><span>工具箱</span></a>
             <a class="nav-item" href="/downloader"><span class="material-icons">download</span><span>下载管理</span></a>
+            <a class="nav-item" href="/inject"><span class="material-icons">colorize</span><span>离线注入</span></a>
             <a class="nav-item" href="/settings">
                 <span class="material-icons">settings</span><span>设置</span>
             </a>
@@ -71,6 +72,20 @@
             <div class="card-content">
                 <div class="config-status" id="configStatus">
                     <div class="loading">正在初始化...</div>
+                </div>
+                <div class="input-group" style="margin-top:14px;">
+                    <label class="input-label">入库方式（不装任何内核也能入库）</label>
+                    <div class="mode-seg" id="unlockerChoice" style="margin-top:8px;display:inline-flex;">
+                        <button data-kind="auto" class="on">自动</button>
+                        <button data-kind="native">自研入库</button>
+                        <button data-kind="opensteamtool">OpenSteamTool</button>
+                        <button data-kind="steamtools">SteamTools</button>
+                        <button data-kind="greenluma">GreenLuma</button>
+                    </div>
+                    <div class="input-helper" id="unlockerChoiceHint">
+                        「自研入库」不用装任何内核：程序直接把 AppID 写进 Steam 账号的库清单，
+                        不往 Steam 目录丢 DLL，所以不可能把 Steam 搞崩（代价是不带 depot 密钥）。
+                    </div>
                 </div>
             </div>
         </div>

@@ -1,8 +1,3 @@
-// --- 任务日志跨页持久化 ---
-// 任务在后端进程里跑，切换页面（整页跳转）不该丢掉日志与状态。
-//   * 服务端 /api/task_status 保存了完整的 progress 缓冲 → 权威数据源
-//   * localStorage 存一份快照 → 回到页面时立刻有内容，不用等网络
-//   * socket 只作为“有新日志了”的触发器，内容始终从服务端同步 → 不会重复
 (function () {
     const LS_KEY = 'dxb_task_log_v1';
     const LS_STATUS = 'dxb_task_status_v1';
@@ -10,8 +5,8 @@
 
     const state = {
         container: null,
-        serverCount: 0,     // 已经从服务端渲染过的条数
-        localCount: 0,      // 本地追加过（不来自服务端）的条数
+        serverCount: 0,
+        localCount: 0,
         status: 'idle',
         result: null,
         timer: null,
@@ -63,7 +58,6 @@
         } catch (e) { return []; }
     }
 
-    /** 用快照立即铺满日志（无网络延迟） */
     function renderSnapshot() {
         const el = box();
         if (!el) return;
@@ -82,7 +76,6 @@
         state.status = status;
     }
 
-    /** 从服务端拉权威日志，只追加新增部分 */
     async function sync() {
         if (state.syncing) { state.pending = true; return; }
         const el = box();
@@ -92,7 +85,6 @@
             const r = await fetch('/api/task_status');
             const d = await r.json();
             const list = Array.isArray(d.progress) ? d.progress : [];
-            // 服务端缓冲比已渲染的少 → 说明开始了新任务或服务重开，整体重置
             if (list.length < state.serverCount) {
                 el.innerHTML = '';
                 state.serverCount = 0;
@@ -116,7 +108,6 @@
         }
     }
 
-    /** socket 收到新日志 → 稍后同步（合并抖动） */
     function triggerSync(delay = 200) {
         clearTimeout(state._t);
         state._t = setTimeout(sync, delay);
@@ -142,7 +133,6 @@
             sync();
             startPolling(1600);
         },
-        /** 页面本地产生的日志（不来自服务端）；同时写快照，切页回来还在 */
         appendLocal(type, message) {
             appendNode(type, message);
             const entries = loadLocal();
@@ -150,7 +140,6 @@
             saveLocal(entries);
             state.localCount++;
         },
-        /** 清空（新任务开始时调用） */
         clear() {
             state.serverCount = 0;
             state.localCount = 0;
@@ -164,7 +153,6 @@
         stopPolling,
         get active() { return state.status === 'running'; },
 
-        /** 纯本地日志（不走服务端任务缓冲，例如“手搓”页），同样写快照，切页回来不丢 */
         local(namespace) {
             const key = `dxb_local_log_${namespace}`;
             let el = null;

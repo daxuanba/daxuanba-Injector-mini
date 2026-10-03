@@ -102,6 +102,9 @@
             <a class="nav-item active" href="/downloader">
                 <span class="material-icons">download</span><span>下载管理</span>
             </a>
+            <a class="nav-item" href="/inject">
+                <span class="material-icons">colorize</span><span>离线注入</span>
+            </a>
             <a class="nav-item" href="/settings">
                 <span class="material-icons">settings</span><span>设置</span>
             </a>
@@ -129,82 +132,28 @@
 
             <div class="card manager-card">
                 <div class="card-header">
-                    <h2>一、网络连接（直连到底通不通）</h2>
-                    <div class="card-actions">
-                        <button class="btn btn-primary" id="selftestBtn">
-                            <span class="material-icons">speed</span> 测直连
-                        </button>
-                    </div>
-                </div>
-                <div class="card-content" id="netSection">
-                    <div class="hint-box" id="netHint">
-                        点「测直连」真实打一遍 Steam 商店 / 社区 / API / 图片 CDN 与 GitHub。
-                        全部通 = 不需要加速；只有社区不通 = 典型国内环境，开加速即可。
-                    </div>
-                    <div id="netResults" style="margin-top:12px;"></div>
-                    <div class="row-flex" style="margin-top:14px;">
-                        <input type="text" id="proxyInput" class="text-field inline-input"
-                               placeholder="自定义代理，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7891（留空=直连）">
-                        <button class="btn btn-secondary" id="saveProxyBtn">
-                            <span class="material-icons">save</span> 保存代理
-                        </button>
-                    </div>
-                    <div class="hint-box" style="margin-top:10px;">
-                        直连不通 / 社区打不开时，把你本机代理（VPN、mihomo 之类）填进上面，保存后
-                        <b>重启应用</b>生效。后端所有 Steam / GitHub 请求都会走它，比只加速浏览器彻底。
-                    </div>
-                </div>
-            </div>
-
-            <div class="card manager-card">
-                <div class="card-header">
-                    <h2>二、内核（三个可以同时装到 Steam 主目录）</h2>
+                    <h2>入库内核（可同时装，运行时建议只用一个）</h2>
                     <div class="card-actions" id="steamPathChip"></div>
                 </div>
                 <div class="card-content">
                     <div class="hint-box" style="margin-bottom:14px;">
-                        下载全程走本程序自己的网络通道，<b>不会打开任何浏览器</b>；三个内核都由程序
-                        自动从上游拉取，<b>不需要你手动丢任何文件</b>。安装方式按内核类型走：<br>
-                        · <b>OpenSteamTool / GreenLuma</b>：下载完直接把文件释放到 Steam 对应目录，
-                        全程无窗口；<br>
-                        · <b>SteamTools</b>：官方只发安装包（<code>st-setup-x.y.z.exe</code>），
-                        程序下完<b>直接运行安装包本身</b> —— 管理员身份下加 <code>/S</code>
-                        <b>静默安装、不显示任何窗口</b>；普通权限则弹出官方安装向导。<br>
-                        版本号是对着下载源真实比对的：已经是最新就显示「已是最新」，不会让你反复更新。
+                        点「检查更新」会<b>真的去上游拉一遍版本号</b>再跟本地比，不是拿本地版本糊弄你。
+                        需要下载时点「下载/更新」，卡片下面有<b>实时进度条</b>。<br>
+                        · <b>自研入库</b>：程序自己写 Steam 库清单，不用装任何东西，不往 Steam 目录丢 DLL；<br>
+                        · <b>OpenSteamTool / GreenLuma</b>：下载完直接把文件释放到 Steam 对应目录，全程无窗口；<br>
+                        · <b>SteamTools</b>：官方只发安装包，程序下完<b>直接运行安装包本身</b> ——
+                        管理员身份下加 <code>/S</code> <b>静默安装、不显示任何窗口</b>，普通权限则弹官方安装向导。
+                    </div>
+                    <div class="row-flex" style="margin-bottom:14px;">
+                        <button class="btn btn-secondary" id="checkUpdatesBtn">
+                            <span class="material-icons">system_update_alt</span> 检查更新（应用 + 全部内核）
+                        </button>
+                        <span class="k-msg" id="updateSummary" style="margin:0;"></span>
                     </div>
                     <div id="conflictBox"></div>
                     <div id="kernelList">
                         <div class="empty-hint">正在检测本地内核...</div>
                     </div>
-                </div>
-            </div>
-
-            <div class="card manager-card">
-                <div class="card-header">
-                    <h2>三、启动 Steam / 注入检测</h2>
-                </div>
-                <div class="card-content">
-                    <div class="hint-box" style="margin-bottom:14px;">
-                        GreenLuma 有两种形态：<b>隐身版</b>（推荐）把改写过的 user32.dll 放进 Steam 主目录，
-                        Steam 启动时自己加载 —— 不用注入器、不用管理员、没有任何窗口，也不怕 Steam 更新；
-                        <b>注入版</b>用 DLLInjector.exe 往 steam.exe 里挂钩子，全程同样无窗口，但对 Steam 版本敏感。
-                        有没有真正生效，用「检测注入」真查进程模块，不靠猜。
-                    </div>
-                    <div class="row-flex">
-                        <button class="btn btn-secondary" id="launchNormalBtn">
-                            <span class="material-icons">play_arrow</span> 普通启动 Steam
-                        </button>
-                        <button class="btn btn-primary" id="launchGlBtn">
-                            <span class="material-icons">bolt</span> GreenLuma 隐身启动
-                        </button>
-                        <button class="btn btn-text" id="launchGlInjectBtn">
-                            <span class="material-icons">colorize</span> 注入版启动
-                        </button>
-                        <button class="btn btn-text" id="checkInjectionBtn">
-                            <span class="material-icons">fact_check</span> 检测注入
-                        </button>
-                    </div>
-                    <div class="k-msg" id="injectMsg"></div>
                 </div>
             </div>
 

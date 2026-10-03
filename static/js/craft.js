@@ -1,4 +1,3 @@
-// --- 手搓页逻辑：官方源手搓 + 一键入库 + 下载 ---
 class DxbCraftPage {
     constructor() {
         this.lua = '';
@@ -15,7 +14,6 @@ class DxbCraftPage {
             snackbarMessage: document.getElementById('snackbarMessage'),
             snackbarClose: document.getElementById('snackbarClose'),
         };
-        // 手搓日志走本地持久化：切到别的页面再回来，日志还在
         this.store = window.DxbTaskLog ? window.DxbTaskLog.local('craft') : null;
         this.bind();
         if (this.store) this.store.mount(this.elements.progressContainer);

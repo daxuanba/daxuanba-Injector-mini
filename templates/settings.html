@@ -44,6 +44,7 @@
             </a>
             <a class="nav-item" href="/tools"><span class="material-icons">build</span><span>工具箱</span></a>
             <a class="nav-item" href="/downloader"><span class="material-icons">download</span><span>下载管理</span></a>
+            <a class="nav-item" href="/inject"><span class="material-icons">colorize</span><span>离线注入</span></a>
             <a class="nav-item active" href="/settings">
                 <span class="material-icons">settings</span><span>设置</span>
             </a>
@@ -188,6 +189,8 @@
                 <div class="button-group">
                     <button class="btn btn-primary" id="ostInstallBtn" type="button"><span class="material-icons">download</span> 下载/更新内核</button>
                 </div>
+                <div class="k-progress" id="kprog-opensteamtool"><i></i></div>
+                <div class="k-msg" id="kmsg-opensteamtool"></div>
             </div>
         </div>
 
@@ -209,6 +212,8 @@
                 <div class="button-group">
                     <button class="btn btn-primary" id="stoolsInstallBtn" type="button"><span class="material-icons">download</span> 下载/更新</button>
                 </div>
+                <div class="k-progress" id="kprog-steamtools"><i></i></div>
+                <div class="k-msg" id="kmsg-steamtools"></div>
             </div>
         </div>
 
@@ -231,6 +236,24 @@
                     <button class="btn btn-primary" id="glumaInstallBtn" type="button"><span class="material-icons">download</span> 下载/更新</button>
                     <button class="btn btn-secondary" id="glumaRecheckBtn" type="button"><span class="material-icons">refresh</span> 重新检测</button>
                     <button class="btn btn-secondary" id="glumaOfficialBtn" type="button"><span class="material-icons">open_in_new</span> 官方下载页</button>
+                </div>
+                <div class="k-progress" id="kprog-greenluma"><i></i></div>
+                <div class="k-msg" id="kmsg-greenluma"></div>
+            </div>
+        </div>
+
+        <div class="card" data-category="deps">
+            <div class="card-header"><h2>自研入库（不需要任何内核）</h2></div>
+            <div class="card-content">
+                <div class="input-helper">程序自己把 AppID 写进本机 Steam 账号的库清单
+                    （<code>userdata/&lt;账号&gt;/config/localconfig.vdf</code>）。
+                    <b>不装 OpenSteamTool / SteamTools / GreenLuma 任何一个</b>，
+                    也<b>不往 Steam 目录丢任何 DLL</b>，所以不可能把 Steam 搞崩。
+                    代价是不带 depot 密钥：入库能成功，之后 Steam 下载时会因缺密钥失败。
+                    想要带密钥的稳定入库，还是用上面三个内核之一。</div>
+                <div class="dep-status" id="nativeStatus"><span class="status-text">检测中...</span></div>
+                <div class="button-group">
+                    <button class="btn btn-primary" id="useNativeBtn" type="button"><span class="material-icons">check</span> 用它入库</button>
                 </div>
             </div>
         </div>

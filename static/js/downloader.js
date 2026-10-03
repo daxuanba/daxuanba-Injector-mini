@@ -1,21 +1,22 @@
-/* 下载管理：三个内核的真实版本检测 + 自动下载安装 + 启动/注入检测。
-   进度走 HTTP 轮询（不依赖 socket.io CDN，CDN 在国内可能被墙）。 */
 (function () {
     'use strict';
 
     const ICONS = {
+        native: 'bolt',
         opensteamtool: 'menu_book',
         steamtools: 'extension',
         greenluma: 'bolt',
     };
     const LABEL = {
         none: '未安装',
+        install: '可安装',
         latest: '已是最新',
         update: '可更新',
         unknown: '版本未知',
     };
     const STATE_CLASS = {
         none: 'state-no',
+        install: 'state-no',
         latest: 'state-ok',
         update: 'state-up',
         unknown: '',
@@ -25,8 +26,7 @@
     let order = [];
     let steamPath = '';
     let pollTimer = null;
-    let isAdmin = false;   // 管理员身份 → SteamTools 安装包可以 /S 静默、无窗口装
-    // GreenLuma 两种形态：stealth = 隐身版 user32.dll（默认，不怕 Steam 更新），inject = DLLInjector 注入版
+    let isAdmin = false;
     let glMode = 'stealth';
     try {
         const saved = localStorage.getItem('dxb-gl-mode');
@@ -51,7 +51,6 @@
         try { return await r.json(); } catch (e) { return { success: false, message: '响应解析失败' }; }
     }
 
-    // ---------------------------------------------------------------- 渲染
     function esc(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
             { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -69,7 +68,6 @@
         return 0;
     }
 
-    // 本地/远端都有才敢下结论；缺一边就老实说「版本未知」，不瞎报「可更新」
     function stateOf(localVer, remoteVer, installed) {
         if (!installed) { return 'none'; }
         if (!localVer || !remoteVer) { return 'unknown'; }
@@ -136,6 +134,26 @@ ${isAdmin ? '当前是管理员身份 → 用 /S 参数静默安装，全程不�
             const stateChip = `<span class="vchip ${STATE_CLASS[state] || ''}">${LABEL[state] || state}</span>`;
             const fileTip = (files && files.length)
                 ? `<div class="k-msg">已就位：${esc(files.slice(0, 6).join('、'))}</div>` : '';
+            if (k === 'native') {
+                return `
+                <div class="k-card" data-kind="native">
+                    <div class="k-icon"><span class="material-icons">${ICONS.native}</span></div>
+                    <div class="k-body">
+                        <div class="k-title">${esc(s.name || k)}
+                            <span class="k-sub">${esc(s.short || '')}</span>
+                            <span class="vchip state-ok">内置 · 免安装</span>
+                        </div>
+                        <div class="k-desc">${esc(s.desc || '')}</div>
+                        <div class="k-vers"><span class="vchip">程序版本：<b>${esc(s.version || '—')}</b></span>
+                            <span class="vchip">Steam 账号：<b>${esc((s.account && (s.account.persona || s.account.steamid64)) || '未读到')}</b></span></div>
+                        <div class="k-tip">${esc(s.note || '程序自带能力，不需要下载安装。')}</div>
+                        <div class="k-actions">
+                            <button class="btn btn-text k-use-native"><span class="material-icons">settings</span> 在首页选它入库</button>
+                        </div>
+                        <div class="k-msg" id="msg-native"></div>
+                    </div>
+                </div>`;
+            }
             const localBtn = (k === 'steamtools')
                 ? `<button class="btn btn-text k-local" data-kind="${k}">
                        <span class="material-icons">upload_file</span> 用本地包（exe/zip/7z）
@@ -179,6 +197,14 @@ ${isAdmin ? '当前是管理员身份 → 用 /S 参数静默安装，全程不�
         box.querySelectorAll('.k-install').forEach(b => {
             b.addEventListener('click', () => install(b.dataset.kind));
         });
+        box.querySelectorAll('.k-use-native').forEach(b => {
+            b.addEventListener('click', async () => {
+                await api('/api/config/update', {
+                    method: 'POST', body: JSON.stringify({ force_unlocker_type: 'native' })
+                });
+                snackbar('已把入库方式设为「自研入库」，回首页直接入库即可', 'success');
+            });
+        });
         box.querySelectorAll('.mode-seg button').forEach(b => {
             b.addEventListener('click', () => {
                 glMode = b.dataset.mode;
@@ -214,9 +240,8 @@ ${isAdmin ? '当前是管理员身份 → 用 /S 参数静默安装，全程不�
         if (m && msg != null) { m.textContent = msg; }
     }
 
-    // ---------------------------------------------------------------- 数据
-    async function loadStatus(showToast) {
-        const d = await api('/api/kernel/status');
+    async function loadStatus(showToast, withRemote) {
+        const d = await api('/api/kernel/status' + (withRemote ? '' : '?remote=0'));
         if (!d.success) {
             snackbar(d.message || '检测失败', 'error');
             return;
@@ -234,7 +259,6 @@ ${isAdmin ? '当前是管理员身份 → 用 /S 参数静默安装，全程不�
         renderConflict(d.conflict);
         if (showToast) { snackbar('已重新检测', 'success'); }
     }
-
     function renderConflict(cf) {
         const box = $('conflictBox');
         if (!box) { return; }
@@ -257,7 +281,6 @@ ${isAdmin ? '当前是管理员身份 → 用 /S 参数静默安装，全程不�
         }
     }
 
-    // ---------------------------------------------------------------- 安装
     async function install(kind) {
         const body = { kind: kind, force: true };
         if (kind === 'greenluma') { body.mode = glMode; }
@@ -333,53 +356,38 @@ ${isAdmin ? '当前是管理员身份 → 用 /S 参数静默安装，全程不�
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     }
 
-    // ---------------------------------------------------------------- 网络
-    function dotClass(ok) { return ok ? 'dot-ok' : 'dot-bad'; }
-
-    async function selftest() {
-        const box = $('netResults');
-        const btn = $('selftestBtn');
-        if (box) { box.innerHTML = '<div class="net-row"><span class="dot dot-wait"></span><span class="net-info">正在实测直连...</span></div>'; }
+    async function checkUpdates() {
+        const btn = $('checkUpdatesBtn');
+        const box = $('updateSummary');
         if (btn) { btn.disabled = true; }
+        if (box) { box.textContent = '正在去上游查最新版本…'; }
         try {
-            const d = await api('/api/net/selftest?mode=direct');
-            if (!d.success) { snackbar(d.message || '测试失败', 'error'); return; }
-            renderNet(d);
+            const d = await api('/api/updates/check');
+            if (!d.success) { snackbar(d.message || '检查失败', 'error'); return; }
+            const app = d.app || {};
+            const ks = d.kernels || {};
+            const parts = [];
+            parts.push(app.has_update
+                ? `应用：${esc(app.local)} → ${esc(app.remote)} 可更新`
+                : (app.ok ? `应用 ${esc(app.local)} 已是最新` : '应用版本未取到'));
+            Object.keys(ks).forEach(k => {
+                const v = ks[k] || {};
+                const nm = (kernels[k] && kernels[k].name) || k;
+                if (v.builtin) { parts.push(`${nm}：内置免安装`); return; }
+                if (!v.ok) { parts.push(`${nm}：未取到（${esc(v.note || '网络/上游不可达')}）`); return; }
+                if (!v.installed) { parts.push(`${nm}：未安装，最新 ${esc(v.remote)}`); return; }
+                parts.push(`${nm}：${esc(v.local)} → ${esc(v.remote)} `
+                    + (v.has_update ? '可更新' : '已是最新'));
+            });
+            if (box) { box.textContent = parts.join('　|　'); }
+            const anyUpd = app.has_update || Object.values(ks).some(v => v && v.has_update);
+            snackbar(anyUpd ? '有可更新的内容' : '全部已是最新', anyUpd ? 'info' : 'success');
+            await loadStatus(false, true);
         } finally {
             if (btn) { btn.disabled = false; }
         }
     }
 
-    function renderNet(d) {
-        const box = $('netResults');
-        if (!box) { return; }
-        const rows = (d.results || []).map(r => `
-            <div class="net-row">
-                <span class="dot ${dotClass(r.ok)}"></span>
-                <span class="net-name">${esc(r.name)}</span>
-                <span class="net-info">${r.ok ? ('正常 · ' + r.ms + 'ms') : ('不通 · ' + esc(r.error || '失败'))}</span>
-            </div>`).join('');
-        const allOk = d.ok_count === d.total;
-        const tip = allOk
-            ? '<div class="hint-box" style="margin-top:10px;">直连全通，<b>不需要加速</b>。</div>'
-            : `<div class="hint-box" style="margin-top:10px;">直连 ${d.ok_count}/${d.total} 通。
-               不通的域名就是卡住你的地方（国内最常见是 Steam 社区 + 图片 CDN）。
-               去「工具箱 → 网络加速」勾上对应分类，或填一个代理更彻底。</div>`;
-        box.innerHTML = rows + tip;
-    }
-
-    async function loadProxy() {
-        const d = await api('/api/net/proxy');
-        if (d.success && $('proxyInput')) { $('proxyInput').value = d.proxy || ''; }
-    }
-
-    async function saveProxy() {
-        const v = ($('proxyInput') && $('proxyInput').value || '').trim();
-        const d = await api('/api/net/proxy', { method: 'POST', body: JSON.stringify({ proxy: v }) });
-        snackbar(d.message || (d.success ? '已保存' : '保存失败'), d.success ? 'success' : 'error');
-    }
-
-    // ---------------------------------------------------------------- 启动
     async function launch(mode) {
         const el = $('injectMsg');
         const hints = {
@@ -398,7 +406,6 @@ ${isAdmin ? '当前是管理员身份 → 用 /S 参数静默安装，全程不�
         }
         if (d.conflict) { renderConflict(d.conflict); }
         if (d.injection) { renderInjection(d.injection); }
-        // 诊断信息（含 GreenLuma 日志失败行）优先展示，别被 renderInjection 覆盖掉
         if (el && d.message) { el.textContent = d.message; }
         snackbar(d.success ? '已启动' : '启动失败', d.success ? 'success' : 'error');
     }
@@ -411,27 +418,15 @@ ${isAdmin ? '当前是管理员身份 → 用 /S 参数静默安装，全程不�
                   d.injected ? 'success' : 'error');
     }
 
-    // ---------------------------------------------------------------- 绑定
     document.addEventListener('DOMContentLoaded', () => {
         const refresh = $('refreshKernelsBtn');
-        if (refresh) { refresh.addEventListener('click', () => loadStatus(true)); }
-        const st = $('selftestBtn');
-        if (st) { st.addEventListener('click', selftest); }
-        const sp = $('saveProxyBtn');
-        if (sp) { sp.addEventListener('click', saveProxy); }
-        const ln = $('launchNormalBtn');
-        if (ln) { ln.addEventListener('click', () => launch('normal')); }
-        const lg = $('launchGlBtn');
-        if (lg) { lg.addEventListener('click', () => launch('greenluma_stealth')); }
-        const gli = $('launchGlInjectBtn');
-        if (gli) { gli.addEventListener('click', () => launch('greenluma_inject')); }
-        const ci = $('checkInjectionBtn');
-        if (ci) { ci.addEventListener('click', checkInjection); }
+        if (refresh) { refresh.addEventListener('click', () => loadStatus(true, true)); }
+        const cu = $('checkUpdatesBtn');
+        if (cu) { cu.addEventListener('click', checkUpdates); }
         const sc = $('snackbarClose');
         if (sc) { sc.addEventListener('click', () => $('snackbar').classList.remove('show')); }
 
-        loadProxy();
         loadStatus(false);
-        setInterval(() => { api('/api/kernel/injection').then(d => { if (d.success) { renderInjection(d); } }); }, 20000);
+        checkUpdates();
     });
 })();

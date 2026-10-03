@@ -113,6 +113,7 @@
                 <span class="material-icons">build</span><span>工具箱</span>
             </a>
             <a class="nav-item" href="/downloader"><span class="material-icons">download</span><span>下载管理</span></a>
+            <a class="nav-item" href="/inject"><span class="material-icons">colorize</span><span>离线注入</span></a>
             <a class="nav-item" href="/settings">
                 <span class="material-icons">settings</span><span>设置</span>
             </a>
@@ -159,21 +160,6 @@
                     <div class="empty-hint">选择上方分类，点「测速选优」：并发解析各域名（走多个国内 DoH，绕开被污染的系统 DNS），
                         再对候选 IP 做 TCP + TLS + HTTP 三段实测，自动挑最快的那条。
                         然后选加速方式：「hosts 优选」写系统 hosts（需管理员）；「免hosts 代理」只改内置浏览器解析（免管理员、重启应用生效）。</div>
-                </div>
-            </div>
-
-            <div class="card manager-card">
-                <div class="card-header">
-                    <h2>Steam 错误诊断与修复</h2>
-                    <div class="card-actions">
-                        <button class="btn btn-secondary" id="diagBtn"><span class="material-icons">health_and_safety</span> 开始体检</button>
-                        <button class="btn btn-primary" id="fixAllBtn"><span class="material-icons">handyman</span> 一键修复</button>
-                    </div>
-                </div>
-                <div id="diagSummary" style="margin-bottom:12px;"></div>
-                <div class="fix-bar" id="diagFixBar"></div>
-                <div id="diagList">
-                    <div class="empty-hint">点「开始体检」检查 Steam 路径、权限、磁盘、hosts、缓存与网络。</div>
                 </div>
             </div>
 
