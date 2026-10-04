@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.22"
+CURRENT_VERSION = "2.24"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -74,6 +74,35 @@ DEFAULT_CONFIG = {
 }
 
 GREENLUMA_OFFICIAL_URL = "https://cs.rin.ru/forum/viewtopic.php?f=10&t=103709"
+
+STEAM_STORE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+_LOGIN_CTX = {}
+
+def rsa_encrypt_pubkey(pub_mod_hex: str, pub_exp_hex: str, password: str) -> str:
+    """Steam 网页登录用的 RSA（PKCS#1 v1.5）加密，纯 Python 实现，不依赖任何三方库。"""
+    n = int(pub_mod_hex, 16)
+    e = int(pub_exp_hex, 16)
+    k = (n.bit_length() + 7) // 8
+    pw = password.encode('utf-8', 'ignore')[:k - 11]
+    pad = b'\x00\x01' + b'\xff' * (k - 3 - len(pw)) + b'\x00' + pw
+    c = pow(int.from_bytes(pad, 'big'), e, n)
+    return format(c, 'x').rjust(k * 2, '0')
+
+def mask_email(email: str) -> str:
+    """邮箱脱敏：只露类型，不显示完整邮箱名，如 ab***@qq***.com。"""
+    email = (email or '').strip()
+    if '@' not in email:
+        return ''
+    local, _, domain = email.partition('@')
+    dparts = domain.split('.')
+    if len(dparts) < 2:
+        return (local[:2] if len(local) > 2 else '') + '***@' + domain
+    tld = '.' + '.'.join(dparts[1:]) if len(dparts) > 2 else '.' + dparts[-1]
+    dhead = dparts[0][:2] + '***'
+    lhead = local[:2] if len(local) > 2 else (local[:1] if local else '***')
+    return f"{lhead}***@{dhead}{tld}"
 
 class STConverter:
     def __init__(self):
@@ -2356,80 +2385,341 @@ class DxbBackend:
                     return got
         return None
 
-    def free_account_info(self, cookie: str) -> Dict:
-        """用 steamLoginSecure cookie 获取账号名/头像/钱包余额。"""
+    ADD_FREE_LICENSE_URL = "https://store.steampowered.com/Checkout.AddFreeLicense#1/"
+
+    @staticmethod
+    def _pb_varint(value: int) -> bytes:
+        out = bytearray()
+        while True:
+            b = value & 0x7F
+            value >>= 7
+            if value:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                break
+        return bytes(out)
+
+    @classmethod
+    def _pb_uint32(cls, field: int, value: int) -> bytes:
+        return cls._pb_varint((field << 3) | 0) + cls._pb_varint(value)
+
+    @staticmethod
+    def _parse_pb(buf: bytes):
+        """极简 protobuf 解析：返回 [(field, wire_type, value), ...]。"""
+        items = []
+        i, n = 0, len(buf or b'')
+        while i < n:
+            key, shift = 0, 0
+            while True:
+                if i >= n:
+                    return items
+                b = buf[i]
+                i += 1
+                key |= (b & 0x7F) << shift
+                shift += 7
+                if not (b & 0x80):
+                    break
+            field, wt = key >> 3, key & 7
+            if wt == 0:
+                val, shift = 0, 0
+                while True:
+                    if i >= n:
+                        return items
+                    b = buf[i]
+                    i += 1
+                    val |= (b & 0x7F) << shift
+                    shift += 7
+                    if not (b & 0x80):
+                        break
+                items.append((field, wt, val))
+            elif wt == 2:
+                ln, shift = 0, 0
+                while True:
+                    if i >= n:
+                        return items
+                    b = buf[i]
+                    i += 1
+                    ln |= (b & 0x7F) << shift
+                    shift += 7
+                    if not (b & 0x80):
+                        break
+                items.append((field, wt, buf[i:i + ln]))
+                i += ln
+            else:
+                break
+        return items
+
+    @staticmethod
+    def _cookie_steamid(cookie: str):
+        """从 steamLoginSecure=SteamID|哈希 里取出 SteamID64。"""
+        from urllib.parse import unquote
+        for part in (cookie or '').split(';'):
+            part = part.strip()
+            if part.startswith('steamLoginSecure='):
+                raw = unquote(part.split('=', 1)[1]).strip()
+                sid = raw.split('|', 1)[0].strip()
+                return sid if sid.isdigit() else None
+        return None
+
+    @staticmethod
+    def _json_response(resp) -> dict:
+        """httpx.Response → dict（httpx 没有 .json() 判空方法，先按 content-type 兜底）。"""
+        try:
+            return resp.json()
+        except Exception:
+            pass
+        try:
+            s = (resp.text or '').lstrip()
+        except Exception:
+            return {}
+        if s.startswith('{'):
+            try:
+                obj = json.loads(s)
+                return obj if isinstance(obj, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    def steam_web_login(self, username: str = '', password: str = '',
+                        email_code: str = '', challenge: str = '') -> Dict:
+        """走 Steam 官方网页登录接口（getrsakey + doLogin / email 验证码）。
+
+        第一次调用：传 username + password，返回 need_email 与 challenge；
+        第二次调用：传 challenge + email_code，返回 secure（steamLoginSecure）。
+        中间凭据只存在进程内存 _LOGIN_CTX，不写盘、不上网络以外的地方。
+        """
+        try:
+            with httpx.Client(verify=False, timeout=40, follow_redirects=True,
+                              headers={'User-Agent': STEAM_STORE_UA,
+                                       'Accept-Language': 'zh-CN,zh;q=0.9',
+                                       'Referer': 'https://steamcommunity.com/login/'}) as cli:
+                if not challenge:
+                    try:
+                        r = cli.get("https://steamcommunity.com/login/getrsakey/",
+                                    params={'username': username})
+                    except Exception as e:
+                        return {"success": False, "need_email": False,
+                                "message": f"连不上 Steam 登录服务：{self.stack_error(e)[:160]}"}
+                    rj = self._json_response(r)
+                    if rj is None:
+                        return {"success": False, "need_email": False,
+                                "message": "Steam 登录接口异常（非 JSON），请改用下方手动粘贴会话。"}
+                    if not rj.get('success'):
+                        return {"success": False, "need_email": False,
+                                "message": "Steam 公钥获取失败：用户名不存在或被 Steam 风控拦截，请稍后重试。"}
+                    _LOGIN_CTX.update({
+                        'username': username, 'password': password,
+                        'mod': rj.get('publickey_mod') or '',
+                        'exp': rj.get('publickey_exp') or '',
+                        'ts': str(rj.get('timestamp') or ''),
+                        'hash': rj.get('rsakey_hash') or '',
+                        'steamid': rj.get('steamid') or '',
+                        'captcha_gid': rj.get('captcha_gid'),
+                    })
+                else:
+                    if not _LOGIN_CTX.get('username'):
+                        return {"success": False, "need_email": False,
+                                "message": "登录上下文已失效，请重新输入用户名密码。"}
+
+                ctx = _LOGIN_CTX
+                enc = rsa_encrypt_pubkey(ctx['mod'], ctx['exp'], ctx['password'])
+                data = {
+                    'username': ctx['username'], 'password': enc,
+                    'captcha_gid': '' if ctx['captcha_gid'] is None else str(ctx['captcha_gid']),
+                    'captcha_text': '', 'rsatimestamp': ctx['ts'],
+                    'rsakey_hash': ctx['hash'], 'steamid': ctx['steamid'],
+                    'remember_login': 'true', 'cookiecheck': '1', 'donotcache': '1',
+                    'donotcachets': str(int(time.time() * 1000)),
+                    'challenge': challenge or '',
+                    'validate_code': '',
+                    'email_code': (email_code or '').strip(),
+                    'login_friendly_name': '', 'darkmode': '1',
+                }
+                try:
+                    r = cli.post("https://steamcommunity.com/login/dologin/", data=data,
+                                 headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                                          'X-Requested-With': 'XMLHttpRequest',
+                                          'Origin': 'https://steamcommunity.com',
+                                          'Referer': 'https://steamcommunity.com/login/'})
+                except Exception as e:
+                    return {"success": False, "need_email": False,
+                            "message": f"登录请求发送失败：{self.stack_error(e)[:160]}"}
+                rj = self._json_response(r)
+                if rj is None:
+                    return {"success": False, "need_email": False,
+                            "message": "Steam 登录被风控拦截（非 JSON 响应），可改用下方手动粘贴会话。"}
+                secure = rj.get('steamloginsecure') or ''
+                if secure and 'steamLoginSecure' in secure:
+                    _LOGIN_CTX.clear()
+                    return {"success": True, "need_email": False, "secure": secure,
+                            "steamid": str(rj.get('steam_accountid') or ctx['steamid'] or ''),
+                            "message": "登录成功。"}
+                err = str(rj.get('error') or '')
+                ext = str(rj.get('extended_error') or '')
+                newch = str(rj.get('challenge') or '')
+                email = ''
+                m = re.search(r'[\w\.\-\+]+@[\w\.\-]+', ext or err)
+                if m:
+                    email = m.group(0)
+                low = (err + ' ' + ext).lower()
+                if newch and ('email' in low or '邮箱' in (err + ext) or rj.get('twofactor') is not None
+                              or rj.get('requires_twofactor')):
+                    return {"success": False, "need_email": True, "challenge": newch,
+                            "email": email, "masked_email": mask_email(email),
+                            "message": ext or err or "验证码已发送至邮箱，请输入邮箱里的验证码。"}
+                return {"success": False, "need_email": False,
+                        "message": (ext or err or '登录失败，请检查用户名密码。')[:300]}
+        except Exception as e:
+            _LOGIN_CTX.clear()
+            return {"success": False, "need_email": False,
+                    "message": f"登录异常: {self.stack_error(e)[:200]}"}
+
+    def session_info(self, cookie: str) -> Dict:
+        """用 API 会话（steamLoginSecure Cookie）连 Steam 官方接口校验账号。
+        完全不依赖本机 Steam 客户端 / loginusers.vdf。"""
+        cookie = (cookie or '').strip()
         if not cookie or 'steamLoginSecure' not in cookie:
-            return {"success": False, "message": "请提供有效的 steamLoginSecure Cookie。"}
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                   'Cookie': cookie.strip()}
+            return {"success": False, "session_ok": False, "steamid": None,
+                    "name": "", "avatar": "", "balance": None, "currency": "",
+                    "message": "缺少 steamLoginSecure Cookie，无法连接 Steam 官方接口。"}
+        sid = self._cookie_steamid(cookie)
+        headers = {'User-Agent': STEAM_STORE_UA, 'Cookie': cookie,
+                   'Accept-Language': 'zh-CN,zh;q=0.9'}
+        name, avatar, background = "", "", ""
+        balance, currency = None, ""
         try:
             import httpx as _httpx
-            name, avatar = "", ""
             with _httpx.Client(verify=False, timeout=30, follow_redirects=True) as cli:
                 try:
                     pr = cli.get("https://steamcommunity.com/my/profile?json=1", headers=headers)
                     if pr.ok:
-                        pj = pr.json()
-                        name = pj.get('personaName') or pj.get('name') or name
-                        avatar = pj.get('avatarFull') or pj.get('avatar') or avatar
+                        pj = pr.json() or {}
+                        name = pj.get('personaName') or pj.get('name') or ""
+                        avatar = pj.get('avatarFull') or pj.get('avatarMedium') or ""
+                        background = pj.get('avatarBackground') or ""
+                        pjid = str(pj.get('steamid') or '')
+                        if pjid.isdigit():
+                            sid = pjid if not sid else sid
                 except Exception as e:
                     self.log.warning(f"获取 Steam 个人资料失败: {e}")
-                balance, currency = None, ""
                 try:
                     wr = cli.get("https://store.steampowered.com/api/userwalletinfo/v1/", headers=headers)
                     if wr.ok:
-                        wj = wr.json()
+                        wj = wr.json() or {}
                         balance = wj.get('wallet_balance')
                         currency = wj.get('wallet_country') or wj.get('currency') or ""
                 except Exception as e:
                     self.log.warning(f"获取钱包余额失败: {e}")
-            if not name and balance is None:
-                return {"success": False, "message": "Cookie 无效或已过期，无法读取账号信息。"}
-            return {"success": True, "name": name, "avatar": avatar,
-                    "balance": balance, "currency": currency}
         except Exception as e:
             self.log.error(f"读取账号信息失败: {self.stack_error(e)}")
-            return {"success": False, "message": f"读取账号信息失败: {e}"}
+            return {"success": False, "session_ok": False, "steamid": sid, "name": "",
+                    "avatar": "", "balance": None, "currency": "",
+                    "message": f"读取账号信息失败: {e}"}
+        if not name and balance is None:
+            return {"success": False, "session_ok": False, "steamid": sid, "name": "",
+                    "avatar": "", "balance": None, "currency": "",
+                    "message": "Cookie 无效或已过期（Steam 会话失效），请重新登录 Steam 网站并粘贴新 Cookie。"}
+        return {"success": True, "session_ok": True, "steamid": sid, "name": name,
+                "avatar": avatar, "background": background,
+                "balance": balance, "currency": currency, "message": "已连接 Steam 官方账号会话。"}
 
-    def inject_free_games(self, appids: List[str], name_map: Dict[str, str] = None) -> Dict:
-        """把免费游戏批量永久入库：在解锁器 lua 目录为每个 AppID 写 addappid 文件。
-        已存在的跳过（幂等），文件保留即永久有效。"""
+    def free_account_info(self, cookie: str) -> Dict:
+        """兼容旧前端：转成 session_info 的结果。"""
+        return self.session_info(cookie)
+
+    def add_free_license(self, cookie: str, appids: List[str], name_map: Dict[str, str] = None) -> Dict:
+        """真·永久入库：走 Steam 官方 Checkout.AddFreeLicense#1（protobuf WebAPI），
+        直接写进账号库，不依赖本机目录、不依赖解锁器、不需要重启 Steam。"""
         name_map = name_map or {}
-        try:
-            if not self.steam_path:
-                self.steam_path = self.get_steam_path()
-            if not self.steam_path or not self.steam_path.exists():
-                return {"success": False, "message": "未找到有效的 Steam 路径。", "injected": 0, "skipped": 0}
-            lua_dir = self.lua_output_dir()
-            lua_dir.mkdir(parents=True, exist_ok=True)
+        cookie = (cookie or '').strip()
+        if not cookie or 'steamLoginSecure' not in cookie:
+            return {"success": False, "mode": "api", "need_login": True,
+                    "message": "缺少 steamLoginSecure Cookie，请先粘贴登录后复制的 Cookie。",
+                    "injected": 0, "skipped": 0, "items": []}
+        session = self.session_info(cookie)
+        if not session.get('session_ok'):
+            return {"success": False, "mode": "api", "need_login": True,
+                    "message": session.get('message') or "Steam 会话无效，请重新登录。",
+                    "injected": 0, "skipped": 0, "items": []}
 
-            injected, skipped, names = 0, 0, []
-            seen = set()
-            for raw in appids:
-                appid = str(raw).strip()
-                if not appid.isdigit() or appid in seen:
-                    continue
-                seen.add(appid)
-                target = lua_dir / f"{appid}.lua"
-                if target.exists():
-                    skipped += 1
-                    continue
-                gname = name_map.get(appid, "")
-                lines = [
-                    "-- 大轩巴入库器mini · 免费游戏永久入库",
-                    f"-- AppID: {appid}" + (f"  名称: {gname}" if gname else ""),
-                    "-- 永久生效：如需移除请删除本文件或在入库管理中删除",
-                    f"addappid({appid})  -- {gname or appid}",
-                ]
-                target.write_text("\n".join(lines) + "\n", encoding='utf-8')
-                injected += 1
-                names.append(gname or appid)
-            self.log.info(f"免费游戏永久入库完成：新增 {injected} 个，已存在跳过 {skipped} 个 -> {lua_dir}")
-            return {"success": True, "injected": injected, "skipped": skipped,
-                    "dir": str(lua_dir), "names": names[:20]}
+        unique, seen = [], set()
+        for raw in appids:
+            aid = str(raw).strip()
+            if not aid.isdigit() or aid in seen:
+                continue
+            seen.add(aid)
+            unique.append(aid)
+        if not unique:
+            return {"success": False, "mode": "api", "message": "没有合法的 AppID。",
+                    "injected": 0, "skipped": 0, "items": []}
+
+        headers = {'User-Agent': STEAM_STORE_UA, 'Cookie': cookie,
+                   'Origin': 'https://steamcommunity.com',
+                   'Referer': 'https://store.steampowered.com/',
+                   'Content-Type': 'application/protobuf',
+                   'X-Requested-With': 'XMLHttpRequest',
+                   'Accept': 'application/json, text/plain, */*',
+                   'Accept-Language': 'zh-CN,zh;q=0.9'}
+        items, added, failed = [], 0, 0
+        try:
+            import httpx as _httpx
+            with _httpx.Client(verify=False, timeout=60, follow_redirects=False) as cli:
+                for start in range(0, len(unique), 20):
+                    chunk = unique[start:start + 20]
+                    body = b''.join(self._pb_uint32(2, int(a)) for a in chunk)
+                    try:
+                        r = cli.post(self.ADD_FREE_LICENSE_URL, content=body, headers=headers)
+                    except Exception as e:
+                        for a in chunk:
+                            items.append({"appid": a, "name": name_map.get(a, ""),
+                                          "status": "failed", "message": f"请求异常：{e}"})
+                        failed += len(chunk)
+                        continue
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        for a in chunk:
+                            items.append({"appid": a, "name": name_map.get(a, ""),
+                                          "status": "failed",
+                                          "message": "会话失效（Steam 要求重新登录）"})
+                        failed += len(chunk)
+                        continue
+                    fields = self._parse_pb(r.content)
+                    result = next((v for f, _w, v in fields if f == 1 and isinstance(v, int)), None)
+                    ok = r.status_code == 200 and result in (None, 1)
+                    detail = ""
+                    if not ok and result is not None:
+                        detail = f"Steam 返回错误码 {result}"
+                    for a in chunk:
+                        if ok:
+                            items.append({"appid": a, "name": name_map.get(a, ""),
+                                          "status": "added", "message": "已写入 Steam 账号库"})
+                            added += 1
+                        else:
+                            items.append({"appid": a, "name": name_map.get(a, ""),
+                                          "status": "failed",
+                                          "message": detail or f"HTTP {r.status_code}"})
+                            failed += 1
         except Exception as e:
-            self.log.error(f"免费游戏入库失败: {self.stack_error(e)}")
-            return {"success": False, "message": f"入库失败: {e}", "injected": 0, "skipped": 0}
+            self.log.error(f"AddFreeLicense 失败: {self.stack_error(e)}")
+            return {"success": False, "mode": "api",
+                    "message": f"入库请求失败: {e}",
+                    "injected": 0, "skipped": 0, "items": items}
+        self.log.info(f"AddFreeLicense 完成：成功 {added} 个，失败 {failed} 个 -> 账号 {session.get('name') or session.get('steamid')}")
+        return {"success": True, "mode": "api", "injected": added, "skipped": 0,
+                "items": items, "account": session.get('name') or session.get('steamid'),
+                "message": f"已通过 Steam 官方接口写入 {added} 个到账号库"
+                           + (f"，失败 {failed} 个" if failed else "")}
+
+    def inject_free_games(self, appids: List[str], name_map: Dict[str, str] = None,
+                          cookie: str = None) -> Dict:
+        """免费游戏永久入库入口：只走 Steam 官方 API，不再写本机解锁器目录。"""
+        if not cookie:
+            try:
+                cfg = self._load_config_sync() or {}
+                cookie = cfg.get('steam_cookie') or ''
+            except Exception:
+                cookie = ''
+        return self.add_free_license(cookie, appids, name_map)
 
 
     async def _fetch_game_name_for_manager(self, appid: str) -> str:

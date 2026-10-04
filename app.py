@@ -1300,24 +1300,114 @@ def free_games():
 
 @app.route('/api/free/inject', methods=['POST'])
 def free_inject():
-    """批量永久入库免费游戏（写入解锁器 lua 目录）。"""
+    """批量永久入库免费游戏：走 Steam 官方 Checkout.AddFreeLicense#1，只认 API 会话 Cookie。"""
     data = request.get_json(silent=True) or {}
     appids = data.get('appids') or []
     names = data.get('names') or {}
     if not appids:
         return jsonify({"success": False, "message": "没有需要入库的游戏。"}), 400
-    if not _is_steam_logged_in():
-        return _steam_login_required()
+    cookie = (data.get('cookie') or '').strip()
+    if not cookie:
+        try:
+            cfg = DxbBackend()._load_config_sync() or {}
+            cookie = (cfg.get('steam_cookie') or '').strip()
+        except Exception:
+            cookie = ''
+    if not cookie or 'steamLoginSecure' not in cookie:
+        return jsonify({"success": False, "mode": "api", "need_login": True,
+                        "injected": 0, "skipped": 0, "items": [],
+                        "message": "入库必须连接 Steam 官方账号：请点上方「登录 Steam」输入用户名密码完成邮箱验证。"})
     try:
         async def _inject():
             async with DxbBackend() as backend:
                 await backend.initialize()
-                return backend.inject_free_games(appids, names)
+                return backend.inject_free_games(appids, names, cookie)
         return jsonify(asyncio.run(_inject()))
     except Exception as e:
         dummy = DxbBackend()
         dummy.log.error(dummy.stack_error(e))
-        return jsonify({"success": False, "message": f"入库失败: {e}", "injected": 0, "skipped": 0})
+        return jsonify({"success": False, "mode": "api", "message": f"入库失败: {e}",
+                        "injected": 0, "skipped": 0, "items": []})
+
+@app.route('/api/free/login/start', methods=['POST'])
+def free_login_start():
+    """第 1 步：用户名 + 密码，返回是否需要邮箱验证码。"""
+    data = request.get_json(silent=True) or {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    if not username or not password:
+        return jsonify({"success": False, "need_email": False, "message": "请输入用户名和密码。"}), 400
+    backend = DxbBackend()
+    backend.log = logging.getLogger(' 大轩巴入库器mini')
+    try:
+        result = backend.steam_web_login(username, password)
+    except Exception as e:
+        backend.log.error(backend.stack_error(e))
+        return jsonify({"success": False, "need_email": False, "message": f"登录失败: {e}"})
+    if result.get('success'):
+        result['message'] = '用户名密码通过。'
+    return jsonify(result)
+
+@app.route('/api/free/login/finish', methods=['POST'])
+def free_login_finish():
+    """第 2 步：邮箱验证码 + challenge，拿到 steamLoginSecure 并保存。"""
+    data = request.get_json(silent=True) or {}
+    code = (data.get('code') or '').strip()
+    challenge = (data.get('challenge') or '').strip()
+    if not challenge:
+        return jsonify({"success": False, "message": "登录上下文丢失，请重新输入用户名密码。"}), 400
+    backend = DxbBackend()
+    backend.log = logging.getLogger(' 大轩巴入库器mini')
+    try:
+        result = backend.steam_web_login('', '', email_code=code, challenge=challenge)
+    except Exception as e:
+        backend.log.error(backend.stack_error(e))
+        return jsonify({"success": False, "message": f"登录失败: {e}"})
+    if result.get('success') and result.get('secure'):
+        secure = result['secure']
+        try:
+            cfg = backend._load_config_sync() or {}
+            cfg['steam_cookie'] = secure
+            backend._save_config_sync(cfg)
+        except Exception as e:
+            backend.log.warning(f"保存会话失败: {e}")
+        info = backend.session_info(secure)
+        result['session'] = info
+        result['message'] = '登录成功，已保存 Steam 官方会话。'
+    return jsonify(result)
+
+@app.route('/api/free/logout', methods=['POST'])
+def free_logout():
+    """断开：清掉本地保存的会话（不影响 Steam 账号本身）。"""
+    try:
+        backend = DxbBackend()
+        cfg = backend._load_config_sync() or {}
+        cfg.pop('steam_cookie', None)
+        backend._save_config_sync(cfg)
+    except Exception:
+        pass
+    return jsonify({"success": True, "message": "已断开本地会话。"})
+
+@app.route('/api/free/session', methods=['POST'])
+def free_session():
+    """校验 Steam 官方账号会话（读 steamLoginSecure Cookie），返回账号信息。"""
+    data = request.get_json(silent=True) or {}
+    cookie = (data.get('cookie') or '').strip()
+    try:
+        backend = DxbBackend()
+        backend.log = logging.getLogger(' 大轩巴入库器mini')
+        result = backend.session_info(cookie)
+        if result.get('success') and cookie:
+            try:
+                cfg = backend._load_config_sync() or {}
+                cfg['steam_cookie'] = cookie
+                backend._save_config_sync(cfg)
+            except Exception:
+                pass
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "session_ok": False,
+                        "message": f"读取账号信息失败: {e}"})
 
 @app.route('/api/free/account', methods=['POST'])
 def free_account():

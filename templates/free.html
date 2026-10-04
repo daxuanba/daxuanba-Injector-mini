@@ -68,16 +68,50 @@
             <div class="account-bar" id="accountBar" style="margin-bottom:14px;">
                 <img id="accountAvatar" class="account-avatar" alt="头像" style="display:none"/>
                 <div class="account-info">
-                    <span id="accountName" class="account-name">正在读取本机 Steam 登录状态…</span>
+                    <span id="accountName" class="account-name">未连接 Steam 官方账号会话…</span>
                     <span id="accountBalance" class="account-balance"></span>
                 </div>
                 <div class="account-login" id="accountLogin">
-                    <button class="btn btn-text" id="avatarToggleBtn" title="显示/隐藏本机头像">
+                    <button class="btn btn-primary" id="openLoginBtn">
+                        <span class="material-icons">login</span> 登录 Steam
+                    </button>
+                    <button class="btn btn-text" id="avatarToggleBtn" title="显示/隐藏头像">
                         <span class="material-icons">account_circle</span><span class="settings-text">隐藏头像</span>
                     </button>
-                    <button class="btn btn-text" id="accountReloadBtn">
-                        <span class="material-icons">refresh</span> 重新读取
+                    <button class="btn btn-text" id="logoutBtn" style="display:none">
+                        <span class="material-icons">logout</span> 断开
                     </button>
+                </div>
+            </div>
+
+            <div class="card manager-card">
+                <div class="card-header">
+                    <h2>Steam 账号会话（官方接口入库）</h2>
+                </div>
+                <div class="session-tip">
+                    免费游戏走 Steam 官方 <b>Checkout.AddFreeLicense</b> 接口，直接写进你自己的 Steam 账号库，
+                    永久有效、不依赖本机解锁器、也不用重启 Steam。点右上角「登录 Steam」，
+                    填用户名 + 密码，再填发到邮箱的验证码即可（邮箱只显示类型，不显示完整地址）。
+                </div>
+                <div class="session-row">
+                    <button class="btn btn-primary" id="openLoginBtn2">
+                        <span class="material-icons">login</span> 登录 Steam 账号
+                    </button>
+                    <button class="btn btn-text" id="manualToggleBtn">手动粘贴会话（备选）</button>
+                </div>
+                <div class="session-row" id="cookieRow" style="display:none;margin-top:10px;">
+                    <input type="text" id="cookieInput" class="text-field session-cookie-field"
+                           placeholder="粘贴 Cookie（必须包含 steamLoginSecure=...）">
+                    <button class="btn btn-secondary" id="cookieSubmitBtn">连接账号</button>
+                </div>
+                <div class="session-manual" id="cookieManual" style="display:none">
+                    <ol>
+                        <li>浏览器打开 <a href="https://store.steampowered.com/" target="_blank" rel="noopener">https://store.steampowered.com/</a> 并登录账号</li>
+                        <li>按 F12 → Application（应用程序）→ Cookies → <b>https://store.steampowered.com</b></li>
+                        <li>复制包含 <b>steamLoginSecure</b> 的那一行 Cookie，整行贴到上面的输入框</li>
+                        <li>点「连接账号」，状态栏显示你的 Steam 昵称即成功</li>
+                    </ol>
+                    <p class="session-warn">Cookie 只存在本机配置文件里，不会上传；登出 Steam 网站后 Cookies 过期需重新粘贴。</p>
                 </div>
             </div>
 
@@ -118,6 +152,45 @@
                 </div>
             </div>
         </main>
+    </div>
+</div>
+
+<div class="modal-mask" id="loginModal" style="display:none">
+    <div class="modal-box login-modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+            <span class="material-icons modal-icon">lock</span>
+            <h3 id="loginModalTitle">登录 Steam 账号</h3>
+            <button class="modal-close" id="loginModalClose" title="关闭">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="login-step" id="loginStep1">
+                <label class="login-label" for="loginUser">用户名</label>
+                <input type="text" id="loginUser" class="text-field" autocomplete="username"
+                       placeholder="Steam 账号名">
+                <label class="login-label" for="loginPass">密码</label>
+                <input type="password" id="loginPass" class="text-field" autocomplete="current-password"
+                       placeholder="登录密码">
+                <div class="login-error" id="loginErr"></div>
+            </div>
+            <div class="login-step" id="loginStep2" style="display:none">
+                <div class="login-mailhint">
+                    <span class="material-icons">mail_outline</span>
+                    <div>
+                        <b>验证码已发送至邮箱 <span id="loginMaskMail">…</span></b>
+                        <small>只显示邮箱类型，不显示完整邮箱地址；请输入邮件的验证码继续。</small>
+                    </div>
+                </div>
+                <label class="login-label" for="loginCode">邮箱验证码</label>
+                <input type="text" id="loginCode" class="text-field" maxlength="10"
+                       placeholder="请输入邮箱里的验证码">
+                <div class="login-error" id="loginErr2"></div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" id="loginBackBtn" style="display:none">上一步</button>
+            <button class="btn btn-secondary" id="loginCancelBtn">取消</button>
+            <button class="btn btn-primary" id="loginNextBtn">下一步</button>
+        </div>
     </div>
 </div>
 
