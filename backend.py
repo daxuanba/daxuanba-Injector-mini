@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.21"
+CURRENT_VERSION = "2.22"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -453,7 +453,16 @@ class DxbBackend:
         force_unlocker = self.config.get("force_unlocker_type", "auto")
 
         _plug = self.steam_path / 'config' / 'stplug-in'
-        is_steamtools = ((self.steam_path / 'hid.dll').exists() or
+        # SteamTools 两种形态都要认：新版 NSIS 包放 hid.dll；
+        # 老版注入式只往 Steam 目录扔一个 XInput1_4.dll（600KB+，不是官方包的 120KB）
+        _xi = self.steam_path / 'XInput1_4.dll'
+        _xi_big = False
+        if _xi.exists():
+            try:
+                _xi_big = _xi.stat().st_size > 300 * 1024
+            except Exception:
+                _xi_big = False
+        is_steamtools = ((self.steam_path / 'hid.dll').exists() or _xi_big or
                          (_plug.is_dir() and any(_plug.glob('*.lua'))))
         is_greenluma = any((self.steam_path / dll).exists() for dll in [
             'GreenLuma_2025_x86.dll', 'GreenLuma_2025_x64.dll',
@@ -999,6 +1008,26 @@ class DxbBackend:
                 out["userdata_dir"] = str(cands[0])
         return out
 
+    def _steamtools_installed(self, sp: Path) -> bool:
+        """SteamTools 装了没有（两种形态都认）。
+
+        · 新版（1.8.x 官方 NSIS 包）：Steam 根目录有 hid.dll
+        · 老版（注入式，E:\\SteamTools\\SteamTools.exe）：只注入一个 XInput1_4.dll，
+          体积 600KB+（官方 NSIS 包里同名文件只有 ~120KB，靠体积区分）
+        · 另外 config\\stplug-in 里有真 lua 也算（老版往那儿放清单）
+        """
+        if (sp / 'hid.dll').exists():
+            return True
+        xi = sp / 'XInput1_4.dll'
+        if xi.exists():
+            try:
+                if xi.stat().st_size > 300 * 1024:
+                    return True
+            except Exception:
+                pass
+        plug = sp / 'config' / 'stplug-in'
+        return plug.is_dir() and any(plug.glob('*.lua'))
+
     def get_steam_status(self) -> Dict:
         """检测 Steam 路径与已安装内核，供首页状态条显示。
         kernel: steamtools(稳定入库) / greenluma(DLL注入) / opensteamtool(清单导入) / none
@@ -1009,7 +1038,7 @@ class DxbBackend:
         if not sp or not sp.exists():
             return {"steam_path": None, "exists": False, "kernel": "none",
                     "steamtools": False, "greenluma": False, "opensteamtool": False}
-        is_steamtools = (sp / 'config' / 'stplug-in').is_dir()
+        is_steamtools = self._steamtools_installed(sp)
         is_greenluma = any(sp.glob('GreenLuma*.dll'))
         is_opensteamtool = (sp / 'OpenSteamTool.dll').exists() or (sp / 'config' / 'lua').is_dir()
         if is_steamtools:
@@ -5053,7 +5082,30 @@ class KernelHub:
             proxies = [n for n in ('hid.dll', 'XInput1_4.dll', 'dwmapi.dll') if (sp / n).exists()]
             out["files"] = st_files + [n for n in proxies if n not in st_files]
             out["lua_count"] = lua_n
-            out["installed"] = bool((sp / 'hid.dll').exists() or lua_n)
+            # SteamTools 有两种形态，判据必须都认：
+            #   新版（1.8.x NSIS 官方包）：放 hid.dll，XInput1_4.dll 只有 ~120KB
+            #   老版（注入式，E:\SteamTools\SteamTools.exe 往 Steam 目录注入）：
+            #       只注入一个 XInput1_4.dll，而且体积 600KB+，不放 hid.dll
+            # 以前只认 hid.dll + lua，结果老版用户永远显示「未安装」（明明装了）。
+            hid = (sp / 'hid.dll').exists()
+            legacy = False
+            legacy_size = 0
+            xi = sp / 'XInput1_4.dll'
+            if xi.exists():
+                try:
+                    legacy_size = xi.stat().st_size
+                    legacy = legacy_size > 300 * 1024
+                except Exception:
+                    legacy = False
+            out["legacy"] = legacy
+            out["legacy_dll_size"] = legacy_size
+            out["installed"] = self.b._steamtools_installed(sp)
+            if legacy and not hid:
+                out["note"] = (f"检测到老版注入式 SteamTools：XInput1_4.dll "
+                               f"{legacy_size // 1024} KB（新版官方包这个文件只有 ~120KB）。"
+                               + ("它的程序目录可能已被清理，只剩注入的 dll —— "
+                                  "属于孤儿 dll，可到「离线注入 → 一键修复」里隔离掉。"
+                                  if legacy_size > 300 * 1024 else ""))
         else:
             lua = sp / 'config' / 'lua'
             dll_ok = (sp / 'OpenSteamTool.dll').exists()
@@ -6046,6 +6098,26 @@ class KernelHub:
                 "两者都会往 steam.exe 里挂钩子，一起用很容易让 Steam 启动后立刻退出。"
                 "建议二选一：要用 GreenLuma 就把这些代理 DLL 移出 Steam 目录。"
                 % ('、'.join(out["proxies"]), ' 和 '.join(names)))
+        # XInput1_4.dll 是「独占」文件名：老版注入式 SteamTools 和 OpenSteamTool
+        # 都往 Steam 目录放这个同名文件，Windows 又不区分大小写 → 只能留一个。
+        # 留下的那个必然是后装的，另一个内核等于被悄悄顶掉了。
+        xi = sp / 'XInput1_4.dll'
+        if xi.exists() and (sp / 'OpenSteamTool.dll').exists():
+            try:
+                sz = xi.stat().st_size
+            except Exception:
+                sz = 0
+            owner = ("老版注入式 SteamTools（600KB 级）" if sz > 300 * 1024
+                     else "OpenSteamTool（约 120KB）")
+            other = "OpenSteamTool" if sz > 300 * 1024 else "老版注入式 SteamTools"
+            out["ok"] = False
+            out["xinput_owner"] = owner
+            out["message"] = (
+                out["message"] + "\n\n" if out["message"] else "") + (
+                "同一个 XInput1_4.dll 只能存在一份，而 Steam 目录里现在是 %s 那份"
+                "（%d KB），%s 的代理 dll 被顶掉了 —— 两个内核不可能同时工作。"
+                "去「下载管理」页选你要用的那个重新装，或到「离线注入 → 一键修复」"
+                "先隔离干净再装。" % (owner, sz // 1024, other))
         return out
 
     def injection_status(self) -> Dict[str, Any]:
