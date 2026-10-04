@@ -190,7 +190,7 @@ class FileManagerApp {
                 return `
                     <div class="game-card" data-item='${JSON.stringify(item)}'>
                         <input type="checkbox" class="card-checkbox" ${isCoreFile ? 'disabled' : ''} title="选择此项">
-                        <div class="game-card-header" ${hasValidAppID ? `onclick="window.open('steam://run/${item.appid}')"` : ''} title="启动/安装游戏">
+                        <div class="game-card-header" ${hasValidAppID ? `data-launch-appid="${item.appid}"` : ''} title="启动/安装游戏">
                             ${imageHtml}
                         </div>
                         <div class="game-card-body">
@@ -219,6 +219,15 @@ class FileManagerApp {
                         clientX: rect.left, clientY: rect.bottom
                     });
                     card.dispatchEvent(mockEvent);
+                });
+            });
+
+            // 卡片封面启动游戏：走 launchGame() -> /api/steam/launch（os.startfile）
+            // 旧实现是内联 window.open('steam://...')，在 WebView2 里会劫持主窗口。
+            this.elements.gridContainer.querySelectorAll('[data-launch-appid]').forEach(header => {
+                header.addEventListener('click', e => {
+                    e.stopPropagation();
+                    this.launchGame(header.dataset.launchAppid);
                 });
             });
         }

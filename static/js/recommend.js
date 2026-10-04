@@ -115,7 +115,7 @@ class RecommendApp {
         this.elements.sections.querySelectorAll('.rec-store').forEach(btn => {
             btn.addEventListener('click', e => {
                 e.stopPropagation();
-                window.open(`https://store.steampowered.com/app/${btn.dataset.appid}`, '_blank');
+                openExternal(`https://store.steampowered.com/app/${btn.dataset.appid}`);
             });
         });
     }

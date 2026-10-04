@@ -143,6 +143,24 @@ STEAM_LOGIN = {
     "account": None,
 }
 _steam_login_launcher = None
+_external_link_opener = None
+_devtools_opener = None
+
+
+def register_external_link_opener(fn):
+    """由桌面壳注入：把外链交给系统浏览器打开。
+
+    必须走这条路 —— WebView2 里 window.open / target=_blank 会直接导航主窗口，
+    主窗口被替换成 Steam 商店页后，路由和标签栏全丢，表现为「卡死、F12 不灵、关不掉」。
+    """
+    global _external_link_opener
+    _external_link_opener = fn if callable(fn) else None
+
+
+def register_devtools_opener(fn):
+    """由桌面壳注入：F12 / Ctrl+Shift+I 打开 WebView2 DevTools。"""
+    global _devtools_opener
+    _devtools_opener = fn if callable(fn) else None
 
 
 def register_steam_login_launcher(fn):
@@ -1603,6 +1621,36 @@ def upload_background():
 
 @app.route('/userdata/<path:filename>')
 def serve_userdata(filename): return send_from_directory(app.config['USER_DATA_FOLDER'], filename)
+
+@app.route('/api/open-external', methods=['POST'])
+def open_external():
+    """把外部链接交给系统默认浏览器。
+
+    只放行 http/https，防止页面用 file:// 之类协议做本地探测。
+    """
+    data = request.get_json(silent=True) or {}
+    url = str(data.get('url') or '').strip()
+    if not url.lower().startswith(('http://', 'https://')):
+        return jsonify({"success": False, "message": "只允许打开 http/https 链接。"}), 400
+    try:
+        if _external_link_opener is not None:
+            ok = bool(_external_link_opener(url))
+        else:
+            ok = bool(os.startfile(url)) if hasattr(os, 'startfile') else bool(webbrowser.open(url))
+        return jsonify({"success": ok, "url": url})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"打开链接失败: {e}"}), 500
+
+@app.route('/api/devtools', methods=['POST', 'GET'])
+def open_devtools():
+    """F12 / Ctrl+Shift+I：打开内嵌 WebView2 的开发者工具。"""
+    if _devtools_opener is None:
+        return jsonify({"success": False, "message": "当前运行模式不支持 DevTools。"}), 501
+    try:
+        _devtools_opener()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"打开 DevTools 失败: {e}"}), 500
 
 @app.route('/api/steam/launch', methods=['POST'])
 def steam_launch():

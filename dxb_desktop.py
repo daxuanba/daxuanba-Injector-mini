@@ -518,6 +518,181 @@ def _close_main_window():
         print('[大轩巴] 关闭主窗口失败：', e)
 
 
+# ------------------------------------------------------------------ 外链与 F12
+# 问题：pywebview 的 edgechromium 里 window.open(url,'_blank') 会在**当前窗口**导航过去，
+# 主窗口被替成 Steam 商店页 → 顶部标签栏和路由全丢，看起来像「卡死点不动」，
+# 而且此时 F12/关闭按钮都失灵（用户实际遇到的正是这个）。
+# 修法：拦截离开本地源的导航，一律丢给系统浏览器；主窗口永远只显示本地页面。
+
+def _install_external_link_guard(win, local_prefixes):
+    """把非本地 URL 的导航/新窗口请求全部改为「用系统浏览器打开」。"""
+    if win is None:
+        return
+
+    def _is_local(url):
+        u = str(url or '').strip().lower()
+        if not u:
+            return True
+        if u.startswith(('about:', 'data:', 'blob:', 'javascript:', 'file:')):
+            return True
+        for p in local_prefixes:
+            if u.startswith(p):
+                return True
+        return False
+
+    def _open_external(url):
+        u = str(url or '').strip()
+        if not u or _is_local(u):
+            return
+        try:
+            if hasattr(os, 'startfile'):
+                os.startfile(u)
+            else:
+                import webbrowser
+                webbrowser.open(u)
+            print('[大轩巴] 外链已交给系统浏览器：', u[:120])
+        except Exception as e:
+            print('[大轩巴] 打开外链失败：', e)
+
+    # 1) 拦 NewWindowRequested：target=_blank / window.open 的落点
+    # 2) 拦 NavigationStarting：地址栏跳转、<a target> 回退导航
+    try:
+        native = getattr(win, 'native', None)
+        chrome = getattr(native, 'browser', None)
+        ctl = getattr(chrome, 'webview', None)
+        core = ctl.CoreWebView2
+    except Exception as e:
+        print('[大轩巴] 外链拦截初始化失败（不影响使用）：', e)
+        return
+
+    def on_new_window(sender, args):
+        try:
+            args.set_Cancel(True)
+        except Exception:
+            try:
+                args.Cancel = True
+            except Exception:
+                pass
+        _open_external(str(args.Uri))
+
+    def on_navigation_starting(sender, args):
+        try:
+            uri = str(args.Uri)
+        except Exception:
+            return
+        if _is_local(uri):
+            return
+        try:
+            args.set_Cancel(True)
+        except Exception:
+            try:
+                args.Cancel = True
+            except Exception:
+                return
+        _open_external(uri)
+
+    try:
+        core.NewWindowRequested += on_new_window
+    except Exception as e:
+        print('[大轩巴] NewWindowRequested 拦截失败：', e)
+    try:
+        core.NavigationStarting += on_navigation_starting
+    except Exception as e:
+        print('[大轩巴] NavigationStarting 拦截失败：', e)
+
+    # 页面里的 window.open 也直接改写掉，双保险（注入在所有 frame）
+    try:
+        js = """
+        (function () {
+          if (window.__dxgInstalled) { return; }
+          window.__dxgInstalled = true;
+          const origOpen = window.open;
+          window.open = function (url, target, features) {
+            try {
+              if (url && String(url).indexOf('127.0.0.1') === -1) {
+                fetch('/api/open-external', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ url: String(url) })
+                });
+                return null;
+              }
+            } catch (e) {}
+            return origOpen.apply(window, arguments);
+          };
+          document.addEventListener('click', function (ev) {
+            const a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
+            if (!a) { return; }
+            const href = a.getAttribute('href') || '';
+            if (href && href.indexOf('127.0.0.1') === -1 &&
+                !href.startsWith('#') && !href.startsWith('javascript:')) {
+              ev.preventDefault();
+              fetch('/api/open-external', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: href })
+              });
+            }
+          }, true);
+        })();
+        """
+        win.load_js(js)
+        print('[大轩巴] 外链拦截已启用（外链走系统浏览器）。')
+    except Exception as e:
+        print('[大轩巴] 注入外链拦截脚本失败：', e)
+
+
+def _enable_f12_devtools(win):
+    """默认 debug=False 会让 pywebview 把 AreDevToolsEnabled 设成 False，
+    F12 / Ctrl+Shift+I 就完全没反应。这里单独把 DevTools 打开。
+    """
+    if win is None:
+        return
+
+    def _open():
+        try:
+            native = getattr(win, 'native', None)
+            core = native.browser.webview.CoreWebView2
+            core.OpenDevToolsWindow()
+            print('[大轩巴] DevTools 已打开。')
+        except Exception as e:
+            print('[大轩巴] 打开 DevTools 失败：', e)
+
+    # 1) 放开内核层的 DevTools 开关
+    def _enable():
+        try:
+            native = getattr(win, 'native', None)
+            core = native.browser.webview.CoreWebView2
+            s = core.Settings
+            s.AreDevToolsEnabled = True
+            s.AreBrowserAcceleratorKeysEnabled = True
+            s.IsStatusBarEnabled = True
+        except Exception as e:
+            print('[大轩巴] 启用 DevTools 开关失败：', e)
+
+    # 2) 页面注入 F12 键监听（内核在窗口创建时就把 accelerator 关了，
+    #    纯靠键盘快捷键不可靠，必须在 JS 层自己接）
+    js = """
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'F12' || ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'I' || e.key === 'i'))) {
+        e.preventDefault();
+        try { fetch('/api/devtools'); } catch (err) {}
+      }
+    }, true);
+    """
+    for attempt in range(40):
+        try:
+            if getattr(win, 'native', None) is not None:
+                _enable()
+                win.load_js(js)
+                print('[大轩巴] F12 调试已启用。')
+                return
+        except Exception:
+            pass
+        time.sleep(0.15)
+    print('[大轩巴] F12 调试启用超时（不影响正常使用）。')
+
+
 # ------------------------------------------------------------------ 入口
 def _import_webview():
     try:
@@ -608,6 +783,53 @@ def main():
         profile_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+
+    def _open_external_url(url):
+        u = str(url or '').strip()
+        if not u:
+            return False
+        try:
+            if hasattr(os, 'startfile'):
+                os.startfile(u)
+            else:
+                webbrowser.open(u)
+            return True
+        except Exception as e:
+            print('[大轩巴] 打开外链失败：', e)
+            return False
+
+    def _open_devtools(w):
+        try:
+            core = w.native.browser.webview.CoreWebView2
+            core.OpenDevToolsWindow()
+        except Exception as e:
+            print('[大轩巴] 打开 DevTools 失败：', e)
+
+    # 外链一律走系统浏览器：window.open / target=_blank 不许劫持主窗口，
+    # 否则主窗口会被导航成 Steam 商店页，看起来就是「卡死点不动、关不掉」。
+    try:
+        if hasattr(mod, 'register_external_link_opener'):
+            mod.register_external_link_opener(_open_external_url)
+    except Exception as e:
+        print('[大轩巴] 注册外链处理器失败：', e)
+
+    # F12 / Ctrl+Shift+I 打开 DevTools，并放开内核的 accelerator keys
+    try:
+        if hasattr(mod, 'register_devtools_opener'):
+            mod.register_devtools_opener(
+                lambda: threading.Thread(target=_open_devtools, args=(win,),
+                                         daemon=True).start())
+    except Exception as e:
+        print('[大轩巴] 注册 DevTools 处理器失败：', e)
+
+    def _after_load():
+        _install_external_link_guard(win, [url.lower() + '/', url.lower()])
+        _enable_f12_devtools(win)
+
+    try:
+        win.events.loaded += lambda: threading.Thread(target=_after_load, daemon=True).start()
+    except Exception as e:
+        print('[大轩巴] 绑定窗口加载事件失败：', e)
 
     print('[大轩巴] 使用内嵌 WebView2 窗口打开界面。')
     webview.start(

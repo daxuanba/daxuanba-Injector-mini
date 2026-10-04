@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.24"
+CURRENT_VERSION = "2.25"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -79,6 +79,41 @@ STEAM_STORE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
 _LOGIN_CTX = {}
+_LOGIN_CLIENT = None
+
+
+def _login_client():
+    """两步登录必须复用同一个 HTTP 会话。
+
+    rsatimestamp / rsakey_hash / sessionid 三者互相绑定，
+    每次请求新建 client 会让第二步必然失败。
+    """
+    global _LOGIN_CLIENT
+    if _LOGIN_CLIENT is None or _LOGIN_CLIENT.is_closed:
+        _LOGIN_CLIENT = httpx.Client(
+            verify=False, timeout=40, follow_redirects=True,
+            headers={'User-Agent': STEAM_STORE_UA,
+                     'Accept-Language': 'zh-CN,zh;q=0.9',
+                     'Referer': 'https://steamcommunity.com/login/'})
+        # 先访问登录页拿 sessionid / steamCountry，
+        # 缺这一步直接打 dologin 容易被 429 限流。
+        try:
+            _LOGIN_CLIENT.get(
+                'https://steamcommunity.com/login/?goto=https%3A%2F%2Fsteamcommunity.com%2F')
+        except Exception:
+            pass
+    return _LOGIN_CLIENT
+
+
+def _reset_login_client():
+    global _LOGIN_CLIENT
+    try:
+        if _LOGIN_CLIENT is not None and not _LOGIN_CLIENT.is_closed:
+            _LOGIN_CLIENT.close()
+    except Exception:
+        pass
+    _LOGIN_CLIENT = None
+
 
 def rsa_encrypt_pubkey(pub_mod_hex: str, pub_exp_hex: str, password: str) -> str:
     """Steam 网页登录用的 RSA（PKCS#1 v1.5）加密，纯 Python 实现，不依赖任何三方库。"""
@@ -91,18 +126,19 @@ def rsa_encrypt_pubkey(pub_mod_hex: str, pub_exp_hex: str, password: str) -> str
     return format(c, 'x').rjust(k * 2, '0')
 
 def mask_email(email: str) -> str:
-    """邮箱脱敏：只露类型，不显示完整邮箱名，如 ab***@qq***.com。"""
+    """邮箱脱敏：只露类型，不显示完整邮箱名，如 ab***@qq***.com / a***@c***.d.com。"""
     email = (email or '').strip()
     if '@' not in email:
         return ''
     local, _, domain = email.partition('@')
-    dparts = domain.split('.')
-    if len(dparts) < 2:
-        return (local[:2] if len(local) > 2 else '') + '***@' + domain
-    tld = '.' + '.'.join(dparts[1:]) if len(dparts) > 2 else '.' + dparts[-1]
-    dhead = dparts[0][:2] + '***'
+    dparts = [p for p in domain.split('.') if p]
+    if not dparts:
+        return ''
     lhead = local[:2] if len(local) > 2 else (local[:1] if local else '***')
-    return f"{lhead}***@{dhead}{tld}"
+    if len(dparts) == 1:
+        return f"{lhead}***@{dparts[0]}"
+    # 最后一段是后缀（com / cn），其余每段各取前 2 字符 + ***
+    return f"{lhead}***@" + ''.join(p[:2] + '***.' for p in dparts[:-1]) + dparts[-1]
 
 class STConverter:
     def __init__(self):
@@ -2487,93 +2523,144 @@ class DxbBackend:
 
         第一次调用：传 username + password，返回 need_email 与 challenge；
         第二次调用：传 challenge + email_code，返回 secure（steamLoginSecure）。
-        中间凭据只存在进程内存 _LOGIN_CTX，不写盘、不上网络以外的地方。
-        """
-        try:
-            with httpx.Client(verify=False, timeout=40, follow_redirects=True,
-                              headers={'User-Agent': STEAM_STORE_UA,
-                                       'Accept-Language': 'zh-CN,zh;q=0.9',
-                                       'Referer': 'https://steamcommunity.com/login/'}) as cli:
-                if not challenge:
-                    try:
-                        r = cli.get("https://steamcommunity.com/login/getrsakey/",
-                                    params={'username': username})
-                    except Exception as e:
-                        return {"success": False, "need_email": False,
-                                "message": f"连不上 Steam 登录服务：{self.stack_error(e)[:160]}"}
-                    rj = self._json_response(r)
-                    if rj is None:
-                        return {"success": False, "need_email": False,
-                                "message": "Steam 登录接口异常（非 JSON），请改用下方手动粘贴会话。"}
-                    if not rj.get('success'):
-                        return {"success": False, "need_email": False,
-                                "message": "Steam 公钥获取失败：用户名不存在或被 Steam 风控拦截，请稍后重试。"}
-                    _LOGIN_CTX.update({
-                        'username': username, 'password': password,
-                        'mod': rj.get('publickey_mod') or '',
-                        'exp': rj.get('publickey_exp') or '',
-                        'ts': str(rj.get('timestamp') or ''),
-                        'hash': rj.get('rsakey_hash') or '',
-                        'steamid': rj.get('steamid') or '',
-                        'captcha_gid': rj.get('captcha_gid'),
-                    })
-                else:
-                    if not _LOGIN_CTX.get('username'):
-                        return {"success": False, "need_email": False,
-                                "message": "登录上下文已失效，请重新输入用户名密码。"}
+        中间凭据只存在进程内存 _LOGIN_CTX / _LOGIN_CLIENT，不写盘。
 
-                ctx = _LOGIN_CTX
-                enc = rsa_encrypt_pubkey(ctx['mod'], ctx['exp'], ctx['password'])
-                data = {
-                    'username': ctx['username'], 'password': enc,
-                    'captcha_gid': '' if ctx['captcha_gid'] is None else str(ctx['captcha_gid']),
-                    'captcha_text': '', 'rsatimestamp': ctx['ts'],
-                    'rsakey_hash': ctx['hash'], 'steamid': ctx['steamid'],
-                    'remember_login': 'true', 'cookiecheck': '1', 'donotcache': '1',
-                    'donotcachets': str(int(time.time() * 1000)),
-                    'challenge': challenge or '',
-                    'validate_code': '',
-                    'email_code': (email_code or '').strip(),
-                    'login_friendly_name': '', 'darkmode': '1',
-                }
+        错误文案取 Steam 自己的 message 字段（中文），不再自己编「密码错误」——
+        旧代码只读 error/extended_error，Steam 早已改成 message，
+        导致风控/验证码/限流一律被误报成「用户名或密码错误」。
+        """
+        cli = _login_client()
+        try:
+            if not challenge:
+                # 清掉上一轮的残留上下文，避免串号
+                _LOGIN_CTX.clear()
                 try:
-                    r = cli.post("https://steamcommunity.com/login/dologin/", data=data,
-                                 headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                                          'X-Requested-With': 'XMLHttpRequest',
-                                          'Origin': 'https://steamcommunity.com',
-                                          'Referer': 'https://steamcommunity.com/login/'})
+                    r = cli.get("https://steamcommunity.com/login/getrsakey/",
+                                params={'username': username})
                 except Exception as e:
+                    _reset_login_client()
                     return {"success": False, "need_email": False,
-                            "message": f"登录请求发送失败：{self.stack_error(e)[:160]}"}
+                            "message": f"连不上 Steam 登录服务：{self.stack_error(e)[:160]}"}
                 rj = self._json_response(r)
                 if rj is None:
+                    _reset_login_client()
                     return {"success": False, "need_email": False,
-                            "message": "Steam 登录被风控拦截（非 JSON 响应），可改用下方手动粘贴会话。"}
-                secure = rj.get('steamloginsecure') or ''
-                if secure and 'steamLoginSecure' in secure:
-                    _LOGIN_CTX.clear()
-                    return {"success": True, "need_email": False, "secure": secure,
-                            "steamid": str(rj.get('steam_accountid') or ctx['steamid'] or ''),
-                            "message": "登录成功。"}
-                err = str(rj.get('error') or '')
-                ext = str(rj.get('extended_error') or '')
-                newch = str(rj.get('challenge') or '')
-                email = ''
-                m = re.search(r'[\w\.\-\+]+@[\w\.\-]+', ext or err)
-                if m:
-                    email = m.group(0)
-                low = (err + ' ' + ext).lower()
-                if newch and ('email' in low or '邮箱' in (err + ext) or rj.get('twofactor') is not None
-                              or rj.get('requires_twofactor')):
-                    return {"success": False, "need_email": True, "challenge": newch,
-                            "email": email, "masked_email": mask_email(email),
-                            "message": ext or err or "验证码已发送至邮箱，请输入邮箱里的验证码。"}
+                            "message": "Steam 登录接口异常（非 JSON），请稍后重试或改用手动粘贴会话。"}
+                if not rj.get('success'):
+                    _reset_login_client()
+                    return {"success": False, "need_email": False,
+                            "message": "Steam 公钥获取失败：用户名不存在或被 Steam 风控拦截，请稍后重试。"}
+                _LOGIN_CTX.update({
+                    'username': username, 'password': password,
+                    'mod': rj.get('publickey_mod') or '',
+                    'exp': rj.get('publickey_exp') or '',
+                    'ts': str(rj.get('timestamp') or ''),
+                    'hash': rj.get('rsakey_hash') or '',
+                    'steamid': rj.get('steamid') or '',
+                    'captcha_gid': rj.get('captcha_gid'),
+                })
+            else:
+                if not _LOGIN_CTX.get('username'):
+                    _reset_login_client()
+                    return {"success": False, "need_email": False,
+                            "message": "登录上下文已失效，请重新输入用户名密码。"}
+
+            ctx = _LOGIN_CTX
+            enc = rsa_encrypt_pubkey(ctx['mod'], ctx['exp'], ctx['password'])
+            data = {
+                'username': ctx['username'], 'password': enc,
+                'captcha_gid': '' if ctx.get('captcha_gid') is None else str(ctx.get('captcha_gid')),
+                'captcha_text': '', 'rsatimestamp': ctx['ts'],
+                'rsakey_hash': ctx['hash'], 'steamid': ctx['steamid'],
+                'remember_login': 'true', 'cookiecheck': '1', 'donotcache': '1',
+                'donotcachets': str(int(time.time() * 1000)),
+                'challenge': challenge or '',
+                'validate_code': '',
+                'email_code': (email_code or '').strip(),
+                'login_friendly_name': '', 'darkmode': '1',
+            }
+            try:
+                r = cli.post("https://steamcommunity.com/login/dologin/", data=data,
+                             headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                                      'X-Requested-With': 'XMLHttpRequest',
+                                      'Origin': 'https://steamcommunity.com',
+                                      'Referer': 'https://steamcommunity.com/login/'})
+            except Exception as e:
+                _reset_login_client()
                 return {"success": False, "need_email": False,
-                        "message": (ext or err or '登录失败，请检查用户名密码。')[:300]}
+                        "message": f"登录请求发送失败：{self.stack_error(e)[:160]}"}
+
+            # 429 = 触发频率限制（body 是 JSON null），必须单独识别，
+            # 否则会被当成「密码错误」把用户带偏。
+            if r.status_code == 429:
+                _reset_login_client()
+                return {"success": False, "need_email": False,
+                        "message": "请求过于频繁，Steam 临时限流（429）。请等 1-2 分钟后再试，"
+                                   "或直接用下方「手动粘贴会话」入口。"}
+
+            rj = self._json_response(r)
+            if rj is None:
+                _reset_login_client()
+                return {"success": False, "need_email": False,
+                        "message": "Steam 登录被风控拦截（非 JSON 响应），可改用下方手动粘贴会话。"}
+
+            secure = str(rj.get('steamloginsecure') or rj.get('steamLoginSecure') or '')
+            if secure and 'steamLoginSecure' in secure:
+                _LOGIN_CTX.clear()
+                _reset_login_client()
+                return {"success": True, "need_email": False, "secure": secure,
+                        "steamid": str(rj.get('steamid') or rj.get('steam_accountid') or ''),
+                        "message": "登录成功。"}
+
+            # Steam 现在把错误文案放在 message（中文），error/extended_error 早已不用
+            msg = str(rj.get('message') or rj.get('extended_error') or rj.get('error') or '').strip()
+            newch = str(rj.get('challenge') or '')
+
+            # 图形验证码必须**先于**邮箱验证码判断。
+            # 它的 message 里也带「验证码」三个字，放到后面会被 email 分支抢走，
+            # 结果就是让用户去邮箱里找一个根本不存在的邮件。
+            if rj.get('captcha_needed'):
+                gid = rj.get('captcha_gid')
+                _reset_login_client()
+                return {"success": False, "need_email": False, "captcha_needed": True,
+                        "captcha_gid": '' if gid is None else str(gid),
+                        "message": (msg + "（Steam 要求图形验证码：短时间内登录尝试过多，"
+                                           "请过几分钟再试，或改用下方手动粘贴会话。）").strip()}
+
+            email = ''
+            m = re.search(r'[\w\.\-\+]+@[\w\.\-]+', msg)
+            if m:
+                email = m.group(0)
+            if not email:
+                for k in ('email', 'emailmask', 'masked_email', 'account_name'):
+                    v = rj.get(k)
+                    if isinstance(v, str) and '@' in v:
+                        email = v
+                        break
+
+            # 邮箱验证码：Steam 用 needs_twofactor / twofactor 标记，
+            # 且第一版实现要求必须有 challenge 才进二步 —— 少了 challenge 就永远走不到。
+            need_email = bool(newch) or bool(rj.get('needs_twofactor')) or \
+                bool(rj.get('requires_twofactor')) or (rj.get('twofactor') is not None)
+            low = msg.lower()
+            if ('邮箱' in msg or 'email' in low or 'verification code' in low
+                    or 'guard' in low or 'two-factor' in low):
+                need_email = True
+            if need_email:
+                return {"success": False, "need_email": True, "challenge": newch,
+                        "email": email, "masked_email": mask_email(email),
+                        "message": msg or "验证码已发送至邮箱，请输入邮箱里的验证码。"}
+
+            if not msg:
+                msg = '登录失败，请检查用户名密码。'
+            _reset_login_client()
+            return {"success": False, "need_email": False, "message": msg[:300]}
         except Exception as e:
             _LOGIN_CTX.clear()
+            _reset_login_client()
             return {"success": False, "need_email": False,
                     "message": f"登录异常: {self.stack_error(e)[:200]}"}
+
 
     def session_info(self, cookie: str) -> Dict:
         """用 API 会话（steamLoginSecure Cookie）连 Steam 官方接口校验账号。
