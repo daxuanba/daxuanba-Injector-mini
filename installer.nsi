@@ -7,18 +7,25 @@ Unicode true
 
 Name "大轩巴入库器mini 安装程序"
 OutFile "dist_installer\大轩巴入库器mini-安装包.exe"
-InstallDir "$LOCALAPPDATA\Programs\大轩巴入库器mini"
-InstallDirRegKey HKCU "Software\DXB\大轩巴入库器mini" "InstallDir"
+; 安装目录用纯英文：避免中文路径在快捷方式 / 注册表 / 应用列表上的各种坑，
+; 用户也能一眼找到（C:\Users\<你>\AppData\Local\Programs\DXB-Mini）
+InstallDir "$LOCALAPPDATA\Programs\DXB-Mini"
+InstallDirRegKey HKCU "Software\DXB\DXB-Mini" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID LZMA
 SetCompressorDictSize 32
+
+; MUI_ICON 是 MUI 宏的入参，必须写成 !define，写成裸命令会让编译直接 abort
+!define MUI_ICON  "stage\assets\icon.ico"
+!define MUI_UNICON "stage\assets\icon.ico"
+BrandingText "大轩巴"
 
 ; ---------------- 品牌常量 ----------------
 !define APP_NAME   "大轩巴入库器mini"
 !define APP_EXE    "${APP_NAME}.exe"
 !define SM_FOLDER  "${APP_NAME}"
-!define REG_ROOT   "Software\DXB\${APP_NAME}"
-!define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
+!define REG_ROOT   "Software\DXB\DXB-Mini"
+!define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\DXB-Mini"
 
 !define MUI_ABORTWARNING
 !insertmacro MUI_PAGE_WELCOME
@@ -38,15 +45,21 @@ SetCompressorDictSize 32
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
-LangString MSG_CORE ${MUI_LANG_SIMPCHINESE} "加速内核已一并装上（目录 accel\），不装也行，应用内可以联网重新下载。"
+LangString MSG_CORE 2052 "加速内核已一并装上（目录 accel\），不装也行，应用内可以联网重新下载。"
+LangString MSG_DESC 2052 "大轩巴入库器mini：Steam 免费游戏真入库 + 成就注入 + 网络加速。"
 
 ; ---------------- 安装 ----------------
 Section "主程序" SEC01
     SectionIn 1 RO
     SetOutPath $INSTDIR
     File "/oname=${APP_EXE}" "stage\${APP_EXE}"
-    File "stage\assets\icon.ico"
     File "stage\使用说明.txt"
+    ; 注意：NSIS 的 File 不递归时会「去掉源路径的最后一个目录」，
+    ; 直接 File "stage\assets\icon.ico" 会装成 $INSTDIR\stage\icon.ico（错！）
+    ; 所以先切到 assets 再用 /oname 固定文件名。
+    SetOutPath $INSTDIR\assets
+    File "/oname=icon.ico" "stage\assets\icon.ico"
+    SetOutPath $INSTDIR
 
     ; 加速内核：落盘后进程显示名就是应用自己，任务管理器里不出现第三方加速程序名
     SetOutPath $INSTDIR\accel
@@ -68,6 +81,12 @@ Section "主程序" SEC01
     WriteRegStr HKCU "${UNINST_KEY}" "NoRepair" "1"
     ; App Paths：让「运行」菜单 / start 命令能按名字找到它
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\App Paths\${APP_EXE}" "" "$INSTDIR\${APP_EXE}"
+    WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "2.26"
+    WriteRegStr HKCU "${UNINST_KEY}" "URLInfoAbout" "https://github.com/daxuanba/daxuanba-Injector-mini"
+
+    ; 装到哪了，白纸黑字写给用户：桌面一份「安装位置.txt」，装完不用满盘找
+    WriteIniStr "$DESKTOP\${APP_NAME} 安装位置.txt" "安装位置" "路径" "$INSTDIR"
+    DetailPrint "已安装到：$INSTDIR"
 SectionEnd
 
 Section "快捷方式" SEC02
@@ -85,15 +104,13 @@ Section "快捷方式" SEC02
     CreateShortCut "$DESKTOP\${APP_NAME}.lnk" \
         "$INSTDIR\${APP_EXE}" "" "$INSTDIR\assets\icon.ico" 0 SW_SHOWNORMAL
 
-    ; 让「开始菜单 / 桌面」立刻刷新，免得用户装完看不到图标以为没装
-    System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
+    ; 这里不能调 System::Call 刷新资源管理器：makensis 自带目录里没有 system.dll，
+    ; 运行中调用会直接报错中止安装。桌面/开始菜单由 Explorer 自己定时刷新。
 SectionEnd
 
 Section "-" SEC00
     DetailPrint "$(MSG_CORE)"
 SectionEnd
-
-LangString MSG_DESC ${MUI_LANG_SIMPCHINESE} "大轩巴入库器mini：Steam 免费游戏真入库 + 成就注入 + 网络加速。"
 
 ; ---------------- 卸载 ----------------
 Section "卸载" SEC03
@@ -101,6 +118,7 @@ Section "卸载" SEC03
     SetOutPath $INSTDIR
 
     Delete "$DESKTOP\${APP_NAME}.lnk"
+    Delete "$DESKTOP\${APP_NAME} 安装位置.txt"
     Delete "$STARTMENU\${SM_FOLDER}\${APP_NAME}.lnk"
     Delete "$STARTMENU\${SM_FOLDER}\卸载 ${APP_NAME}.lnk"
     RMDir /r "$STARTMENU\${SM_FOLDER}"
@@ -121,7 +139,11 @@ SectionEnd
 ; pywebview 壳启动后窗口要一两秒才出来，ExecShell 是异步的，这里给足时间再报结果。
 Function LaunchApp
     StrCpy $0 "$INSTDIR\${APP_EXE}"
-    IfFileExists $0 0 +2
+    IfFileExists $0 0 LaunchFailed
     ExecShell "open" "$0"
     Sleep 3000
+    Return
+    LaunchFailed:
+    ; NSIS 字符串里的换行只能用 $\n（$CRLF 会被挨着的中文粘成变量名、${CRLF} 直接不认）
+    MessageBox MB_ICONEXCLAMATION "启动失败$\n$\n找不到：$0$\n$\n多半是被杀毒软件拦了，去安装目录手动运行一次试试。"
 FunctionEnd
