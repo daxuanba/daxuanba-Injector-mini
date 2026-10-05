@@ -11,6 +11,7 @@
 """
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,35 @@ SRC_CORE_DIR = BASE / 'core'         # 已下载的官方内核
 
 def log(msg):
     print('[安装包] %s' % msg, flush=True)
+
+
+def app_version():
+    """从 backend.py 读 CURRENT_VERSION，作为 nsi 的 APP_VERSION（版本只维护一处）。"""
+    try:
+        src = (BASE / 'backend.py').read_text(encoding='utf-8', errors='ignore')
+        import re
+        m = re.search(r'CURRENT_VERSION\s*=\s*["\']([\d.]+)["\']', src)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ''
+
+
+def sync_nsi_version(ver):
+    """把 APP_VERSION 写进 installer.nsi（保留 BOM，改动最小）。"""
+    nsi = BASE / 'installer.nsi'
+    raw = nsi.read_bytes()
+    bom = raw.startswith(b'\xef\xbb\xbf')
+    text = raw.decode('utf-8-sig')
+    new, n = re.subn(r'(!define APP_VERSION ")[^"]+(")', r'\g<1>%s\g<2>' % ver, text)
+    if not n:
+        raise RuntimeError('installer.nsi 里找不到 !define APP_VERSION')
+    out = new.encode('utf-8')
+    if bom:
+        out = b'\xef\xbb\xbf' + out
+    nsi.write_bytes(out)
+    return n
 
 
 def find_core():
@@ -124,6 +154,10 @@ def compile_nsis():
 
 def main():
     t0 = time.time()
+    ver = app_version()
+    if ver:
+        n = sync_nsi_version(ver)
+        log('版本号同步：installer.nsi APP_VERSION = %s（改动 %d 处）' % (ver, n))
     if not prepare():
         return 1
     if not NSIS.exists():

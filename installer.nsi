@@ -21,6 +21,9 @@ SetCompressorDictSize 32
 BrandingText "大轩巴"
 
 ; ---------------- 品牌常量 ----------------
+; APP_VERSION 由 build_installer.py 从 backend.CURRENT_VERSION 注入，
+; 免得每次发版只改 backend / about.html 却漏了这里（v2.27 之前 DisplayVersion 就停在 2.26）
+!define APP_VERSION "2.27"
 !define APP_NAME   "大轩巴入库器mini"
 !define APP_EXE    "${APP_NAME}.exe"
 !define SM_FOLDER  "${APP_NAME}"
@@ -81,7 +84,7 @@ Section "主程序" SEC01
     WriteRegStr HKCU "${UNINST_KEY}" "NoRepair" "1"
     ; App Paths：让「运行」菜单 / start 命令能按名字找到它
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\App Paths\${APP_EXE}" "" "$INSTDIR\${APP_EXE}"
-    WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "2.26"
+    WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${APP_VERSION}"
     WriteRegStr HKCU "${UNINST_KEY}" "URLInfoAbout" "https://github.com/daxuanba/daxuanba-Injector-mini"
 
     ; 装到哪了，白纸黑字写给用户：桌面一份「安装位置.txt」，装完不用满盘找
