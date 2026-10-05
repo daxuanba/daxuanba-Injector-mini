@@ -1,8 +1,33 @@
-# 大轩巴入库器mini v2.27
+# 大轩巴入库器mini v2.28
 
-**界面修死**：修掉「点哪儿都没反应 + 默默弹出浏览器」「界面灰屏/未响应」「密码明明对却说错」这三个连在一起的毛病。同时把外链改成**在应用内新开窗口**，不用再跳去系统浏览器。
+**加载卡死根治**：v2.27 修完页面渲染，还剩一个「界面出来了但永远停在转圈」——这次挖到根。
 
-## 本次更新（v2.26 → v2.27）
+## 本次更新（v2.27 → v2.28）
+
+### 加载卡死的真正原因（根因定位）
+页面在 `<head>` 里**同步**引用了 `fonts.googleapis.com` 两个样式表 + `cdn.socket.io` 的 `<script>`。
+这些外部域名在 WebView2 里连不通 / 被代理挂着时，**HTML 解析器会一直卡在 `<script src=...>` 那一行**：
+
+- `app.js` 压根没被执行 → `DOMContentLoaded` 永远不触发 → `initializeBackend()` 从不跑；
+- 结果就是：**HTML/CSS 照常渲染（看着像"出来了"），但两个面板永远停在「正在初始化…」「正在加载清单源…」**，转圈转到天荒地老。
+- v2.27 那套「接口 30 秒超时」救不了它，因为超时逻辑本身就在没执行的 `app.js` 里。
+
+### 这次改了什么
+1. **所有外链改成非阻塞**：11 个模板的 Google Fonts 样式表改成 `media="print" onload="this.media='all'"`（不拦渲染、不拦脚本）；`cdn.socket.io` 的 `<script>` 全部加 `async`（不拦解析、`DOMContentLoaded`）。
+2. **图标字体本地化**：新增 `static/fonts/material-icons.woff2`（jsDelivr）+ `style.css` 里的 `@font-face` 与 `.material-icons` 基础样式。以前图标字体 100% 靠 Google CDN，断网时页面会直接把 `check_circle`、`settings_applications` 这些**单词印**出来；现在离线也有图标。
+3. **启动兜底**：`app.js` 底部加了 `dxbBoot()`——8 秒后若 `DOMContentLoaded` 没把应用拉起来，直接兜底启动一次，失败则在面板里打红字；另挂 `window.onerror` 兜底上报。以后再出现转圈，至少 8 秒内给结论而不是无限转。
+
+### 顺手压掉的隐患
+- 实测后端接口全部秒回：`/api/initialize` 0.19s、`/api/sources?fast=1` 0.02s、首次全量 `/api/sources` 2.75s（带 6 小时落盘缓存，之后 0.01s）。v2.27 总结里那条「`check_for_updates` 拖死 `/api/initialize`」是**误判**，实际只有 `/api/check_updates` 会跑更新检查。
+- 版本号改成一处维护：NSIS 的 `APP_VERSION` 由 `build_installer.py` 构建时从 `backend.py` 自动同步。
+
+### 验证方式
+用本机 Edge/Chrome 的 CDP 起真实浏览器、带上和桌面壳完全相同的网络参数
+（`--no-proxy-server` + `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`，
+即**模拟外网全断、只剩本地服务**）：
+
+- 修复前：`GET /` 只有一条， `/static/js/app.js` 一个请求都没发，DOM 里两个面板全是 `NO_NODE`；
+- 修复后：配置状态正确显示「已检测到 SteamTools（使用中）」，清单源渲染出 17 项，全程无阻塞。
 
 ### 1. 站内链接不再被当成外链丢到系统浏览器（v2.26 的主要 bug）
 
@@ -95,3 +120,4 @@
 - 加速需要订阅链接；没填订阅时内核能起，但规则全走 DIRECT。
 - 需要管理员权限才能开 TUN 模式，当前走系统代理（Steam 客户端读得到，浏览器 / 系统级程序才是全局的）。
 - 关闭应用会替你停掉加速内核（v2.27）；系统代理仍需自己点「关闭系统代理」关掉。
+- 图标字体已本地化，但 Roboto 正文字体仍走 CDN（非阻塞，断网只回退到系统字体，不影响功能）。

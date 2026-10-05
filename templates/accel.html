@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加速 - 大轩巴入库器mini</title>
     <link rel="icon" href="{{ url_for('static', filename='dxb-word.svg') }}" type="image/svg+xml"/>
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'"/>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet" media="print" onload="this.media='all'"/>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/manager.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/dx-theme.css') }}">
@@ -143,7 +143,7 @@
         </main>
     </div>
 </div>
-<script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+<script src="https://cdn.socket.io/4.7.4/socket.io.min.js" async></script>
 <script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
 <script src="{{ url_for('static', filename='js/task-log.js') }}"></script>
 <script src="{{ url_for('static', filename='js/accel.js') }}"></script>

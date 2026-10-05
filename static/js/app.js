@@ -795,6 +795,38 @@ class DxbWebApp {
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    new DxbWebApp();
+function dxbBootPanel(msg) {
+    var box = document.getElementById('configStatus');
+    if (box && /正在初始化/.test(box.innerHTML)) {
+        box.innerHTML = '<div class="status-item error"><span class="material-icons status-icon">error</span>'
+            + '<span class="status-text">' + msg + '</span></div>';
+    }
+}
+
+function dxbBoot() {
+    if (window.__dxbBooted) { return; }
+    try {
+        new DxbWebApp();
+        window.__dxbBooted = true;
+    } catch (e) {
+        console.error('前端初始化失败:', e);
+        dxbBootPanel('前端初始化失败：' + ((e && e.message) || e));
+    }
+}
+
+window.addEventListener('error', function (ev) {
+    console.error('未捕获错误:', ev && ev.message);
 });
+
+document.addEventListener('DOMContentLoaded', dxbBoot);
+/* 兜底：万一 DOMContentLoaded 因任何原因没触发，8 秒后直接手动起一次，
+   不让页面永远停在「正在初始化…」的转圈上。 */
+setTimeout(function () {
+    if (!window.__dxbBooted) {
+        console.warn('DOMContentLoaded 未触发，走兜底启动。');
+        dxbBoot();
+        if (!window.__dxbBooted) {
+            dxbBootPanel('页面脚本未能启动，请重启应用。');
+        }
+    }
+}, 8000);
