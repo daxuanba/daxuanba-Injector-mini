@@ -1968,6 +1968,219 @@ def toggle_console():
 @socketio.on('connect')
 def handle_connect(): emit('response', {"message": "已连接到大轩巴入库器mini服务器"})
 
+# --------------------------------------------------------------- 加速核心
+
+_ACCEL = {'mgr': None}
+
+
+def _accel_mgr():
+    """懒加载加速管理器：只在实际用到加速时才 import，不影响启动速度。"""
+    if _ACCEL['mgr'] is None:
+        try:
+            import accel_core
+            base = app.config.get('USER_DATA_FOLDER') or str(project_root)
+            _ACCEL['mgr'] = accel_core.MihomoManager(
+                os.path.join(base, 'accel'))
+        except Exception as e:
+            logging.getLogger('大轩巴入库器mini').warning('加速模块加载失败：%s', e)
+            _ACCEL['mgr'] = None
+    return _ACCEL['mgr']
+
+
+def _accel_guard():
+    m = _accel_mgr()
+    if m is None:
+        return None, jsonify({'success': False, 'message': '加速模块不可用'}), 500
+    return m, None, None
+
+
+@app.route('/api/accel/status', methods=['GET'])
+def accel_status():
+    m, err, code = _accel_guard()
+    if m is None:
+        return err, code
+    st = m.status()
+    try:
+        import accel_core
+        st['system_proxy'] = accel_core.system_proxy_state()
+    except Exception:
+        st['system_proxy'] = {'enabled': False, 'server': ''}
+    return jsonify({'success': True, **st})
+
+
+@app.route('/api/accel/ensure', methods=['POST'])
+def accel_ensure():
+    m, err, code = _accel_guard()
+    if m is None:
+        return err, code
+    return jsonify(m.ensure_core())
+
+
+@app.route('/api/accel/start', methods=['POST'])
+def accel_start():
+    m, err, code = _accel_guard()
+    if m is None:
+        return err, code
+    return jsonify(m.start())
+
+
+@app.route('/api/accel/stop', methods=['POST'])
+def accel_stop():
+    m, err, code = _accel_guard()
+    if m is None:
+        return err, code
+    return jsonify(m.stop())
+
+
+@app.route('/api/accel/sub', methods=['POST'])
+def accel_sub():
+    m, err, code = _accel_guard()
+    if m is None:
+        return err, code
+    data = request.get_json(force=True, silent=True) or {}
+    return jsonify(m.apply_subscription(str(data.get('url') or '')))
+
+
+@app.route('/api/accel/nodes', methods=['GET'])
+def accel_nodes():
+    m, err, code = _accel_guard()
+    if m is None:
+        return err, code
+    return jsonify(m.nodes())
+
+
+@app.route('/api/accel/select', methods=['POST'])
+def accel_select():
+    m, err, code = _accel_guard()
+    if m is None:
+        return err, code
+    data = request.get_json(force=True, silent=True) or {}
+    return jsonify(m.select(str(data.get('name') or '')))
+
+
+@app.route('/api/accel/delay', methods=['POST'])
+def accel_delay():
+    m, err, code = _accel_guard()
+    if m is None:
+        return err, code
+    data = request.get_json(force=True, silent=True) or {}
+    return jsonify(m.delay_test(str(data.get('name') or '')))
+
+
+@app.route('/api/accel/sysproxy', methods=['POST', 'GET'])
+def accel_sysproxy():
+    try:
+        import accel_core
+    except Exception as e:
+        return jsonify({'success': False, 'message': '加速模块不可用：%s' % e}), 500
+    if request.method == 'GET':
+        return jsonify({'success': True, **accel_core.system_proxy_state()})
+    data = request.get_json(force=True, silent=True) or {}
+    return jsonify(accel_core.set_system_proxy(bool(data.get('enable'))))
+
+
+# --------------------------------------------------------------- 完整安装包
+
+@app.route('/accel')
+def accel_page():
+    return render_template('accel.html')
+
+
+def _version_text() -> str:
+    try:
+        import backend as _b
+        return str(_b.CURRENT_VERSION)
+    except Exception:
+        try:
+            import backend
+            return str(backend.CURRENT_VERSION)
+        except Exception:
+            return '2.25'
+
+
+def _installer_source_exe():
+    """主程序 exe：打包产物优先，开发态退回当前解释器。"""
+    for p in (os.path.join(project_root, 'dist_enc', '大轩巴入库器mini.exe'),
+              os.path.join(project_root, 'dist', '大轩巴入库器mini.exe')):
+        if os.path.isfile(p):
+            return p
+    return sys.executable
+
+
+@app.route('/api/installer', methods=['GET'])
+def download_installer():
+    """登录后可取：主应用 + 加速内核 + 说明 打成一个 zip。
+
+    内核 60MB 不进主 exe（否则启动和体积都难看），这里按需拉回来一起打包。
+    """
+    import zipfile
+
+    try:
+        import accel_core
+    except Exception as e:
+        return jsonify({'success': False, 'message': '打包组件缺失：%s' % e}), 500
+
+    base = app.config.get('USER_DATA_FOLDER') or str(project_root)
+    out_dir = os.path.join(base, 'installer')
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception:
+        out_dir = os.path.join(project_root, 'installer')
+        os.makedirs(out_dir, exist_ok=True)
+
+    exe = _installer_source_exe()
+    if not os.path.isfile(exe):
+        return jsonify({'success': False, 'message': '找不到主程序文件'}), 404
+
+    mgr = accel_core.MihomoManager(os.path.join(base, 'accel'))
+    if not mgr.core_exists():
+        r = mgr.ensure_core()
+        if not r.get('ok'):
+            return jsonify({'success': False, 'message': r.get('message', '内核下载失败')}), 500
+
+    out = os.path.join(out_dir, '大轩巴入库器mini-完整包.zip')
+    tmp = out + '.tmp'
+    try:
+        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.write(exe, arcname='大轩巴入库器mini.exe')
+            z.write(mgr.core, arcname='core/大轩巴入库器mini.exe')
+            z.writestr('使用说明.txt', _INSTALLER_README.format(version=_version_text()))
+    except Exception as e:
+        return jsonify({'success': False, 'message': '打包失败：%s' % e}), 500
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+    resp = send_from_directory(out_dir, os.path.basename(out), as_attachment=True)
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+_INSTALLER_README = """大轩巴入库器mini 完整包 v{version}
+========================================
+
+【包含】
+  大轩巴入库器mini.exe           主程序（已加密，双击即用）
+  core/大轩巴入库器mini.exe        加速内核（加速进程显示名同主程序，任务管理器里
+                                  只会看到应用自己，不出现第三方加速程序名）
+
+【安装 / 使用】
+  1. 把整个文件夹放到任意位置，不要只单独拖主程序出来（加速内核在 core/ 里）。
+  2. 双击 大轩巴入库器mini.exe 启动。
+  3. 首次用加速：应用内「加速」页 -> 填订阅链接 -> 启动加速。
+  4. 点「一键加速 Steam」后内核会走 127.0.0.1:{port}，
+     Steam 读系统代理设置即可生效；不用了点「关闭系统代理」。
+
+【注意】
+  - 加速需要订阅链接；没有订阅只能启动内核，规则全走 DIRECT。
+  - 关闭应用时不会替你关掉系统代理，需手动点「关闭系统代理」。
+  - 内核文件是官方原版，不含任何改动。
+""".replace('{port}', '7890')
+
+
 @app.route('/api/shutdown', methods=['POST', 'GET'])
 def shutdown():
     """关闭应用。桌面壳（dxb_desktop）重启/提权后用 GET 打这个口，

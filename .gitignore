@@ -36,3 +36,11 @@ _e2e_steam/
 _encstage_*/
 quarantine/
 _repair_test_steam/
+
+# 加速内核（官方二进制 60MB，应用内按需下载，绝不入库）
+core/
+accel/
+
+# NSIS 安装包构建中间目录与产物
+stage/
+dist_installer/
