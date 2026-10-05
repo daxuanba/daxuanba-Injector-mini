@@ -221,9 +221,25 @@ class DxbWebApp {
         this.elements.unlockBtn.innerHTML = `<span class="material-icons">play_arrow</span> 开始任务`;
     }
 
+    async _fetchWithTimeout(url, options, ms = 30000) {
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(() => ctrl.abort(), ms) : null;
+        try {
+            const opt = ctrl ? Object.assign({}, options || {}, { signal: ctrl.signal }) : options;
+            return await fetch(url, opt);
+        } catch (e) {
+            if (e && e.name === 'AbortError') {
+                throw new Error(`请求超时（>${(ms / 1000) | 0} 秒）`);
+            }
+            throw e;
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+
     async initializeBackend() {
         try {
-            const response = await fetch('/api/initialize', { method: 'POST' });
+            const response = await this._fetchWithTimeout('/api/initialize', { method: 'POST' }, 30000);
             if (!response.ok) throw new Error(`Server responded with ${response.status}`);
             const data = await response.json();
 
@@ -333,7 +349,7 @@ class DxbWebApp {
         try {
             this.elements.toolTypeGroup.innerHTML = '<div class="loading">正在加载清单源...</div>';
 
-            const response = await fetch('/api/sources?fast=1');
+            const response = await this._fetchWithTimeout('/api/sources?fast=1', {}, 30000);
             if (!response.ok) throw new Error(`Server responded with ${response.status}`);
 
             const data = await response.json();

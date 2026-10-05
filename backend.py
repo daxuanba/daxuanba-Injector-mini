@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.26"
+CURRENT_VERSION = "2.27"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -90,8 +90,11 @@ def _login_client():
     """
     global _LOGIN_CLIENT
     if _LOGIN_CLIENT is None or _LOGIN_CLIENT.is_closed:
+        # trust_env=False：登录必须走**本机直连**。
+        # 加速开了系统代理时，走代理会被 Steam 判成异常出口，
+        # 直接回一句「帐户名称或密码错误」，用户以为是自己密码填错（v2.27 复现路径）。
         _LOGIN_CLIENT = httpx.Client(
-            verify=False, timeout=40, follow_redirects=True,
+            verify=False, timeout=40, follow_redirects=True, trust_env=False,
             headers={'User-Agent': STEAM_STORE_UA,
                      'Accept-Language': 'zh-CN,zh;q=0.9',
                      'Referer': 'https://steamcommunity.com/login/'})
@@ -103,6 +106,23 @@ def _login_client():
         except Exception:
             pass
     return _LOGIN_CLIENT
+
+
+def _with_proxy_hint(msg: str) -> str:
+    """登录失败时，额外说明「是不是代理/风控造成的」。
+
+    用户反馈过：账号密码明明是对的，程序却回「密码错误」，
+    真相往往是 Steam 风控限流或代理出口被标记，而不是密码。
+    """
+    text = str(msg or '')
+    try:
+        import accel_core
+        if accel_core.system_proxy_state().get('enabled'):
+            return (text + '（本机系统代理开着，登录已绕过代理直连 Steam；'
+                           '仍失败多半是 Steam 风控/限流，请等几分钟或改用下方手动粘贴会话。）')
+    except Exception:
+        pass
+    return text
 
 
 def _reset_login_client():
@@ -2654,7 +2674,8 @@ class DxbBackend:
             if not msg:
                 msg = '登录失败，请检查用户名密码。'
             _reset_login_client()
-            return {"success": False, "need_email": False, "message": msg[:300]}
+            return {"success": False, "need_email": False,
+                    "message": (_with_proxy_hint(msg))[:400]}
         except Exception as e:
             _LOGIN_CTX.clear()
             _reset_login_client()
@@ -2677,7 +2698,8 @@ class DxbBackend:
         balance, currency = None, ""
         try:
             import httpx as _httpx
-            with _httpx.Client(verify=False, timeout=30, follow_redirects=True) as cli:
+            with _httpx.Client(verify=False, timeout=30, follow_redirects=True,
+                               trust_env=False) as cli:
                 try:
                     pr = cli.get("https://steamcommunity.com/my/profile?json=1", headers=headers)
                     if pr.ok:

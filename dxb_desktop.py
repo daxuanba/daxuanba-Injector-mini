@@ -22,6 +22,7 @@
 import os
 import sys
 import json
+import re
 import time
 import threading
 import socket
@@ -277,6 +278,21 @@ def _register_restart_launchers(mod, url):
         mod.register_app_restart(_relaunch_normal)
 
 
+def _make_in_app_opener(webview_mod):
+    """构造「在应用内新开窗口」的回调，交给 app.py 的 /api/open-external 用。"""
+    def _open(url):
+        if webview_mod is None:
+            return False
+        try:
+            w = webview_mod.create_window(
+                '大轩巴 · 浏览', url, width=1180, height=820, min_size=(900, 600))
+            return w is not None
+        except Exception as e:
+            print('[大轩巴] 应用内新窗口打开失败：', e)
+            return False
+    return _open
+
+
 # ------------------------------------------------------------------ WebView2 运行时
 # WebView2 Runtime 的 EdgeUpdate 客户端 GUID（微软固定值，Evergreen 版）
 WEBVIEW2_CLIENT_GUID = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
@@ -355,20 +371,45 @@ def prompt_install_webview2():
                 pass
 
 
-def apply_accel_to_webview2(rules):
-    """免hosts加速：把「域名→优选IP」映射注入 WebView2 内核解析阶段。
+# 加速内核混合端口（mihomo mixed-port）：开着时内嵌浏览器直连它
+ACCEL_HTTP_PORT = 7890
 
-    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS 是 WebView2 官方支持的环境变量，
-    必须在内核初始化前设置（因此在 create_window 之前调用）。
-    """
-    if not rules:
+
+def port_open(host: str, port: int, timeout: float = 0.4) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            return s.connect_ex((host, port)) == 0
+    except Exception:
         return False
-    arg = f'--host-resolver-rules={rules}'
+
+
+def apply_accel_to_webview2(rules, core_running=False):
+    """免hosts加速 + 网络策略注入 WebView2 内核。
+
+    v2.27 新增：以前只注入 --host-resolver-rules，WebView2 会**继承系统代理**。
+    一旦加速把系统代理打开（或残留开着），页面里的 Google Fonts / socket.io CDN
+    请求会被丢进代理里挂着不返回 —— 渲染停在白/灰屏，看上去就是「应用卡死」。
+    所以这里显式决定内嵌浏览器的上网方式：
+      - 加速在跑 → 直连加速端口，并把 127.0.0.1 排除（本地 API 必须直连）
+      - 没加速   → --no-proxy-system（彻底忽略系统代理）
+    """
+    args = []
+    args.append('--proxy-bypass-list=127.0.0.1;localhost')
+    if core_running:
+        args.append(f'--proxy-server=http://127.0.0.1:{ACCEL_HTTP_PORT}')
+    else:
+        args.append('--no-proxy-server')
+    if rules:
+        args.append(f'--host-resolver-rules={rules}')
+    if not args:
+        return False
     try:
         prev = os.environ.get('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS', '').strip()
-        os.environ['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = (prev + ' ' + arg).strip()
-        n = len(rules.split(',')) - 1
-        print(f'[大轩巴] 免hosts加速已注入 WebView2 内核（{n} 条域名→IP 映射）')
+        os.environ['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = (prev + ' ' + ' '.join(args)).strip()
+        n = len([a for a in args if a.startswith('--host-resolver-rules=')])
+        print(f'[大轩巴] WebView2 网络策略：{"加速端口直连" if core_running else "忽略系统代理"}'
+              f'（{n} 条域名映射）')
         return True
     except Exception as e:
         print('[大轩巴] 注入加速参数失败：', e)
@@ -524,8 +565,58 @@ def _close_main_window():
 # 而且此时 F12/关闭按钮都失灵（用户实际遇到的正是这个）。
 # 修法：拦截离开本地源的导航，一律丢给系统浏览器；主窗口永远只显示本地页面。
 
+# 应用内新窗口的注册入口：页面点外链时优先用它开第二个内嵌窗口，
+# 这样「在应用里打开浏览器」成立，又不会顶掉主窗口。
+_IN_APP_OPENER = {'fn': None}
+
+
+def register_in_app_opener(fn):
+    _IN_APP_OPENER['fn'] = fn if callable(fn) else None
+
+
+def _open_in_app(url):
+    """在应用内开新窗口显示外部网页；内核起不来时回退系统浏览器。"""
+    u = str(url or '').strip()
+    if not u:
+        return False
+    opener = _IN_APP_OPENER.get('fn')
+    if opener is not None:
+        try:
+            if opener(u):
+                return True
+        except Exception as e:
+            print('[大轩巴] 应用内新窗口打开失败：', e)
+    return _open_in_system(u)
+
+
+def _open_in_system(url):
+    u = str(url or '').strip()
+    if not u:
+        return False
+    try:
+        if hasattr(os, 'startfile'):
+            os.startfile(u)
+        else:
+            webbrowser.open(u)
+        print('[大轩巴] 外链已交给系统浏览器：', u[:120])
+        return True
+    except Exception as e:
+        print('[大轩巴] 打开外链失败：', e)
+        return False
+
+
+def _is_absolute_http(url):
+    return bool(re.match(r'^(https?:)?//', str(url or '').strip(), re.I))
+
+
 def _install_external_link_guard(win, local_prefixes):
-    """把非本地 URL 的导航/新窗口请求全部改为「用系统浏览器打开」。"""
+    """导航守卫（v2.27 重写）。
+
+    原则：**站内一律放行**，只处理真正的外部目标。
+    - 绝对 http(s) 外链 → 在应用内新开一个 WebView2 窗口（主窗口不动）
+    - 非 http(s) 协议（steam://、mailto:）→ 交给系统默认程序
+    - 站内 / 相对路径 / # 锚点 → 完全不拦，交给 WebView2 正常渲染
+    """
     if win is None:
         return
 
@@ -533,29 +624,13 @@ def _install_external_link_guard(win, local_prefixes):
         u = str(url or '').strip().lower()
         if not u:
             return True
-        if u.startswith(('about:', 'data:', 'blob:', 'javascript:', 'file:')):
+        if u.startswith(('about:', 'data:', 'blob:', 'javascript:', 'file:', 'view-source:')):
             return True
         for p in local_prefixes:
             if u.startswith(p):
                 return True
         return False
 
-    def _open_external(url):
-        u = str(url or '').strip()
-        if not u or _is_local(u):
-            return
-        try:
-            if hasattr(os, 'startfile'):
-                os.startfile(u)
-            else:
-                import webbrowser
-                webbrowser.open(u)
-            print('[大轩巴] 外链已交给系统浏览器：', u[:120])
-        except Exception as e:
-            print('[大轩巴] 打开外链失败：', e)
-
-    # 1) 拦 NewWindowRequested：target=_blank / window.open 的落点
-    # 2) 拦 NavigationStarting：地址栏跳转、<a target> 回退导航
     try:
         native = getattr(win, 'native', None)
         chrome = getattr(native, 'browser', None)
@@ -567,13 +642,23 @@ def _install_external_link_guard(win, local_prefixes):
 
     def on_new_window(sender, args):
         try:
+            uri = str(args.Uri)
+        except Exception:
+            return
+        try:
             args.set_Cancel(True)
         except Exception:
             try:
                 args.Cancel = True
             except Exception:
                 pass
-        _open_external(str(args.Uri))
+        # 站内交给 WebView2 自己开（多标签），外链开新窗口，非 http 协议交系统程序
+        if _is_local(uri):
+            return
+        if _is_absolute_http(uri):
+            _open_in_app(uri)
+        else:
+            _open_in_system(uri)
 
     def on_navigation_starting(sender, args):
         try:
@@ -589,7 +674,11 @@ def _install_external_link_guard(win, local_prefixes):
                 args.Cancel = True
             except Exception:
                 return
-        _open_external(uri)
+        # 外链：应用内新窗口；非 http 协议：系统程序
+        if _is_absolute_http(uri):
+            _open_in_app(uri)
+        else:
+            _open_in_system(uri)
 
     try:
         core.NewWindowRequested += on_new_window
@@ -600,44 +689,48 @@ def _install_external_link_guard(win, local_prefixes):
     except Exception as e:
         print('[大轩巴] NavigationStarting 拦截失败：', e)
 
-    # 页面里的 window.open 也直接改写掉，双保险（注入在所有 frame）
+    # 页面注入：与 external-link.js 同一套判据（只拦绝对 http(s)）
     try:
         js = """
         (function () {
           if (window.__dxgInstalled) { return; }
           window.__dxgInstalled = true;
+          const absHttp = (u) => /^(https?:)?\\/\\//i.test(String(u || '').trim());
           const origOpen = window.open;
           window.open = function (url, target, features) {
             try {
-              if (url && String(url).indexOf('127.0.0.1') === -1) {
+              if (url && absHttp(String(url).indexOf('://') > -1 ? String(url) : url)) {
+                const inApp = (target !== '_self' && target !== '_top');
                 fetch('/api/open-external', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ url: String(url) })
+                  body: JSON.stringify({ url: String(url), in_app: inApp })
                 });
                 return null;
               }
             } catch (e) {}
             return origOpen.apply(window, arguments);
           };
+          document.documentElement.setAttribute('data-dxb-linkguard', '1');
           document.addEventListener('click', function (ev) {
             const a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
             if (!a) { return; }
-            const href = a.getAttribute('href') || '';
-            if (href && href.indexOf('127.0.0.1') === -1 &&
-                !href.startsWith('#') && !href.startsWith('javascript:')) {
-              ev.preventDefault();
-              fetch('/api/open-external', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: href })
-              });
-            }
+            const href = (a.getAttribute('href') || '').trim();
+            if (!href || href.charAt(0) === '#') { return; }
+            if (href.indexOf('javascript:') === 0 || href.indexOf('mailto:') === 0) { return; }
+            if (!absHttp(href)) { return; }
+            ev.preventDefault();
+            const d = a.dataset || {};
+            fetch('/api/open-external', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url: href, in_app: (d.external !== 'browser') })
+            });
           }, true);
         })();
         """
         win.load_js(js)
-        print('[大轩巴] 外链拦截已启用（外链走系统浏览器）。')
+        print('[大轩巴] 外链守卫已启用（站内放行 / 外链应用内新窗口）。')
     except Exception as e:
         print('[大轩巴] 注入外链拦截脚本失败：', e)
 
@@ -737,13 +830,22 @@ def main():
         _message_box(f'内部服务加载失败：\n{e}', '大轩巴入库器mini · 启动失败', 0x10)
         return
 
-    # 免hosts加速：必须在 WebView2 内核初始化前设置环境变量
-    apply_accel_to_webview2(load_accel_rules())
+    # 免hosts加速 + 网络策略：必须在 WebView2 内核初始化前设置环境变量
+    apply_accel_to_webview2(load_accel_rules(),
+                            core_running=port_open('127.0.0.1', ACCEL_HTTP_PORT))
 
     server_thread = threading.Thread(target=start_flask_server, args=(port, mod), daemon=True)
     server_thread.start()
 
     _register_restart_launchers(mod, url)
+
+    # 应用内新窗口：点外链时在本程序里开第二个 WebView2 窗口（不跳系统浏览器）
+    try:
+        if hasattr(mod, 'register_in_app_opener'):
+            mod.register_in_app_opener(_make_in_app_opener(webview))
+            print('[大轩巴] 应用内新窗口已注册（外链在本程序内打开）。')
+    except Exception as e:
+        print('[大轩巴] 注册应用内窗口失败：', e)
 
     print(f'[大轩巴] 本地服务地址：{url}')
     wait_server_ready(url)
@@ -826,10 +928,36 @@ def main():
         _install_external_link_guard(win, [url.lower() + '/', url.lower()])
         _enable_f12_devtools(win)
 
+    loaded_flag = {'ok': False}
+
+    def _on_loaded():
+        loaded_flag['ok'] = True
+        threading.Thread(target=_after_load, daemon=True).start()
+
     try:
-        win.events.loaded += lambda: threading.Thread(target=_after_load, daemon=True).start()
+        win.events.loaded += _on_loaded
     except Exception as e:
         print('[大轩巴] 绑定窗口加载事件失败：', e)
+
+    def _warn_if_stuck():
+        """窗口一直没渲染出来时给个可见提示（windowed 打包没控制台，光靠日志用户看不到）。"""
+        for _ in range(90):
+            if loaded_flag['ok']:
+                return
+            time.sleep(1)
+        try:
+            _message_box(
+                '界面 90 秒还没加载出来。\n\n'
+                '常见原因：\n'
+                '1) 杀毒/防火墙拦了本程序的本地服务；\n'
+                '2) 系统代理开着且有代理规则拦了 127.0.0.1（关闭系统代理再试）；\n'
+                '3) 安装目录不可写。\n\n'
+                '请到 设置 → 关于 点「打开日志」看 dxb_run.log 末几行。',
+                '大轩巴入库器mini · 界面未响应', 0x10)
+        except Exception:
+            pass
+
+    threading.Thread(target=_warn_if_stuck, daemon=True).start()
 
     print('[大轩巴] 使用内嵌 WebView2 窗口打开界面。')
     webview.start(

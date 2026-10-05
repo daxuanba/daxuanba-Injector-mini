@@ -144,17 +144,28 @@ STEAM_LOGIN = {
 }
 _steam_login_launcher = None
 _external_link_opener = None
+_in_app_opener = None
 _devtools_opener = None
 
 
 def register_external_link_opener(fn):
     """由桌面壳注入：把外链交给系统浏览器打开。
 
-    必须走这条路 —— WebView2 里 window.open / target=_blank 会直接导航主窗口，
+    WebView2 里 window.open / target=_blank 会直接导航主窗口，
     主窗口被替换成 Steam 商店页后，路由和标签栏全丢，表现为「卡死、F12 不灵、关不掉」。
     """
     global _external_link_opener
     _external_link_opener = fn if callable(fn) else None
+
+
+def register_in_app_opener(fn):
+    """由桌面壳注入：在**应用内**新开一个内嵌窗口显示外部网页。
+
+    有这个（优先用），点外链就是「在应用里开浏览器」；
+    没有就退回系统浏览器。绝不允许外链把主窗口顶掉。
+    """
+    global _in_app_opener
+    _in_app_opener = fn if callable(fn) else None
 
 
 def register_devtools_opener(fn):
@@ -1632,12 +1643,26 @@ def open_external():
     url = str(data.get('url') or '').strip()
     if not url.lower().startswith(('http://', 'https://')):
         return jsonify({"success": False, "message": "只允许打开 http/https 链接。"}), 400
+    mode = 'system'
+    if data.get('in_app') and _in_app_opener is not None:
+        try:
+            if _in_app_opener(url):
+                mode = 'in_app'
+            else:
+                mode = 'system'
+        except Exception as e:
+            logging.getLogger('大轩巴入库器mini').warning('应用内窗口打开失败：%s', e)
+            mode = 'system'
+    else:
+        mode = 'system'
     try:
-        if _external_link_opener is not None:
+        if mode == 'in_app':
+            ok = True
+        elif _external_link_opener is not None:
             ok = bool(_external_link_opener(url))
         else:
             ok = bool(os.startfile(url)) if hasattr(os, 'startfile') else bool(webbrowser.open(url))
-        return jsonify({"success": ok, "url": url})
+        return jsonify({"success": ok, "url": url, "mode": mode})
     except Exception as e:
         return jsonify({"success": False, "message": f"打开链接失败: {e}"}), 500
 
@@ -2186,6 +2211,18 @@ def shutdown():
     """关闭应用。桌面壳（dxb_desktop）重启/提权后用 GET 打这个口，
     以前只允许 POST → 405 → 旧实例不退出 → 出现「一个主窗口一个后台窗口」。"""
     print("接收到 HTTP 关闭请求，正在准备关闭服务器...")
+
+    def stop_accel_quietly():
+        """退出前把加速收拾干净，不留「自己偷偷在跑」的加速进程和系统代理。"""
+        try:
+            m = _accel_mgr()
+            if m is not None and m.status().get('running'):
+                m.stop()
+                print('关闭应用：加速内核已停止。')
+        except Exception as e:
+            print('关闭应用：清理加速失败：', e)
+
+    threading.Thread(target=stop_accel_quietly, daemon=True).start()
 
     def kill_process():
         try:
