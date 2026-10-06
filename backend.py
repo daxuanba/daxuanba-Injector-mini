@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.31"
+CURRENT_VERSION = "2.32"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -81,31 +81,106 @@ STEAM_STORE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 _LOGIN_CTX = {}
 _LOGIN_CLIENT = None
 
+#: 登录各阶段超时（秒）。v2.32 之前一律 40s，直连打不开 Steam 登录口时
+#: 用户点「下一步」要干等 40~80 秒没有下文（界面看着就是「卡死」），这里全部收紧。
+_LOGIN_TIMEOUT_PRE = 8.0     # 预访问登录页拿 sessionid
+_LOGIN_TIMEOUT_RSA = 10.0    # 取 RSA 公钥
+_LOGIN_TIMEOUT_LOGIN = 15.0  # 提交用户名密码（dologin）
+_LOGIN_PROXY_URL = 'http://127.0.0.1:7890'
 
-def _login_client():
+#: direct = 本机直连；proxy = 走本机加速代理。
+_LOGIN_CLIENTS = {'direct': None, 'proxy': None}
+#: 当前登录用的那条路（None = 还没定，第一次请求时按加速端口在不在决定）
+_LOGIN_MODE = None
+#: 预访问只做一次，别每次点登录都白等 8 秒
+_LOGIN_PREWARMED = {'direct': False, 'proxy': False}
+
+
+def _accel_port_alive(port: int = 7890) -> bool:
+    """本机加速内核在不在（7890 端口能不能连上）。"""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.6)
+    try:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+    except Exception:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _login_mode():
+    """登录走哪条路。
+
+    开着加速 → 必须走代理，否则直连 steamcommunity.com 基本打不开（超时）；
+    没开加速 → 只能直连，走盲代理也是白等。
+    两条路都能试，超时的那次由 steam_web_login 自动换另一条重试。
+    """
+    global _LOGIN_MODE
+    if _LOGIN_MODE in ('direct', 'proxy'):
+        return _LOGIN_MODE
+    _LOGIN_MODE = 'proxy' if _accel_port_alive(7890) else 'direct'
+    return _LOGIN_MODE
+
+
+def _login_other_mode():
+    return 'direct' if _login_mode() == 'proxy' else 'proxy'
+
+
+def _login_client(mode: str = None):
     """两步登录必须复用同一个 HTTP 会话。
 
     rsatimestamp / rsakey_hash / sessionid 三者互相绑定，
     每次请求新建 client 会让第二步必然失败。
+
+    trust_env=False 是铁律（加速开着时系统代理的出口会被 Steam 风控判
+    「密码错误」）；要复用代理得显式给 proxy=，不能让它吃系统代理。
     """
     global _LOGIN_CLIENT
-    if _LOGIN_CLIENT is None or _LOGIN_CLIENT.is_closed:
-        # trust_env=False：登录必须走**本机直连**。
-        # 加速开了系统代理时，走代理会被 Steam 判成异常出口，
-        # 直接回一句「帐户名称或密码错误」，用户以为是自己密码填错（v2.27 复现路径）。
-        _LOGIN_CLIENT = httpx.Client(
-            verify=False, timeout=40, follow_redirects=True, trust_env=False,
+    mode = mode or _login_mode()
+    cli = _LOGIN_CLIENTS.get(mode)
+    if cli is None or cli.is_closed:
+        cli = httpx.Client(
+            timeout=_LOGIN_TIMEOUT_RSA, verify=False, follow_redirects=True,
+            trust_env=False,
+            proxy=(_LOGIN_PROXY_URL if mode == 'proxy' else None),
             headers={'User-Agent': STEAM_STORE_UA,
                      'Accept-Language': 'zh-CN,zh;q=0.9',
                      'Referer': 'https://steamcommunity.com/login/'})
-        # 先访问登录页拿 sessionid / steamCountry，
-        # 缺这一步直接打 dologin 容易被 429 限流。
+        _LOGIN_CLIENTS[mode] = cli
+    _LOGIN_CLIENT = cli
+    # 先访问登录页拿 sessionid / steamCountry，
+    # 缺这一步直接打 dologin 容易被 429 限流。
+    if not _LOGIN_PREWARMED.get(mode):
+        _LOGIN_PREWARMED[mode] = True
         try:
-            _LOGIN_CLIENT.get(
-                'https://steamcommunity.com/login/?goto=https%3A%2F%2Fsteamcommunity.com%2F')
+            cli.get('https://steamcommunity.com/login/?goto='
+                    'https%3A%2F%2Fsteamcommunity.com%2F',
+                    timeout=_LOGIN_TIMEOUT_PRE)
         except Exception:
             pass
-    return _LOGIN_CLIENT
+    return cli
+
+
+def _login_net_hint(last_err: str = '') -> str:
+    """登录接口连不上/超时时的文案（v2.32）。
+
+    旧版直接把 httpx 的超时异常抛给用户，界面上就一句干巴巴的
+    「登录请求发送失败: timeout」，用户完全不知道是该开加速还是密码错了。
+    """
+    msg = str(last_err or '连不上 Steam 登录服务')
+    if 'proxy' in msg or _accel_port_alive(7890):
+        head = ("Steam 登录接口（steamcommunity.com）响应超时，两条路都没通："
+                "本机直连打不开，加速代理也不通。")
+    else:
+        head = ("Steam 登录接口（steamcommunity.com）响应超时：这台机器直连打不开 Steam 社区，"
+                "而本机加速没在跑。")
+    tail = ("请先在「工具箱 → 网络加速」开启加速，或改用下方「手动粘贴会话」入口 "
+            "（登录 Steam 网站后把浏览器里的 steamLoginSecure 粘进来）。")
+    return f"{head}（{msg[:120]}）{tail}"
 
 
 def _with_proxy_hint(msg: str) -> str:
@@ -133,6 +208,15 @@ def _reset_login_client():
     except Exception:
         pass
     _LOGIN_CLIENT = None
+    for _m, _c in list(_LOGIN_CLIENTS.items()):
+        try:
+            if _c is not None and not _c.is_closed:
+                _c.close()
+        except Exception:
+            pass
+        _LOGIN_CLIENTS[_m] = None
+    _LOGIN_PREWARMED['direct'] = False
+    _LOGIN_PREWARMED['proxy'] = False
 
 
 def rsa_encrypt_pubkey(pub_mod_hex: str, pub_exp_hex: str, password: str) -> str:
@@ -2620,22 +2704,27 @@ class DxbBackend:
             if not challenge:
                 # 清掉上一轮的残留上下文，避免串号
                 _LOGIN_CTX.clear()
-                try:
-                    r = cli.get("https://steamcommunity.com/login/getrsakey/",
-                                params={'username': username})
-                except Exception as e:
-                    _reset_login_client()
-                    return {"success": False, "need_email": False,
-                            "message": f"连不上 Steam 登录服务：{self.stack_error(e)[:160]}"}
-                rj = self._json_response(r)
+                rj = None
+                last_err = ''
+                for mode in (_login_mode(), _login_other_mode()):
+                    try:
+                        r = _login_client(mode).get(
+                            "https://steamcommunity.com/login/getrsakey/",
+                            params={'username': username},
+                            timeout=_LOGIN_TIMEOUT_RSA)
+                        rj = self._json_response(r)
+                        break
+                    except Exception as e:
+                        last_err = f"[{mode}] {self.stack_error(e)[:120]}"
+                        continue
                 if rj is None:
                     _reset_login_client()
                     return {"success": False, "need_email": False,
-                            "message": "Steam 登录接口异常（非 JSON），请稍后重试或改用手动粘贴会话。"}
+                            "message": _login_net_hint(last_err)}
                 if not rj.get('success'):
                     _reset_login_client()
                     return {"success": False, "need_email": False,
-                            "message": "Steam 公钥获取失败：用户名不存在或被 Steam 风控拦截，请稍后重试。"}
+                            "message": "Steam 登录接口异常（非 JSON），请稍后重试或改用手动粘贴会话。"}
                 _LOGIN_CTX.update({
                     'username': username, 'password': password,
                     'mod': rj.get('publickey_mod') or '',
@@ -2665,16 +2754,26 @@ class DxbBackend:
                 'email_code': (email_code or '').strip(),
                 'login_friendly_name': '', 'darkmode': '1',
             }
-            try:
-                r = cli.post("https://steamcommunity.com/login/dologin/", data=data,
-                             headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                                      'X-Requested-With': 'XMLHttpRequest',
-                                      'Origin': 'https://steamcommunity.com',
-                                      'Referer': 'https://steamcommunity.com/login/'})
-            except Exception as e:
+            _r = None
+            _last_err = ''
+            for mode in (_login_mode(), _login_other_mode()):
+                try:
+                    _r = _login_client(mode).post(
+                        "https://steamcommunity.com/login/dologin/", data=data,
+                        headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                                 'X-Requested-With': 'XMLHttpRequest',
+                                 'Origin': 'https://steamcommunity.com',
+                                 'Referer': 'https://steamcommunity.com/login/'},
+                        timeout=_LOGIN_TIMEOUT_LOGIN)
+                    break
+                except Exception as e:
+                    _last_err = f"[{mode}] {self.stack_error(e)[:120]}"
+                    continue
+            r = _r
+            if r is None:
                 _reset_login_client()
                 return {"success": False, "need_email": False,
-                        "message": f"登录请求发送失败：{self.stack_error(e)[:160]}"}
+                        "message": _login_net_hint(_last_err)}
 
             # 429 = 触发频率限制（body 是 JSON null），必须单独识别，
             # 否则会被当成「密码错误」把用户带偏。

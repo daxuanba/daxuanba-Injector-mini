@@ -1331,13 +1331,28 @@ IMG_GATE = threading.Semaphore(4)
 
 
 def _gate_run(fn):
-    """带慢日志地跑一次取图（并发闸门 + 超过 3 秒记 WARNING）。"""
-    with IMG_GATE:
-        t0 = time.time()
-        try:
-            data = fn()
-        except Exception:
-            data = None
+    """带慢日志地跑一次取图（并发闸门 + 超过 3 秒记 WARNING）。
+
+    闸门等待也限时（8 秒）：一页 20 张封面同时打过来，前面几张慢的话
+    后面会排成长队，把 Flask 请求线程全占住 —— 之后连登录请求都得排队，
+    界面看着就是「点了没反应」。等不到就放弃限流直接取，宁可并发高点。
+    """
+    _got = False
+    try:
+        _got = IMG_GATE.acquire(timeout=8)
+    except Exception:
+        _got = True
+    t0 = time.time()
+    try:
+        data = fn()
+    except Exception:
+        data = None
+    finally:
+        if _got:
+            try:
+                IMG_GATE.release()
+            except Exception:
+                pass
     cost = time.time() - t0
     if cost > 3.0:
         logging.getLogger(' 大轩巴入库器mini').warning(

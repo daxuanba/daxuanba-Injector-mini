@@ -60,6 +60,16 @@ class FreeGamesApp {
     }
 
     initialize() {
+        // 任何一个 DOM 节点缺失都别把整页 JS 带走：一旦 initialize 中途抛异常，
+        // 页面就停在静态 HTML 那一帧（卡片区全空、没有 loading、没有任何报错），
+        // 用户看到的就是「啥都没有还卡死」。先补一层空壳，保证事件能继续绑。
+        ['searchBtn', 'search', 'refreshBtn', 'prevPageBtn', 'nextPageBtn', 'injectPageBtn',
+            'injectAllBtn', 'logoutBtn', 'loginNextBtn', 'loginBackBtn', 'loginCancelBtn',
+            'snackbarClose', 'cookieSubmitBtn', 'manualToggleBtn', 'logClear'].forEach(k => {
+                if (!this.elements[k]) {
+                    this.elements[k] = { addEventListener() { }, style: {}, value: '', textContent: '' };
+                }
+            });
         this.elements.searchBtn.addEventListener('click', () => { this.page = 1; this.fetchGames(this.elements.search.value.trim()); });
         this.elements.search.addEventListener('keydown', e => { if (e.key === 'Enter') { this.page = 1; this.fetchGames(this.elements.search.value.trim()); } });
         this.elements.refreshBtn.addEventListener('click', () => { this.page = 1; this.fetchGames(this.elements.search.value.trim()); });
@@ -77,6 +87,12 @@ class FreeGamesApp {
         if (this.elements.loginModal) {
             this.elements.loginModal.addEventListener('mousedown', e => {
                 if (e.target === this.elements.loginModal) this.closeLoginModal();
+            });
+            // 遮罩把整个界面盖住了，Esc 必须能退出来，不然用户只能当界面卡死
+            document.addEventListener('keydown', e => {
+                if (e.key === 'Escape' && this.elements.loginModal.style.display !== 'none') {
+                    this.closeLoginModal();
+                }
             });
         }
         if (this.elements.loginCode) {
@@ -115,14 +131,25 @@ class FreeGamesApp {
     }
 
 
+    /** 通用带超时取 JSON，页面里所有读接口都别再裸 fetch 了。 */
+    async _getJson(url, ms) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), ms);
+        try {
+            const r = await fetch(url, { signal: ctrl.signal });
+            return await r.json();
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
     async currentCookie() {
         if (this.elements.cookieInput && (this.elements.cookieInput.value || '').trim()) {
             return this.elements.cookieInput.value.trim();
         }
         try {
-            const r = await fetch('/api/config/detailed');
-            if (r.ok) {
-                const d = await r.json();
+            const d = await this._getJson('/api/config/detailed', 10000);
+            if (d) {
                 const c = d.config && d.config.steam_cookie;
                 if (c) return (c || '').trim();
             }
@@ -138,10 +165,12 @@ class FreeGamesApp {
             this.sessionReady = false;
             return false;
         }
+        const _sc = new AbortController();
+        const _st = setTimeout(() => _sc.abort(), 15000);
         try {
             const r = await fetch('/api/free/session', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cookie })
+                body: JSON.stringify({ cookie }), signal: _sc.signal
             });
             const d = await r.json();
             if (d && d.success && d.session_ok) {
@@ -156,8 +185,11 @@ class FreeGamesApp {
             return false;
         } catch (e) {
             this.sessionReady = false;
-            this.applyNoSession(`连接失败: ${e.message}`);
+            this.applyNoSession(`会话校验失败: ${(e && e.name === 'AbortError')
+                ? '接口超过 15 秒没响应（开加速再试）' : (e && e.message) || e}`);
             return false;
+        } finally {
+            clearTimeout(_st);
         }
     }
 
@@ -234,6 +266,31 @@ class FreeGamesApp {
         return this.doLoginStep2();
     }
 
+    /** 登录接口必须带硬超时：后端再快，网络一挂也会让人点「下一步」后干等，
+        界面看着跟死了似的（v2.32）。超时直接把原因说清楚，别只丢一句 timeout。 */
+    async _postLogin(url, body, ms) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), ms);
+        try {
+            const r = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                signal: ctrl.signal
+            });
+            return await r.json();
+        } catch (e) {
+            if (e && e.name === 'AbortError') {
+                throw new Error(`登录接口 ${ms / 1000} 秒没响应：Steam 社区接口打不开，` +
+                    `多半是没开网络加速（去「工具箱 → 网络加速」开一下），` +
+                    `或者改用下方「手动粘贴会话」。`);
+            }
+            throw e;
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
     async doLoginStep1() {
         const user = (this.elements.loginUser.value || '').trim();
         const pass = this.elements.loginPass.value || '';
@@ -241,14 +298,11 @@ class FreeGamesApp {
             this.showLoginError(1, '请输入用户名和密码。');
             return;
         }
-        this.showLoginError(1, '正在登录 Steam…');
+        this.showLoginError(1, '正在登录 Steam…（网络慢最多等 25 秒；没开加速的话多半会超时）');
         if (this.elements.loginNextBtn) this.elements.loginNextBtn.disabled = true;
         try {
-            const r = await fetch('/api/free/login/start', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: user, password: pass })
-            });
-            const d = await r.json();
+            const d = await this._postLogin('/api/free/login/start',
+                { username: user, password: pass }, 25000);
             if (d && d.success) {
                 this.showLoginError(1, '');
                 this.log('success', '用户名密码已通过，等待邮箱验证码。');
@@ -298,11 +352,8 @@ class FreeGamesApp {
         this.showLoginError(2, '正在校验验证码…');
         if (this.elements.loginNextBtn) this.elements.loginNextBtn.disabled = true;
         try {
-            const r = await fetch('/api/free/login/finish', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ code, challenge: this.loginChallenge })
-            });
-            const d = await r.json();
+            const d = await this._postLogin('/api/free/login/finish',
+                { code, challenge: this.loginChallenge }, 25000);
             if (d && d.success) {
                 if (d.session && d.session.success) {
                     this.sessionReady = true;
@@ -380,7 +431,10 @@ class FreeGamesApp {
         const bar = document.getElementById('accountBar');
         if (bar) bar.style.backgroundImage = '';
         try {
-            await fetch('/api/free/logout', { method: 'POST' });
+            const _lc = new AbortController();
+            const _lt = setTimeout(() => _lc.abort(), 8000);
+            await fetch('/api/free/logout', { method: 'POST', signal: _lc.signal });
+            clearTimeout(_lt);
         } catch (e) { /* ignore */ }
         this.showSnackbar('已断开 Steam 官方会话，下次需要重新登录。', 'info');
     }
@@ -389,18 +443,29 @@ class FreeGamesApp {
     async fetchGames(query) {
         this.elements.loading.style.display = 'flex';
         this.elements.noResults.style.display = 'none';
+        // 必须带超时：Steam 搜索接口一慢，裸 fetch 会一直挂着，
+        // loading 转圈 + 下面一片空白 → 用户看到的就是「啥都没有」（v2.32）
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 20000);
         try {
             const url = '/api/free/games' + (query ? `?q=${encodeURIComponent(query)}` : '');
-            const resp = await fetch(url);
+            const resp = await fetch(url, { signal: ctrl.signal });
             const d = await resp.json();
             this.games = (d.success && d.games) ? d.games : [];
             if (!d.success) this.showSnackbar(d.message || '获取失败', 'error');
             this.renderGames();
         } catch (e) {
-            this.showSnackbar(`获取失败: ${e.message}`, 'error');
             this.games = [];
             this.renderGames();
+            const why = (e && e.name === 'AbortError')
+                ? '免费游戏列表加载超时（超过 20 秒）：Steam 搜索接口打不开，'
+                  + '请先在「工具箱 → 网络加速」开启加速，再点刷新重试。'
+                : `获取失败: ${(e && e.message) || e}`;
+            this.elements.noResults.textContent = why;
+            this.elements.noResults.style.display = 'block';
+            this.showSnackbar(why, 'error');
         } finally {
+            clearTimeout(timer);
             this.elements.loading.style.display = 'none';
         }
     }
@@ -425,7 +490,7 @@ class FreeGamesApp {
             <div class="game-card free-card" data-appid="${g.appid}">
                 <div class="game-card-header">
                     <img src="/api/steam/img/${g.appid}" alt="${g.name}" loading="lazy" referrerpolicy="no-referrer"
-                         onerror="this.style.display='none'">
+                         onerror="this.parentNode.classList.add('img-missing');this.remove()">
                 </div>
                 <div class="game-card-body">
                     <span class="game-title" title="${g.name}">${g.name}</span>
@@ -476,10 +541,13 @@ class FreeGamesApp {
     async install(appid, name) {
         this.log('info', `请求 Steam 安装 ${name || appid}（AppID ${appid}）…`);
         try {
+            const _xc = new AbortController();
+            const _xt = setTimeout(() => _xc.abort(), 15000);
             const r = await fetch('/api/steam/launch', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'install', appid })
+                body: JSON.stringify({ action: 'install', appid }), signal: _xc.signal
             });
+            clearTimeout(_xt);
             const d = await r.json();
             if (d.success) {
                 this.showSnackbar(`已请求 Steam 安装 ${name || appid}，请在 Steam 客户端确认。`, 'success');
@@ -515,11 +583,15 @@ class FreeGamesApp {
         this.showSnackbar(`正在通过 Steam 官方接口入库 ${appids.length} 个游戏...`, 'info');
         this.log('info', `开始通过官方接口入库 ${appids.length} 个游戏：${appids.slice(0, 20).join(', ')}${appids.length > 20 ? ' …' : ''}`);
         try {
+            const _ic = new AbortController();
+            const _it = setTimeout(() => _ic.abort(), 30000);
             const resp = await fetch('/api/free/inject', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ appids, names, cookie: this.cookie || '' })
+                body: JSON.stringify({ appids, names, cookie: this.cookie || '' }),
+                signal: _ic.signal
             });
+            clearTimeout(_it);
             const d = await resp.json();
             if (d.success) {
                 const msg = `已通过 Steam 官方接口写入 ${d.injected} 个到你的账号库`
@@ -560,4 +632,42 @@ class FreeGamesApp {
     hideSnackbar() { this.elements.snackbar.classList.remove('show'); }
 }
 
-document.addEventListener('DOMContentLoaded', () => { new FreeGamesApp(); });
+/** 页面脚本挂了必须有看得见的反馈，不能再留给用户「一片空白 + 卡死」。 */
+function dxbShowBootError(msg) {
+    let bar = document.getElementById('dxbBootErrBar');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'dxbBootErrBar';
+        bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;'
+            + 'background:#b3261e;color:#fff;padding:10px 14px;font-size:13px;line-height:1.6;'
+            + 'font-family:system-ui,"Microsoft YaHei",sans-serif;';
+        document.body.appendChild(bar);
+    }
+    bar.textContent = '页面脚本出错了：' + msg
+        + '（列表可能加载不出来，可先点刷新重试；反复出现请到「关于」反馈。）';
+}
+
+window.addEventListener('error', e => {
+    try { dxbShowBootError((e && e.message) || 'unknown'); } catch (_) { /* ignore */ }
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+    try {
+        window.__dxbFree = new FreeGamesApp();
+    } catch (err) {
+        try { console.error(err); } catch (_) { /* ignore */ }
+        dxbShowBootError((err && err.message) || String(err));
+    }
+    // 兜底：8 秒后列表还是空的、又没在转圈，说明静默失败了，自动补一次
+    setTimeout(() => {
+        try {
+            const grid = document.getElementById('freeGrid');
+            const loading = document.getElementById('freeLoading');
+            const app = window.__dxbFree;
+            if (!app || !grid || grid.children.length) return;
+            if (loading && loading.style.display !== 'none') return;
+            dxbShowBootError('免费游戏列表没能渲染出来，正在自动重试…');
+            app.fetchGames('');
+        } catch (e) { /* ignore */ }
+    }, 8000);
+});
