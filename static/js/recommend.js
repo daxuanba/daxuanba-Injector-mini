@@ -44,7 +44,11 @@ class RecommendApp {
         this.elements.loading.style.display = 'flex';
         this.elements.noResults.style.display = 'none';
         try {
-            const resp = await fetch('/api/recommend');
+            // v2.30：加硬超时。以前 fetch 挂着不回就一直转圈，看上去就是「卡死」。
+            const resp = await Promise.race([
+                fetch('/api/recommend'),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('请求超时（15 秒）')), 15000)),
+            ]);
             const d = await resp.json();
             if (d.success && d.sections && d.sections.length) {
                 this.render(d.sections);

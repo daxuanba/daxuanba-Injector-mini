@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.29"
+CURRENT_VERSION = "2.30"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -2273,7 +2273,8 @@ class DxbBackend:
         seen = set()
         try:
             import httpx as _httpx
-            with _httpx.Client(verify=False, timeout=30) as cli:
+            # v2.30：trust_env=False，免费游戏列表直连（不吃系统代理）
+            with _httpx.Client(verify=False, timeout=20, trust_env=False) as cli:
                 start = 0
                 while len(games) < max_items:
                     params = {'query': query, 'start': start, 'count': 50,
@@ -2306,14 +2307,30 @@ class DxbBackend:
             self.log.error(f"获取免费游戏失败: {self.stack_error(e)}")
             return {"success": False, "message": f"获取免费游戏失败: {e}", "games": [], "total": 0}
 
+    #: 推荐数据缓存（秒）。进推荐页就拉一次 featuredcategories 太浪费，
+    #: 而且网络一挂就会把整个界面拖住 —— 缓存 + 直连（不吃系统代理）。
+    _FEATURED_CACHE_TTL = 600
+    _FEATURED_CACHE: Dict = {}
+
     def featured_games(self) -> Dict:
-        """游戏推荐页数据：特惠 / 热销 / 新品 / 即将推出（Steam 官方 featuredcategories）。"""
+        """游戏推荐页数据：特惠 / 热销 / 新品 / 即将推出（Steam 官方 featuredcategories）。
+
+        v2.30：三处关键改动
+          1) trust_env=False —— 应用自己取商店数据必须**直连**，绝不进加速/系统代理。
+             之前走系统代理，代理一拦，这个请求能把界面拖到「未响应」。
+          2) 超时 25s -> 10s，并且先吃 10 分钟内存缓存，避免每次进页面都干等。
+          3) 缓存命中直接返回，网络失败时把上一次的好数据交出去（总比空页面强）。
+        """
+        now = time.time()
+        cached = DxbBackend._FEATURED_CACHE
+        if cached.get('ts', 0) and now - cached['ts'] < DxbBackend._FEATURED_CACHE_TTL:
+            return {"success": True, "sections": cached['sections'], "cached": True}
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         sections_meta = [("specials", "今日特惠"), ("top_sellers", "热销榜"),
                          ("new_releases", "新品上架"), ("coming_soon", "即将推出")]
         try:
             import httpx as _httpx
-            with _httpx.Client(verify=False, timeout=25) as cli:
+            with _httpx.Client(verify=False, timeout=10, trust_env=False) as cli:
                 r = cli.get("https://store.steampowered.com/api/featuredcategories",
                             params={'cc': 'CN', 'l': 'schinese'}, headers=headers)
                 r.raise_for_status()
@@ -2339,10 +2356,18 @@ class DxbBackend:
                 if games:
                     sections.append({"key": key, "title": title, "games": games})
             if not sections:
+                # 拉到了空列表（Steam 侧没数据）也别丢上一次的缓存，直接复用
+                if cached.get('sections'):
+                    return {"success": True, "sections": cached['sections'], "cached": True}
                 return {"success": False, "message": "未获取到推荐数据，请检查网络。", "sections": []}
+            DxbBackend._FEATURED_CACHE['ts'] = time.time()
+            DxbBackend._FEATURED_CACHE['sections'] = sections
             return {"success": True, "sections": sections}
         except Exception as e:
             self.log.error(f"获取推荐数据失败: {self.stack_error(e)}")
+            if cached.get('sections'):
+                return {"success": True, "sections": cached['sections'],
+                        "cached": True, "message": "推荐数据取自本机缓存（实时拉取失败）。"}
             return {"success": False, "message": f"获取推荐数据失败: {e}", "sections": []}
 
     _STEAM_IMG_HOSTS = (
@@ -2385,7 +2410,10 @@ class DxbBackend:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         try:
             import httpx as _httpx
-            with _httpx.Client(verify=False, timeout=15, follow_redirects=True) as cli:
+            # v2.30：trust_env=False —— 封面图必须直连 CDN。以前默认吃系统代理，
+            # 代理一拦，十几张图全挂着不返回，Flask 线程被占满，界面就「未响应」了。
+            with _httpx.Client(verify=False, timeout=10, follow_redirects=True,
+                               trust_env=False) as cli:
                 r = cli.get(url, headers=headers)
                 if r.status_code == 200 and len(r.content) > 1024:
                     try:

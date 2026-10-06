@@ -496,14 +496,60 @@ class SteamLoginHelper:
                 continue
         return jar
 
+    #: 单次原生 get_cookies 超过这个秒数就算「界面被拖住」，累计到 _STALL_TOLERANCE 次直接放弃
+    _STALL_LIMIT = 1.2
+    _STALL_TOLERANCE = 2
+
+    def _give_up(self, reason):
+        """熔断：界面已经不响应了，别死磕，让用户走手动粘贴 Cookie 的兜底路径。"""
+        print(f'[大轩巴] 登录轮询放弃：{reason}')
+        try:
+            self.flask_mod.steam_login_failed(reason)
+        except Exception as e:
+            print('[大轩巴] 放弃提示下发失败：', e)
+        try:
+            w = self.win
+            self.win = None
+            if w is not None:
+                w.destroy()
+        except Exception:
+            pass
+
     def _poll(self):
+        """轮询登录窗口的原生 Cookie（从后台线程调，pywebview 会派发到 UI 线程）。
+
+        v2.30 修「界面未响应 / 登录有问题」：
+          原实现每 1.5 秒调一次 get_cookies()，而且没有任何熔断。
+          这个调用是 WebView2 原生 API，要排队等 UI 线程；界面一忙（比如推荐页
+          同时拉十几张封面图）就会越积越卡，最后整个窗口被 Windows 判成「未响应」，
+          用户看到的就是「点啥都没用、登录也没反应」。
+          现在：降到 2.5 秒一次；单次超过 _STALL_LIMIT 记一次卡，累计 _STALL_TOLERANCE 次
+          直接熔断 —— 宁可提示手动粘 Cookie，也好过整个界面死掉。
+        """
         deadline = time.time() + 1800          # 最多等 30 分钟，超时自动停止轮询
+        stalls = 0
         try:
             while time.time() < deadline:
-                time.sleep(1.5)
+                time.sleep(2.5)
                 if self.win is None or self._done:
                     return
-                jar = self._cookie_jar()
+                t0 = time.time()
+                try:
+                    jar = self._cookie_jar()
+                except Exception:
+                    continue
+                cost = time.time() - t0
+                if cost > self._STALL_LIMIT:
+                    stalls += 1
+                    print(f'[大轩巴] 读登录 Cookie 卡了 {cost:.2f}s（第 {stalls} 次）'
+                          f'——界面可能被原生调用拖住。')
+                    if stalls >= self._STALL_TOLERANCE:
+                        self._give_up(
+                            '界面无响应，登录窗口读不到 Cookie。'
+                            '请到「免费游戏」页手动粘贴 steamLoginSecure。')
+                        return
+                    continue
+                stalls = 0
                 if 'steamLoginSecure' not in jar:
                     continue
                 self._done = True

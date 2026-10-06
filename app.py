@@ -1266,15 +1266,33 @@ def steam_login_status():
                     "account": STEAM_LOGIN["account"]})
 
 
+#: v2.30 封面图并发闸门：推荐页一屏十几张图，每张都可能挂住等 CDN（最长 10s）。
+#: 不限流会把 Flask 工作线程全占满 —— 表现就是「界面点啥都没反应、标题变未响应」。
+#: 限 4 张同时下载，其余排队；慢请求打 WARNING，方便一眼定位哪张卡住。
+IMG_GATE = threading.Semaphore(4)
+
+
+def _gate_run(fn):
+    """带慢日志地跑一次取图（并发闸门 + 超过 3 秒记 WARNING）。"""
+    with IMG_GATE:
+        t0 = time.time()
+        try:
+            data = fn()
+        except Exception:
+            data = None
+    cost = time.time() - t0
+    if cost > 3.0:
+        logging.getLogger(' 大轩巴入库器mini').warning(
+            f'封面图耗时 {cost:.2f}s（可能网络慢或被拦）：{fn}')
+    return data
+
+
 @app.route('/api/steam/img/<appid>')
 def steam_image(appid):
     """封面图本地代理：多 CDN/多路径回退 + appdetails 兜底 + 落盘缓存，
     解决 webview 直连 CDN 空白。可选 ?u=<图片URL> 直接指定地址。"""
     url = request.args.get('u', '').strip()
-    try:
-        data = _quick_backend().fetch_steam_image(appid, url)
-    except Exception:
-        data = None
+    data = _gate_run(lambda: _quick_backend().fetch_steam_image(appid, url))
     if not data:
         return Response(status=404)
     resp = Response(data, mimetype='image/jpeg')
@@ -1294,12 +1312,12 @@ def steam_image_proxy():
     appid = request.args.get('appid', '').strip()
     data = None
     if url:
-        try:
+        def _fetch():
             b = _quick_backend()
-            if b._is_allowed_image_url(url):
-                data = b.fetch_image_by_url(url, appid)
-        except Exception:
-            data = None
+            if not b._is_allowed_image_url(url):
+                return None
+            return b.fetch_image_by_url(url, appid)
+        data = _gate_run(_fetch)
     if not data:
         return Response(status=404)
     resp = Response(data, mimetype='image/jpeg')
