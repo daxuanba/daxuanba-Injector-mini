@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.32"
+CURRENT_VERSION = "2.33"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -113,16 +113,20 @@ def _accel_port_alive(port: int = 7890) -> bool:
 
 
 def _login_mode():
-    """登录走哪条路。
+    """登录走哪条路（v2.33 改：**一律先直连**）。
 
-    开着加速 → 必须走代理，否则直连 steamcommunity.com 基本打不开（超时）；
-    没开加速 → 只能直连，走盲代理也是白等。
-    两条路都能试，超时的那次由 steam_web_login 自动换另一条重试。
+    以前只要 7890 端口在就优先走代理，结果踩过一个大坑：
+    代理出口 IP 被动过 → Steam 风控直接回「您输入的帐户名称或密码错误」，
+    用户明明密码是对的却被说成密码错（v2.30 修过一次，这里彻底改默认方向）。
+
+    现在的顺序：直连优先 → 直连超时/异常时 steam_web_login 自动换代理重试。
+    也就是说「没开加速也能登」和「开了加速更稳」两头都保住，
+    但**不会因为开了加速就把密码错误误报出来**。
     """
     global _LOGIN_MODE
     if _LOGIN_MODE in ('direct', 'proxy'):
         return _LOGIN_MODE
-    _LOGIN_MODE = 'proxy' if _accel_port_alive(7890) else 'direct'
+    _LOGIN_MODE = 'direct'
     return _LOGIN_MODE
 
 
@@ -2756,7 +2760,16 @@ class DxbBackend:
             }
             _r = None
             _last_err = ''
-            for mode in (_login_mode(), _login_other_mode()):
+            # v2.33：提交顺序 = 直连优先，代理兜底。
+            # 即便 _LOGIN_MODE 之前被切到过 proxy，这里也把 direct 排到第一位，
+            # 因为「代理出口被 Steam 风控 → 回密码错误」这个坑已经坑过两次了。
+            _modes = []
+            for _m in (_login_mode(), _login_other_mode()):
+                if _m not in _modes:
+                    _modes.append(_m)
+            if _modes and _modes[0] == 'proxy':
+                _modes.insert(0, 'direct')
+            for mode in _modes:
                 try:
                     _r = _login_client(mode).post(
                         "https://steamcommunity.com/login/dologin/", data=data,
@@ -2831,9 +2844,22 @@ class DxbBackend:
             if ('邮箱' in msg or 'email' in low or 'verification code' in low
                     or 'guard' in low or 'two-factor' in low):
                 need_email = True
+            # v2.33：Steam 的二次验证有两种，别再一视同仁当「邮箱验证码」。
+            # needs_twofactor / twofactor = **Steam 令牌**（手机 App 或绑定邮箱里的
+            # 6 位动态码），跟「登录邮箱收到的邮件验证码」是两码事。
+            # 以前一律提示「请输入邮箱里的验证码」，用户拿着 6 位令牌去填 → 一直不对，
+            # 报回来就是「密码明明是对的他说不对」。
+            need_guard_code = bool(newch) or bool(rj.get('needs_twofactor')) or \
+                bool(rj.get('requires_twofactor')) or (rj.get('twofactor') is not None)
             if need_email:
-                return {"success": False, "need_email": True, "challenge": newch,
-                        "email": email, "masked_email": mask_email(email),
+                if need_guard_code and not email:
+                    return {"success": False, "need_email": True, "need_twofactor": True,
+                            "challenge": newch, "email": email, "masked_email": '',
+                            "message": (msg + '　→　请输入 Steam 令牌：手机 Steam App 或'
+                                              '绑定邮箱里那个 **6 位动态验证码**（不是登录密码）。')
+                                       .strip() or '请输入 Steam 令牌（6 位动态码）。'}
+                return {"success": False, "need_email": True, "need_twofactor": False,
+                        "challenge": newch, "email": email, "masked_email": mask_email(email),
                         "message": msg or "验证码已发送至邮箱，请输入邮箱里的验证码。"}
 
             if not msg:

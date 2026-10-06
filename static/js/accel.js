@@ -4,12 +4,26 @@
 
     var $ = function (id) { return document.getElementById(id); };
 
-    function api(path, method, body) {
-        return fetch(path, {
+    function api(path, method, body, ms) {
+        /* v2.33：页面初始化里的请求一律带硬超时。
+           以前加速页一进来就 refresh()，接口一慢整页停在旧帧（用户看到「卡死」），
+           而且慢请求还会占着后端线程，连点其它按钮都没反应。 */
+        var timeout = ms || 12000;
+        var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) { } }, timeout) : null;
+        var opt = {
             method: method || 'GET',
-            headers: body ? {'Content-Type': 'application/json'} : {},
-            body: body ? JSON.stringify(body) : null
-        }).then(function (r) { return r.json(); }).catch(function (e) {
+            headers: body ? {'Content-Type': 'application/json'} : {}
+        };
+        if (body) opt.body = JSON.stringify(body);
+        if (ctrl) opt.signal = ctrl.signal;
+        return Promise.race([
+            fetch(path, opt).then(function (r) { return r.json(); }),
+            new Promise(function (_, rej) {
+                setTimeout(function () { rej(new Error('超时（' + (timeout / 1000 | 0) + ' 秒）')); }, timeout);
+            })
+        ]).catch(function (e) {
+            if (timer) clearTimeout(timer);
             return {success: false, message: '请求失败：' + e};
         });
     }
@@ -29,23 +43,42 @@
         }
     }
 
+    /* v2.33：状态渲染独立出来 —— 接口慢/失败也要把界面点亮（显示「未启动」+ 开始按钮），
+       绝不能停在「转圈」上让人以为卡死。 */
+    function paint(running, sub, sysProxy, note) {
+        var dot = $('accelDot'), title = $('accelTitle'), subEl = $('accelSub');
+        if (dot) dot.className = 'accel-dot' + (running ? ' on' : '');
+        if (title) title.textContent = running ? '加速中' : '未启动';
+        if (subEl) {
+            var bits = [];
+            if (sub && sub.nodes) bits.push('已载入 ' + sub.nodes + ' 个节点');
+            else bits.push('尚未配置订阅');
+            if (sysProxy && sysProxy.enabled) bits.push('系统代理已开');
+            if (note) bits.push(note);
+            subEl.textContent = bits.join(' · ');
+        }
+        if ($('accelStartBtn')) $('accelStartBtn').style.display = running ? 'none' : '';
+        if ($('accelStopBtn')) $('accelStopBtn').style.display = running ? '' : 'none';
+    }
+
     function refresh() {
-        return api('/api/accel/status').then(function (r) {
-            if (!r || !r.success) return;
-            var running = !!r.running;
-            var dot = $('accelDot'), title = $('accelTitle'), sub = $('accelSub');
-            if (dot) dot.className = 'accel-dot' + (running ? ' on' : '');
-            if (title) title.textContent = running ? '加速中' : '未启动';
-            if (sub) {
-                var bits = [];
-                if (r.sub && r.sub.nodes) bits.push('已载入 ' + r.sub.nodes + ' 个节点');
-                else bits.push('尚未配置订阅');
-                if (r.system_proxy && r.system_proxy.enabled) bits.push('系统代理已开');
-                sub.textContent = bits.join(' · ');
+        /* fast=1：首屏只要「跑没跑」这类毫秒级字段，节点列表交给后面补。 */
+        return api('/api/accel/status?fast=1', 'GET', null, 8000).then(function (r) {
+            if (!r || !r.success) {
+                paint(false, null, null, r && r.message ? r.message : '状态获取失败');
+                return r;
             }
-            if ($('accelStartBtn')) $('accelStartBtn').style.display = running ? 'none' : '';
-            if ($('accelStopBtn')) $('accelStopBtn').style.display = running ? '' : 'none';
-            if (running) loadNodes();
+            paint(!!r.running, r.sub, r.system_proxy);
+            if (r.running) loadNodes();
+            /* 后台再补一次完整状态（版本 / 当前节点），最多错开 0.5 秒，
+               别在首屏同一帧再把后端线程占住。 */
+            setTimeout(function () {
+                api('/api/accel/status', 'GET', null, 8000).then(function (r2) {
+                    if (!r2 || !r2.success) return;
+                    paint(!!r2.running, r2.sub, r2.system_proxy);
+                    if (r2.running) loadNodes();
+                });
+            }, 500);
             return r;
         });
     }

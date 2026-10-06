@@ -272,7 +272,18 @@ class SettingsManager {
 
     async loadDependencyStatus() {
         try {
-            const response = await fetch('/api/kernel/status');
+            /* v2.33：默认 remote=0 —— 只报本地装没装、什么版本，
+               不去 GitHub 问「有没有新版」（那要 2 秒以上，进设置页就卡一下）。
+               「检查更新」按钮（下面 remote=1）才真的去问远端。 */
+            const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+            const response = await fetch('/api/kernel/status?remote=0',
+                ctrl ? { signal: ctrl.signal } : undefined);
+            if (ctrl) {
+                clearTimeout(this._kernelAbortTimer);
+                this._kernelAbortTimer = setTimeout(() => {
+                    try { ctrl.abort(); } catch (e) { /* ignore */ }
+                }, 10000);
+            }
             const data = await response.json();
             if (!data.success) return;
             const STATE_TXT = { none: '未安装', install: '可安装', latest: '已是最新',

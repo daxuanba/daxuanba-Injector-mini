@@ -305,7 +305,10 @@ class FreeGamesApp {
                 { username: user, password: pass }, 25000);
             if (d && d.success) {
                 this.showLoginError(1, '');
-                this.log('success', '用户名密码已通过，等待邮箱验证码。');
+                const tip = (d && d.need_twofactor)
+                    ? '用户名密码已通过，等待 Steam 令牌（手机 App / 绑定邮箱的 6 位动态码）。'
+                    : '用户名密码已通过，等待邮箱验证码。';
+                this.log('success', tip);
                 this.enterStep2(d);
                 return;
             }
@@ -323,6 +326,12 @@ class FreeGamesApp {
     enterStep2(data) {
         this.loginStep = 2;
         this.loginChallenge = data && data.challenge ? data.challenge : '';
+        /* v2.33：Steam 的二次验证分两种 ——
+           need_twofactor = 手机/邮箱里的 6 位**动态令牌**；
+           邮箱验证码 = 登录邮箱收到的**邮件验证码**。
+           以前一律写「请输入邮箱里的验证码」，拿着令牌去填必然报错，
+           用户反馈就是「密码明明是对的他说不对」。 */
+        this.loginTwoFactor = !!(data && data.need_twofactor);
         if (this.elements.loginStep1) this.elements.loginStep1.style.display = 'none';
         if (this.elements.loginStep2) this.elements.loginStep2.style.display = '';
         if (this.elements.loginBackBtn) this.elements.loginBackBtn.style.display = '';
@@ -330,18 +339,26 @@ class FreeGamesApp {
             this.elements.loginNextBtn.textContent = '登录';
             this.elements.loginNextBtn.disabled = false;
         }
-        const masked = (data && data.masked_email) || (data && data.email) || '邮箱';
+        const is2fa = !!this.loginTwoFactor;
+        const masked = is2fa ? 'Steam 令牌（6 位动态码）'
+            : ((data && data.masked_email) || (data && data.email) || '邮箱');
         const title = document.getElementById('loginModalTitle');
-        if (title) title.textContent = '邮箱验证';
+        if (title) title.textContent = is2fa ? '令牌验证' : '邮箱验证';
         if (this.elements.loginMaskMail) this.elements.loginMaskMail.textContent = masked;
+        const codeBox = this.elements.loginCode;
+        if (codeBox) {
+            codeBox.placeholder = is2fa ? '6 位动态验证码' : '邮箱收到的验证码';
+            codeBox.title = is2fa ? '手机 Steam App 或绑定邮箱里的 6 位动态码' : '登录邮箱收到的验证码';
+        }
         this.showLoginError(2, '');
-        if (this.elements.loginCode) setTimeout(() => this.elements.loginCode.focus(), 30);
+        if (codeBox) setTimeout(() => codeBox.focus(), 30);
     }
 
     async doLoginStep2() {
         const code = (this.elements.loginCode.value || '').trim();
         if (!code) {
-            this.showLoginError(2, '请输入邮箱里的验证码。');
+            this.showLoginError(2, this.loginTwoFactor
+                ? '请输入 Steam 令牌（手机 App 或绑定邮箱里的 6 位动态码）。' : '请输入邮箱里的验证码。');
             return;
         }
         if (!this.loginChallenge) {
@@ -366,9 +383,15 @@ class FreeGamesApp {
                 }
                 return;
             }
-            const msg = (d && d.message) || '验证码校验失败。';
+            const msg = (d && d.message) || (this.loginTwoFactor
+                ? '令牌校验失败：动态码可能已经刷新了，请等下一码重新输入。'
+                : '验证码校验失败：请查收邮件（也在垃圾箱里）。');
             this.showLoginError(2, msg);
-            this.log('error', `验证码校验失败：${msg}`);
+            this.log('error', `二次验证失败：${msg}`);
+            if (this.loginTwoFactor) {
+                this.showLoginError(2,
+                    '令牌不对或已过期 —— 请打开手机 Steam App / 邮箱里的 6 位动态码重新填。');
+            }
         } catch (e) {
             this.showLoginError(2, `请求失败: ${e.message}`);
             this.log('error', `验证码请求失败：${e.message}`);

@@ -9,7 +9,10 @@
 // 注意：**不中断请求**（下载/入库这类长任务本来就慢），只提示。
 // ---------------------------------------------------------------------------
 (function () {
-    const SLOW_LIMIT = 45000;
+    /* v2.33：45 秒才提示太迟了 —— 用户早就把界面当成「卡死」并重启程序了。
+       改成 10 秒：慢归慢，至少让人马上知道「程序活着，是某个接口慢」，
+       还能看清是哪个接口，方便直接把「慢的接口名」报给开发者。 */
+    const SLOW_LIMIT = 10000;
     let banner = null;
     function showBanner(url) {
         if (banner) { banner.style.display = 'block'; return; }
@@ -28,9 +31,14 @@
         showBanner(url);
         if (banner) {
             banner.textContent = `后台接口响应很慢（超过 ${SLOW_LIMIT / 1000} 秒）：${url}`
-                + '　—　程序仍可操作；常见原因是系统代理/加速异常或 GitHub 源不可达。点此关闭。';
+                + '　—　程序仍可操作，点一下继续用；如果每次都卡在这个接口，把它记下来'
+                + '（或打开「设置 → 关于 → 打开日志」看 dxb_run.log 里的「接口慢」记录）上报。';
         }
     }
+    // v2.33：全局守卫（global-guard.js）已经在每个页面统一做「硬超时 + 慢提示横幅」，
+    // 首页也是先加载它，这里直接让位，免得同一个页面套两层 fetch、冒两个横幅。
+    if (window.__dxbGuard) { return; }
+
     const origFetch = window.fetch ? window.fetch.bind(window) : null;
     if (!origFetch) return;
     window.fetch = function (input, init) {

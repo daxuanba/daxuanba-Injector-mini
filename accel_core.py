@@ -38,6 +38,24 @@ CONTROL_PORT = 9090
 CONTROL_HOST = "127.0.0.1"
 CONTROL_SECRET = ""
 
+#: v2.33 状态查询缓存：页面一进来就要问「内核在不在跑 / 版本 / 代理列表」，
+#: 这几个都要真跑（跑 exe、连端口、打控制口），原来一次查询能拖 10~36 秒，
+#: 表现就是「换页面卡死」。现在全部按 TTL 复用上次结果，真值由后续查询自然刷新。
+_STATUS_TTL = 3.0
+_STATUS_CACHE = {'version': ('', 0.0, 0.0),
+                 'running': (False, 0.0),
+                 'proxies': ({}, 0.0)}
+
+
+def _status(tag, value):
+    _STATUS_CACHE[tag] = (value, time.time())
+
+
+def invalidate_status():
+    """启停内核后立刻作废缓存，免得界面还显示旧状态。"""
+    for k in _STATUS_CACHE:
+        _STATUS_CACHE[k] = (_STATUS_CACHE[k][0], 0.0)
+
 PAC_NONE = ""
 
 
@@ -171,14 +189,30 @@ class MihomoManager:
         return os.path.isfile(self.core) and os.path.getsize(self.core) > 100000
 
     def core_version(self) -> str:
+        """内核版本。
+
+        v2.33：这里原来每次都 `跑 exe -v`（最多卡 10 秒）+ 端口探测 20 次，
+        一个「在不在跑」的状态查询硬生生要 10~36 秒，页面一进来就卡住。
+        现在按「文件 mtime + 3 秒」缓存，同一次页面刷新只会真跑一次。
+        """
         if not self.core_exists():
             return ''
         try:
+            mtime = os.stat(self.core).st_mtime
+        except OSError:
+            mtime = 0.0
+        cached, at, cm = _STATUS_CACHE.get('version', ('', 0.0, 0.0))
+        if cached and (time.time() - at) < _STATUS_TTL and cm == mtime:
+            return cached
+        out = ''
+        try:
             out = subprocess.run([self.core, '-v'], capture_output=True,
                                  timeout=10, encoding='utf-8', errors='ignore')
-            return (out.stdout or out.stderr or '').strip()[:80]
+            out = (out.stdout or out.stderr or '').strip()[:80]
         except Exception:
-            return ''
+            out = ''
+        _STATUS_CACHE['version'] = (out, time.time(), mtime)
+        return out
 
     def ensure_core(self, on_progress=None) -> Dict:
         """缺内核就自动下载，返回 {'ok':bool, 'message':str, 'version':str}。"""
@@ -296,18 +330,29 @@ class MihomoManager:
     # ---------------------------------------------------------------- 进程
 
     def running(self) -> bool:
+        """内核进程在不在。
+
+        v2.33：原来没进程时要连续探 20 次（每次 0.6 秒超时 + 0.3 秒间隔），
+        一个「在不在」要等 12 秒。而且这个调用被包在「页面初始化」里 → 卡死。
+        现在：只在真的刚刚看过（TTL 内）时才复用缓存，否则最多探 3 次（约 1 秒内出结果）。
+        """
         if self._proc is not None:
             return self._proc.poll() is None
-        return self._port_open(CONTROL_PORT)
+        cached, at = _STATUS_CACHE['running']
+        if (time.time() - at) < _STATUS_TTL:
+            return cached
+        ok = self._port_open(CONTROL_PORT, tries=3)
+        _STATUS_CACHE['running'] = (ok, time.time())
+        return ok
 
     @staticmethod
-    def _port_open(port: int) -> bool:
-        for _ in range(20):
+    def _port_open(port: int, tries: int = 3) -> bool:
+        for _ in range(max(1, tries)):
             try:
                 with socket.create_connection((CONTROL_HOST, port), timeout=0.6):
                     return True
             except OSError:
-                time.sleep(0.3)
+                time.sleep(0.25)
         return False
 
     def _control(self, path: str, method: str = 'GET', data: Optional[bytes] = None,
@@ -342,8 +387,10 @@ class MihomoManager:
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         except Exception as e:
             return {'ok': False, 'message': '内核启动失败：%s' % e}
+        invalidate_status()
         for _ in range(40):
-            if self._port_open(CONTROL_PORT):
+            if self._port_open(CONTROL_PORT, tries=1):
+                invalidate_status()
                 return {'ok': True, 'message': '加速已启动',
                         'version': self.core_version()}
             if self._proc.poll() is not None and not self._port_open(CONTROL_PORT):
@@ -353,6 +400,7 @@ class MihomoManager:
                 'log': self.logfile}
 
     def stop(self) -> Dict:
+        invalidate_status()
         p = self._proc
         self._proc = None
         if p is not None and p.poll() is None:
@@ -383,15 +431,37 @@ class MihomoManager:
         except Exception:
             return '内核启动后立刻退出'
 
-    def status(self) -> Dict:
+    def status(self, fast: bool = False) -> Dict:
+        """整体状态。
+
+        fast=True（页面首屏用）：只给「跑没跑 / 内核在不在 / 当前节点」，
+        一次本地 stat + 一次短端口探测就能出结果（毫秒级）。
+        节点列表 / 版本这种要真问内核的，交给后续刷新（fast=False）补上。
+        """
         st = self.config_status()
-        cur = self._control('/proxies') or {}
-        return {'running': self.running(),
-                'core': self.core_exists(),
-                'version': self.core_version(),
-                'core_path': self.core,
-                'sub': st,
-                'current': (self._control('/proxies') or {}).get('current', '') if cur else ''}
+        out = {'running': self.running(),
+               'core': self.core_exists(),
+               'version': '',
+               'core_path': self.core,
+               'sub': st,
+               'current': ''}
+        if fast:
+            out['version'] = _STATUS_CACHE['version'][0]
+            return out
+        cur = None
+        cached, at = _STATUS_CACHE['proxies']
+        if (time.time() - at) >= _STATUS_TTL:
+            cur = self._control('/proxies') or {}
+            _STATUS_CACHE['proxies'] = (cur, time.time())
+        else:
+            cur = cached
+        out['version'] = self.core_version()
+        if cur:
+            out['current'] = str(cur.get('current') or '')
+            if not st.get('nodes'):
+                st = dict(st)
+                st['nodes'] = len(cur.get('proxies') or [])
+        return out
 
     # ---------------------------------------------------------------- 节点
 

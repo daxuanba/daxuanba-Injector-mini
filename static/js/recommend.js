@@ -175,6 +175,7 @@ class RecommendApp {
         return new Promise((resolve) => {
             clearInterval(this.pollTimer);
             const started = Date.now();
+            let tipped = false;   // 卡住提示只弹一次，别刷屏
             this.pollTimer = setInterval(async () => {
                 try {
                     const r = await fetch('/api/steam/login/status');
@@ -194,6 +195,16 @@ class RecommendApp {
                         return;
                     }
                 } catch (e) { /* 继续轮询 */ }
+                /* v2.33：登录窗口 40 秒还毫无进展（最常见是 WebView2 被系统代理/
+                   加速挡成白屏，读不到 HttpOnly 的 steamLoginSecure），
+                   早点告诉用户「可以关窗走手动粘贴」，别让人干等 5 分钟才超时。 */
+                if (!tipped && Date.now() - started > 40000) {
+                    tipped = true;
+                    this.showSnackbar('登录窗口 40 秒还没读到登录态：多半是页面没加载出来'
+                        + '（系统代理/加速挡住），可直接关掉窗口，改用「免费游戏」页'
+                        + '「手动粘贴会话」贴 steamLoginSecure。', 'warning');
+                    this.log('warn', '登录窗口 40 秒无进展：可能是 WebView2 白屏，建议关窗手动粘贴会话。');
+                }
                 if (Date.now() - started > 300000) {
                     clearInterval(this.pollTimer);
                     this.showSnackbar('等待登录超时。', 'warning');

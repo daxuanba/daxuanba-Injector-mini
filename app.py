@@ -67,6 +67,38 @@ app.config['SECRET_KEY'] = 'dxb-injector-secret-key-v2'
 app.config['USER_DATA_FOLDER'] = project_root / 'userdata'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
+# ---------------------------------------------------------------------------
+# 接口耗时日志（v2.33：可观测性）
+#
+# windowed 打包的界面没有控制台，用户报「点啥都没反应」时只能靠猜。
+# 这里给每个 /api/ 请求计时：>2 秒记 WARNING、>8 秒记 ERROR（带路径），
+# 全部写进 dxb_run.log —— 用户把日志发过来就能一眼看到「到底哪个接口慢」，
+# 不用再让用户截屏数秒表。
+# ---------------------------------------------------------------------------
+_API_LOG = logging.getLogger(' 大轩巴入库器mini.api')
+_SLOW_WARN = 2.0
+_SLOW_ERR = 8.0
+
+
+@app.before_request
+def _api_timing_start():
+    request.dxb_t0 = time.time()
+
+
+@app.after_request
+def _api_timing_log(resp):
+    t0 = getattr(request, 'dxb_t0', None)
+    if t0 is None:
+        return resp
+    cost = time.time() - t0
+    if not str(request.path).startswith('/api/'):
+        return resp
+    if cost >= _SLOW_ERR:
+        _API_LOG.error(f'接口慢 {cost:.2f}s {request.method} {request.path} -> {resp.status_code}')
+    elif cost >= _SLOW_WARN:
+        _API_LOG.warning(f'接口偏慢 {cost:.2f}s {request.method} {request.path} -> {resp.status_code}')
+    return resp
+
 def get_port_from_gui():
     result = {'port': 5000}
     root = tk.Tk()
@@ -2112,10 +2144,20 @@ def _accel_guard():
 
 @app.route('/api/accel/status', methods=['GET'])
 def accel_status():
+    """加速状态。
+
+    v2.33：`fast=1` 是页面首屏专用——只回「跑没跑 / 内核在不在 / 当前节点」，
+    毫秒级返回。默认（完整）才会去问内核要节点列表、跑 `exe -v`。
+    以前首屏一次查询要 10~36 秒（换到「加速」页就整页卡住）。
+    """
     m, err, code = _accel_guard()
     if m is None:
         return err, code
-    st = m.status()
+    fast = request.args.get('fast') in ('1', 'true', 'yes')
+    try:
+        st = m.status(fast=fast)
+    except TypeError:
+        st = m.status()
     try:
         import accel_core
         st['system_proxy'] = accel_core.system_proxy_state()

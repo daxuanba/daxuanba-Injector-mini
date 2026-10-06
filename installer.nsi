@@ -23,7 +23,7 @@ BrandingText "大轩巴"
 ; ---------------- 品牌常量 ----------------
 ; APP_VERSION 由 build_installer.py 从 backend.CURRENT_VERSION 注入，
 ; 免得每次发版只改 backend / about.html 却漏了这里（v2.27 之前 DisplayVersion 就停在 2.26）
-!define APP_VERSION "2.32"
+!define APP_VERSION "2.33"
 !define APP_NAME   "大轩巴入库器mini"
 !define APP_EXE    "${APP_NAME}.exe"
 !define SM_FOLDER  "${APP_NAME}"
