@@ -936,6 +936,49 @@ def download_lua():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+# ---------------------------------------------------------------------------
+# 清单源探测后台化（v2.31）
+#
+# 以前：开一次页面 → /api/initialize → /api/sources(全量探测 17 个 GitHub 源)
+#       → 前端 `await fetch('/api/sources')` 一直挂着，探测慢/代理卡 = 界面点啥
+#       都没反应（用户眼里就是「卡死」）。
+# 现在：默认请求 **只返回缓存/上次结果**，探测丢到后台线程慢慢跑；
+#       只有用户明确要求（/api/sources?probe=1，例如测速选优）才同步等结果。
+# ---------------------------------------------------------------------------
+_SOURCE_PROBE_BUSY = threading.Lock()
+_SOURCE_PROBE_RUNNING = False
+
+
+def ensure_source_probe_async():
+    """后台补一次全量探测（幂等，不重复起线程）。"""
+    global _SOURCE_PROBE_RUNNING
+    with _SOURCE_PROBE_BUSY:
+        if _SOURCE_PROBE_RUNNING:
+            return False
+        _SOURCE_PROBE_RUNNING = True
+
+    def _run():
+        try:
+            # DxbBackend 只有 async 上下文管理器（client 是 AsyncClient），
+            # 必须 async with + asyncio.run，不能写同步 with。
+            async def _go():
+                async with DxbBackend() as b:
+                    await b.test_sources()
+
+            asyncio.run(_go())
+        except Exception as e:
+            try:
+                logging.getLogger('大轩巴入库器mini').error(f"后台清单源探测失败: {e}")
+            except Exception:
+                pass
+        finally:
+            global _SOURCE_PROBE_RUNNING
+            _SOURCE_PROBE_RUNNING = False
+
+    threading.Thread(target=_run, name='dxb-srcprobe', daemon=True).start()
+    return True
+
+
 @app.route('/api/sources', methods=['GET'])
 def get_sources():
     try:
@@ -972,13 +1015,27 @@ def get_sources():
                 for repo in custom_zip_repos:
                     builtin_sources[f"{repo['name']} (自定义ZIP)"] = f"custom_zip_{repo['name']}"
 
+                _probe = request.args.get('probe') == '1'
                 if request.args.get('fast') == '1':
                     availability = {v: True for v in backend.SOURCE_PROBE}
                     recommended = next(
                         (v for v, spec in backend.SOURCE_PROBE.items()
                          if spec is not None), 'search')
-                else:
+                elif _probe:
+                    # 用户明确要求重新测（测速选优等）：同步等，但后端有 25s 总时限
                     availability, recommended = await backend.test_sources()
+                else:
+                    # v2.31：先给缓存/上次结果，后台补探。界面永远不等网络。
+                    _cache = dict(getattr(DxbBackend, '_source_test_cache', {}) or {})
+                    if _cache.get('availability'):
+                        availability = dict(_cache['availability'])
+                        recommended = _cache.get('recommended')
+                    else:
+                        availability = {v: True for v in backend.SOURCE_PROBE}
+                        recommended = next(
+                            (v for v, spec in backend.SOURCE_PROBE.items()
+                             if spec is not None), 'search')
+                    ensure_source_probe_async()
                 filtered_sources = {
                     name: value for name, value in builtin_sources.items()
                     if availability.get(value, True)
@@ -995,7 +1052,8 @@ def get_sources():
                     "sources": filtered_sources,
                     "recommended": recommended,
                     "availability": availability,
-                    "probed": request.args.get('fast') != '1',
+                    "probed": _probe or request.args.get('fast') != '1',
+                    "cache_hit": not _probe and request.args.get('fast') != '1',
                     "custom_github_count": len(custom_github_repos),
                     "custom_zip_count": len(custom_zip_repos)
                 }

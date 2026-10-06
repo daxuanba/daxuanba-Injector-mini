@@ -686,6 +686,31 @@ def _install_external_link_guard(win, local_prefixes):
         print('[大轩巴] 外链拦截初始化失败（不影响使用）：', e)
         return
 
+    # ---- v2.31：JS 对话框守卫 -------------------------------------------------
+    # WebView2 里 confirm/alert/prompt 弹出的原生对话框是**同步阻塞主线程**的：
+    # 一旦有页面调 confirm() 而没人点，主线程就永久卡在等对话框响应上，
+    # 窗口标题直接变「未响应」、界面停在当前帧。本程序有自己的确认弹窗，
+    # 所以这里：alert 自动关闭；confirm/prompt 一律「取消」（confirm 返回 false，
+    # 最安全：宁可不执行，也好过整个窗口假死）。
+    def _on_js_dialog(sender, args):
+        try:
+            kind = int(getattr(args, 'Type', 0) or 0)
+        except Exception:
+            kind = 0
+        try:
+            if kind == 0:                      # alert / 未知类型：直接放行关闭
+                args.Accept()
+            else:                              # confirm / prompt / beforeunload：取消
+                args.Cancel()
+                print('[大轩巴] 已忽略一个原生对话框（confirm/prompt），界面保持可用。')
+        except Exception as e:
+            print('[大轩巴] 处理原生对话框失败：', e)
+
+    try:
+        core.JavaScriptDialogOpening += _on_js_dialog
+    except Exception as e:
+        print('[大轩巴] 原生对话框守卫注册失败（不影响使用）：', e)
+
     def on_new_window(sender, args):
         try:
             uri = str(args.Uri)

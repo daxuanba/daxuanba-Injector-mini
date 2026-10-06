@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.30"
+CURRENT_VERSION = "2.31"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -3163,6 +3163,12 @@ class DxbBackend:
     _SOURCE_CACHE_FILE = "source_probe_cache.json"
     _SOURCE_CACHE_TTL = 6 * 3600
 
+    #: 全量清单源探测的**总时限**（秒）。到点直接返回已经探到的部分。
+    SOURCE_PROBE_TIMEOUT = 25.0
+
+    #: 单源探测超时（秒）
+    SOURCE_PROBE_ONE_TIMEOUT = 4.0
+
     @staticmethod
     def _load_source_cache() -> Dict[str, Any]:
         """读落盘的源探测缓存（跨进程，省掉每次启动的 3-8 秒探测）。
@@ -3193,7 +3199,8 @@ class DxbBackend:
     async def _probe_one_source(self, value: str, url: str):
         """探测单个源根域名可达性（连接失败/超时 => 不可用）"""
         try:
-            r = await self.client.get(url, timeout=3.0, follow_redirects=True)
+            r = await self.client.get(url, timeout=DxbBackend.SOURCE_PROBE_ONE_TIMEOUT,
+                                      follow_redirects=True)
             return value, (r.status_code < 500)
         except Exception:
             return value, False
@@ -3213,14 +3220,26 @@ class DxbBackend:
             if spec is None:
                 results[value] = True
 
-        tasks = {
-            value: asyncio.create_task(self._probe_one_source(value, spec[0]))
+        # v2.31：全量探测必须**有总时限 + 并发上限**。
+        # 以前 17 个 asyncio 任务一把梭、没有任何总时限：系统代理（加速）一卡，
+        # 这个协程能挂上好几分钟，而 /api/sources 一直被 await ——
+        # 表现就是「界面出来了但点啥都没反应」，用户看到的就是「卡死」。
+        tasks = [
+            asyncio.create_task(self._probe_one_source(value, spec[0]))
             for value, spec in DxbBackend.SOURCE_PROBE.items() if spec is not None
-        }
-        for value, t in tasks.items():
-            v, ok = await t
-            results[v] = ok
-            self.log.info(f"清单源探测 {v}: {'可用' if ok else '不可用(剔除)'}")
+        ]
+        _done, _pending = await asyncio.wait(
+            tasks, timeout=DxbBackend.SOURCE_PROBE_TIMEOUT,
+            return_when=asyncio.ALL_COMPLETED)
+        for _t in _pending:
+            _t.cancel()
+        for _t in _done:
+            try:
+                _v, _ok = _t.result()
+            except Exception:
+                continue
+            results[_v] = _ok
+            self.log.info(f"清单源探测 {_v}: {'可用' if _ok else '不可用(剔除)'}")
 
         avail = [v for v, ok in results.items()
                  if ok and DxbBackend.SOURCE_PROBE.get(v) is not None]

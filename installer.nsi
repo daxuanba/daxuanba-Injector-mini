@@ -23,7 +23,7 @@ BrandingText "大轩巴"
 ; ---------------- 品牌常量 ----------------
 ; APP_VERSION 由 build_installer.py 从 backend.CURRENT_VERSION 注入，
 ; 免得每次发版只改 backend / about.html 却漏了这里（v2.27 之前 DisplayVersion 就停在 2.26）
-!define APP_VERSION "2.30"
+!define APP_VERSION "2.31"
 !define APP_NAME   "大轩巴入库器mini"
 !define APP_EXE    "${APP_NAME}.exe"
 !define SM_FOLDER  "${APP_NAME}"
@@ -54,6 +54,9 @@ LangString MSG_DESC 2052 "大轩巴入库器mini：Steam 免费游戏真入库 +
 ; ---------------- 安装 ----------------
 Section "主程序" SEC01
     SectionIn 1 RO
+    ; 先保证目录一定存在：以前出过「装完目录是空壳」的怪事，
+    ; 目录被创建但文件没落进去时，至少用户能看见这个目录是应用自己建的。
+    CreateDirectory "$INSTDIR"
     SetOutPath $INSTDIR
     File "/oname=${APP_EXE}" "stage\${APP_EXE}"
     File "stage\使用说明.txt"
@@ -90,6 +93,15 @@ Section "主程序" SEC01
     ; 装到哪了，白纸黑字写给用户：桌面一份「安装位置.txt」，装完不用满盘找
     WriteIniStr "$DESKTOP\${APP_NAME} 安装位置.txt" "安装位置" "路径" "$INSTDIR"
     DetailPrint "已安装到：$INSTDIR"
+
+    ; 「退出码 0 但安装目录是空壳」以前最难查：安装看着成功、文件其实没落地。
+    ; 这里硬校验一次主程序在不在，不在就直接把话说清楚（多半是杀软隔离），
+    ; 不再静默假装成功。
+    IfFileExists "$INSTDIR\${APP_EXE}" ExeOk
+    DetailPrint "警告：主程序没有落到安装目录！"
+    MessageBox MB_ICONEXCLAMATION|MB_OK \
+        "主程序文件没有落到安装目录：$\n$\n    $INSTDIR$\n$\n$\n多半是杀毒/安全软件把文件隔离了（这类程序被报毒很常见）。$\n请到「Windows 安全中心 → 病毒和威胁防护 → 保护历史记录 → 允许项」里放行本程序，再重新安装一次。$\n如果是 360 / 火绒 之类，请把本程序目录加进白名单。"
+    ExeOk:
 SectionEnd
 
 Section "快捷方式" SEC02

@@ -1,4 +1,51 @@
 
+// ---------------------------------------------------------------------------
+// 接口慢 = 不卡死（v2.31）
+//
+// windowed 环境没有控制台，页面「永远转圈」时用户看不出是网络还是程序死了。
+// 这里给所有 /api/ 请求挂一个慢请求监视器：超过 45 秒还没回，就在页面顶部
+// 打一条醒目横幅 —— 明确告诉用户「程序还活着，是某个接口慢」，
+// 而不是让人干等、以为是卡死。
+// 注意：**不中断请求**（下载/入库这类长任务本来就慢），只提示。
+// ---------------------------------------------------------------------------
+(function () {
+    const SLOW_LIMIT = 45000;
+    let banner = null;
+    function showBanner(url) {
+        if (banner) { banner.style.display = 'block'; return; }
+        banner = document.createElement('div');
+        banner.id = 'dxbSlowApiBanner';
+        banner.style.cssText = [
+            'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:9999',
+            'padding:10px 14px', 'background:#7c2d12', 'color:#fff',
+            'font-size:13px', 'line-height:1.5', 'box-shadow:0 2px 8px rgba(0,0,0,.4)',
+            'display:block', 'pointer-events:auto', 'cursor:pointer',
+        ].join(';');
+        banner.addEventListener('click', () => { if (banner) banner.style.display = 'none'; });
+        document.body.appendChild(banner);
+    }
+    function markS(url) {
+        showBanner(url);
+        if (banner) {
+            banner.textContent = `后台接口响应很慢（超过 ${SLOW_LIMIT / 1000} 秒）：${url}`
+                + '　—　程序仍可操作；常见原因是系统代理/加速异常或 GitHub 源不可达。点此关闭。';
+        }
+    }
+    const origFetch = window.fetch ? window.fetch.bind(window) : null;
+    if (!origFetch) return;
+    window.fetch = function (input, init) {
+        const raw = (typeof input === 'string') ? input
+            : (input && typeof input.url === 'string') ? input.url : '';
+        if (!/^\/api\//.test(raw)) return origFetch(input, init);
+        const t = setTimeout(() => { try { markS(raw); } catch (e) { } }, SLOW_LIMIT);
+        const p = origFetch(input, init);
+        const done = () => { clearTimeout(t); if (banner && t) { } };
+        p.then(done, done);
+        return p;
+    };
+})();
+
+
 class DxbWebApp {
     constructor() {
         this.socket = null;
@@ -389,14 +436,22 @@ class DxbWebApp {
         }
     }
 
-    async refreshSourceAvailability() {
+    async refreshSourceAvailability(opts) {
+        // v2.31：后端默认只返回缓存结果（开页面不再同步等 17 个 GitHub 探测），
+        // 所以这里拿到就渲染，探测完成后的新结果靠下面几次轻量重试补上。
+        opts = opts || {};
         try {
-            const resp = await fetch('/api/sources');
+            const resp = await this._fetchWithTimeout('/api/sources', {}, 20000);
             if (!resp.ok) return;
             const d = await resp.json();
-            if (d.success && d.probed) {
-                this.renderSourceList(d.sources, d.recommended);
-                if (d.recommended) this.showSnackbar('已自动选择最优可用清单源', 'info');
+            if (!d || !d.success) return;
+            this.renderSourceList(d.sources, d.recommended);
+            if (d.recommended) this.showSnackbar('已自动选择最优可用清单源', 'info');
+            if (!d.probed && !opts.quiet && (this._srcRetryCount || 0) < 3) {
+                this._srcRetryCount = (this._srcRetryCount || 0) + 1;
+                clearTimeout(this._srcRetryTimer);
+                this._srcRetryTimer = setTimeout(
+                    () => this.refreshSourceAvailability({ quiet: true }), 4000);
             }
         } catch (e) {
             console.warn('清单源可用性刷新失败（保留首屏列表）:', e);
