@@ -32,6 +32,11 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+try:
+    import shutil
+except Exception:
+    shutil = None
+
 # ------------------------------------------------------------------ 路径分离
 IS_FROZEN = getattr(sys, 'frozen', False)
 
@@ -240,41 +245,152 @@ def load_accel_rules():
         return ''
 
 
+def _make_gpu_cache_cleaner(mod):
+    """给前端「卡死横幅」的自救按钮用：清 GPU 缓存 + 重启应用。
+
+    界面卡死时用户手里什么工具都没有（windowed 版没控制台），
+    必须能从界面上一步自救，否则只能杀进程重开，而重开**还是卡**（坏缓存还在）。
+    """
+    def _clear():
+        try:
+            purge_webview2_gpu_cache(_PROFILE_DIR, quiet=False)
+        except Exception as e:
+            print('[大轩巴] GPU 缓存清理失败:', e)
+        # 起新实例再退自己：新进程会重新清一遍并正常启动
+        try:
+            exe = sys.executable
+            args = [exe, str(sys.argv[0])] + [str(a) for a in sys.argv[1:]]
+            subprocess.Popen(args, cwd=str(Path(exe).resolve().parent))
+        except Exception as e:
+            print('[大轩巴] 重启失败:', e)
+        try:
+            os._exit(0)
+        except Exception:
+            pass
+    return _clear
+
+
+_PROFILE_DIR = None
+
+
+BROKER_FLAG = '--dxb-broker='
+
+
+def _exe_and_params():
+    """把「怎么重新拉起自己」拼成一条命令行（含引号，供 ShellExecuteW 用）。"""
+    if IS_FROZEN:
+        return sys.executable, ' '.join(f'"{a}"' for a in sys.argv[1:])
+    files = [os.path.abspath(sys.argv[0])] + list(sys.argv[1:])
+    return sys.executable, ' '.join(f'"{p}"' for p in files)
+
+
+def _pid_alive(pid: int) -> bool:
+    """目标进程还在不在（v2.35 实测修正）。
+
+    **坑**：光看 OpenProcess 返回非空是**判断不出来**的 —— 这台机器上
+    OpenProcess(0x1000, …, 已退出的 PID) 照样返回一个有效句柄，
+    所以「提权重启中介」会一直以为旧进程没死，等满 30 秒才动手，
+    表现就是点了「以管理员身份重启」后半天没反应（然后被当成「卡死」）。
+    必须再问一次退出码：259(STILL_ACTIVE) = 还活着，其它 = 已经没了。
+    """
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return False
+            return int(code.value) == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return False
+
+
+def _relaunch_via_broker(runas: bool) -> bool:
+    """用「 Broker（中介进程）」方式重启自己 —— v2.35 修掉「提权启动就卡死」。
+
+    **为什么不能像旧代码那样先起新进程、1.5 秒后再关旧进程**：
+    两个实例会同时打开**同一个持久 WebView2 profile 目录**（steambrowser_profile），
+    WebView2 对同一个 UserDataFolder 只能有一个持有者，另一个实例会一直卡在
+    初始化上（GPU 进程/配置锁）→ 表现就是「以管理员启动后卡死、新窗口永远出不来」，
+    旧窗口关掉后新窗口也不起来。用户反馈的「提权启动卡死 → 重启不是真管理员」
+    就是这个并发冲突带来的连锁反应。
+
+    Broker 的做法：**旧进程先真正退出（PID 消失），确认 profile 释放了，
+    再拉起新进程**。中间那个等待者自己就是本 exe（加 `--dxb-broker=` 参数），
+    一进来不画界面，只盯着旧 PID 等它死，然后 runas 拉起新的。
+    """
+    try:
+        exe, params = _exe_and_params()
+        payload = f"{os.getpid()}|{'1' if runas else '0'}|{exe}|{params}"
+        broker = sys.executable
+        creation = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen([broker, BROKER_FLAG + payload], creationflags=creation,
+                         close_fds=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        print(f'[大轩巴] 已派出重启中介（runas={runas}），等本进程退出后自动拉起新实例。')
+        return True
+    except Exception as e:
+        print('[大轩巴] 启动重启中介失败:', e)
+        return False
+
+
+def run_broker_mode(payload: str):
+    """Broker 进程本体：等旧进程死透，再以（可选）管理员身份拉起新实例，然后退场。"""
+    try:
+        pid_s, runas_s, exe, params = payload.split('|', 3)
+    except Exception:
+        return
+    print(f'[大轩巴] 重启中介：等 PID {pid_s} 退出…')
+    deadline = time.time() + 30
+    while _pid_alive(pid_s) and time.time() < deadline:
+        time.sleep(0.3)
+    # 再留 1.5 秒给 WebView2 / 加速内核把 profile 与端口彻底放掉
+    time.sleep(1.5)
+    try:
+        if runas_s == '1':
+            import ctypes
+            rc = ctypes.windll.shell32.ShellExecuteW(
+                None, 'runas', exe, params, str(Path(exe).resolve().parent), 1)
+            if int(rc) <= 32:
+                print(f'[大轩巴] 提权被拒绝（ShellExecuteW 返回 {rc}）—— 新实例没起来，'
+                      f'请手动右键 exe →「以管理员身份运行」。')
+        else:
+            # 注意必须把 exe 一起拼进命令行，光传参数会被当成裸命令（cmd 找不到）。
+            subprocess.Popen(f'"{exe}" {params}', shell=True)
+        print('[大轩巴] 重启中介：新实例已拉起（runas=%s）。' % runas_s)
+    except Exception as e:
+        print('[大轩巴] 新实例拉起失败:', e)
+    time.sleep(0.5)
+    try:
+        os._exit(0)
+    except Exception:
+        pass
+
+
 def _register_restart_launchers(mod, url):
     """注册提权重启 + 普通重启 launcher（与窗口引擎无关）。"""
     if hasattr(mod, 'register_elevated_restart'):
         def _relaunch_elevated():
-            import ctypes
-            if IS_FROZEN:
-                exe = sys.executable
-                params = ' '.join(f'"{a}"' for a in sys.argv[1:])
-            else:
-                exe = sys.executable
-                files = [os.path.abspath(sys.argv[0])] + list(sys.argv[1:])
-                params = ' '.join(f'"{p}"' for p in files)
-            try:
-                rc = ctypes.windll.shell32.ShellExecuteW(
-                    None, 'runas', exe, params, str(Path(exe).resolve().parent), 1)
-            except Exception as e:
-                print('[大轩巴] 提权失败:', e)
-                return False
-            if int(rc) <= 32:
-                print('[大轩巴] 提权被拒绝（ShellExecuteW 返回 %s）' % rc)
-                return False
-            # 1.5s 后再关旧实例：给 Flask 把「提权成功」的响应吐回页面留足时间
-            threading.Timer(1.5, lambda: shutdown_server(url)).start()
-            return True
+            ok = _relaunch_via_broker(runas=True)
+            if ok:
+                # 3 秒后关掉自己：给 Flask 把「提权成功」的响应吐回页面留足时间，
+                # 之后由 Broker 接管，确认本进程真的没了再拉新实例。
+                threading.Timer(3.0, lambda: shutdown_server(url)).start()
+            return ok
         mod.register_elevated_restart(_relaunch_elevated)
 
     if hasattr(mod, 'register_app_restart'):
         def _relaunch_normal():
-            try:
-                subprocess.Popen([sys.executable] + list(sys.argv[1:]))
-            except Exception as e:
-                print('[大轩巴] 重启失败:', e)
-                return False
-            threading.Timer(0.5, lambda: shutdown_server(url)).start()
-            return True
+            ok = _relaunch_via_broker(runas=False)
+            if ok:
+                threading.Timer(2.0, lambda: shutdown_server(url)).start()
+            return ok
         mod.register_app_restart(_relaunch_normal)
 
 
@@ -384,6 +500,46 @@ def port_open(host: str, port: int, timeout: float = 0.4) -> bool:
         return False
 
 
+# ------------------------------------------------------------------ GPU 缓存自清（v2.34）
+# profile 里的 GPU 磁盘缓存一旦写坏（例如上次是在渲染卡死的状态下退出的），
+# 下次启动 WebView2 的 GPU 进程会**永久挂住**：
+#   GPU 进程不响应 → 渲染等合成 → 主线程空转等 GPU（CPU 全 0，不是死循环）
+#   → 页面里所有 fetch 一个都发不出去、标题直接变「(未响应)」，
+#   界面永远停在「正在加载清单源...」，看起来就是「开个程序就卡死」。
+# profile 是持久目录，所以卡一次会**一直卡到用户手动清缓存**为止。
+# 这几类目录都是可再生的（总共几 MB），每次启动清掉代价极小。
+GPU_CACHE_DIRS = ('GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache',
+                  'GrShaderCache', 'ShaderCache', 'GPUPersistentCache')
+
+
+def purge_webview2_gpu_cache(profile_dir, quiet=True):
+    """清掉 WebView2 profile 里的 GPU / shader 磁盘缓存（可安全反复调用）。"""
+    if not profile_dir:
+        return 0
+    base = None
+    for cand in (Path(profile_dir) / 'EBWebView' / 'Default', Path(profile_dir) / 'Default'):
+        if cand.exists():
+            base = cand
+            break
+    if base is None:
+        return 0
+    n = 0
+    for name in GPU_CACHE_DIRS:
+        p = base / name
+        try:
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+                n += 1
+            elif p.exists():
+                p.unlink()
+                n += 1
+        except Exception:
+            continue
+    if n and not quiet:
+        print(f'[大轩巴] 已清理 {n} 个 GPU 缓存目录（避免上一次的坏缓存把界面卡死）。')
+    return n
+
+
 def apply_accel_to_webview2(rules, core_running=False):
     """免hosts加速 + 网络策略注入 WebView2 内核。
 
@@ -393,9 +549,16 @@ def apply_accel_to_webview2(rules, core_running=False):
     所以这里显式决定内嵌浏览器的上网方式：
       - 加速在跑 → 直连加速端口，并把 127.0.0.1 排除（本地 API 必须直连）
       - 没加速   → --no-proxy-system（彻底忽略系统代理）
+
+    v2.34：另外**关掉 shader 磁盘缓存**（--disable-gpu-shader-disk-cache /
+    --disable-gpu-program-cache）。这两个缓存正是上次「GPU 卡死」留下的病根：
+    写坏的 shader cache 会让 WebView2 的 GPU 进程每次启动都挂住，
+    渲染干等到天荒地老。禁掉后不再生成，界面不会再被上一次的坏缓存坑到。
     """
     args = []
     args.append('--proxy-bypass-list=127.0.0.1;localhost')
+    args.append('--disable-gpu-shader-disk-cache')
+    args.append('--disable-gpu-program-cache')
     if core_running:
         args.append(f'--proxy-server=http://127.0.0.1:{ACCEL_HTTP_PORT}')
     else:
@@ -869,6 +1032,14 @@ def _import_webview():
 
 def main():
     setup_logging()
+
+    # v2.35：Broker（重启中介）模式 —— 本进程一进来不画界面，
+    # 先等旧进程死透，再拉起真正的新实例，避免两个实例抢同一个 WebView2 profile。
+    for _a in list(sys.argv[1:]):
+        if str(_a).startswith(BROKER_FLAG):
+            run_broker_mode(str(_a)[len(BROKER_FLAG):])
+            return
+
     port = find_free_port()
     url = f'http://127.0.0.1:{port}'
 
@@ -956,6 +1127,23 @@ def main():
         profile_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+
+    # v2.34：进消息泵之前先清 GPU 缓存。
+    # 上次如果是在「渲染卡死」的状态下退出的，profile 里会留下写坏的
+    # GPUCache / Dawn*，这次启动 GPU 进程照样挂住 → 界面又卡死，恶性循环。
+    global _PROFILE_DIR
+    _PROFILE_DIR = profile_dir
+    try:
+        n = purge_webview2_gpu_cache(profile_dir, quiet=False)
+        if n:
+            print(f'[大轩巴] 已清理 {n} 个 GPU 缓存目录（防止上一次的坏缓存把界面卡死）。')
+    except Exception as e:
+        print('[大轩巴] GPU 缓存清理失败（不影响启动）：', e)
+    try:
+        if hasattr(mod, 'register_gpu_cache_cleaner'):
+            mod.register_gpu_cache_cleaner(_make_gpu_cache_cleaner(mod))
+    except Exception as e:
+        print('[大轩巴] 注册 GPU 缓存清理器失败（不影响启动）：', e)
 
     def _open_external_url(url):
         u = str(url or '').strip()

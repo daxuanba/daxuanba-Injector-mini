@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.33"
+CURRENT_VERSION = "2.35"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -80,6 +80,17 @@ STEAM_STORE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 
 _LOGIN_CTX = {}
 _LOGIN_CLIENT = None
+#: v2.35：Steam 对「rsatimestamp 过期 / 代理出口被风控 / 真密码错」**回的是同一句**
+#: 「您输入的用户名或密码错误」。所以通用密码错要**先重取一次 RSA 公钥再提交一次**，
+#: 还不行才敢下结论，否则用户明明密码没错也被说成密码错（反复反馈的头号问题）。
+_LOGIN_RETRY = {'done': False}
+
+
+def _is_generic_pwd_error(msg: str) -> bool:
+    m = str(msg or '')
+    return ('密码' in m and ('错误' in m or '不正确' in m or '不对' in m)) or \
+        ('用户名' in m and ('错误' in m or '不正确' in m or '不对' in m)) or \
+        ('帐号' in m and '错误' in m) or ('帐户' in m and '错误' in m)
 
 #: 登录各阶段超时（秒）。v2.32 之前一律 40s，直连打不开 Steam 登录口时
 #: 用户点「下一步」要干等 40~80 秒没有下文（界面看着就是「卡死」），这里全部收紧。
@@ -202,6 +213,36 @@ def _with_proxy_hint(msg: str) -> str:
     except Exception:
         pass
     return text
+
+
+def _hosts_lock_reason() -> str:
+    """hosts 写不进去时说清楚**到底为什么**（v2.35）。
+
+    以前一律回「需要管理员权限」，但真实原因可能有三种：
+      1) 进程没提权 —— 右键「以管理员身份运行」或点应用内提权重启即可；
+      2) 已经提权了，但文件被 Windows 安全中心的**受控文件夹访问**锁了
+         （Windows 安全中心 → 病毒和威胁防护 → 受控文件夹访问），
+         这种管理员也写不进去，提权根本没用；
+      3) 安全软件/组策略/只读属性拦着。
+    分不清这三种，用户就只会来回试「以管理员启动」，越试越卡。
+    """
+    p = r'C:\Windows\System32\drivers\etc\hosts'
+    try:
+        with open(p, 'a', encoding='utf-8', errors='surrogateescape'):
+            pass
+        return '写入被拒绝（但文件可打开，情况罕见）'
+    except PermissionError:
+        try:
+            import ctypes
+            admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            admin = False
+        if not admin:
+            return '当前进程不是管理员，写系统 hosts 被拒绝'
+        return ('当前已是管理员，但 hosts 被系统锁定（大概率是 Windows 安全中心'
+                '「受控文件夹访问」或安全软件拦着，提权也写不进去）')
+    except OSError as e:
+        return f'hosts 文件被占用/只读（{e.errno}）'
 
 
 def _reset_login_client():
@@ -2051,8 +2092,26 @@ class DxbBackend:
             block.append(cat['end'])
             self._write_hosts(text.rstrip('\r\n') + '\n\n' + '\n'.join(block) + '\n')
         except PermissionError:
-            return {'success': False, 'need_admin': True,
-                    'message': '写入 hosts 需要管理员权限 —— 请点「以管理员身份重启」后重试。'}
+            # v2.35：写 hosts 被拒（没提权 **或者** 受控文件夹访问/杀软把 hosts 锁了）
+            # 以前直接卡在「请先以管理员身份重启」，用户卡在死结里出不来。
+            # 免hosts加速（--host-resolver-rules）根本不碰系统 hosts，照样能用，
+            # 所以这里自动降级，把「要管理员」变成一个可选提示而不是死路。
+            try:
+                diag = _hosts_lock_reason()
+            except Exception:
+                diag = ''
+            fb = self.accel_hostsfree_apply(category,
+                                            [{'domain': d, 'ip': ip} for d, ip in pairs])
+            if not fb.get('success'):
+                return {'success': False, 'need_admin': True,
+                        'message': f'写入 hosts 需要管理员权限（{diag}）—— 请点「以管理员身份重启」'
+                                   '后重试，或改用「免hosts加速」（无需管理员）。'}
+            return {'success': True, 'category': category, 'count': len(pairs),
+                    'degraded': 'hostsfree',
+                    'backup': None, 'dns_flushed': False,
+                    'message': f'hosts 写不进去（{diag or "权限不足/被安全软件锁定"}），'
+                               f'已自动改用「免hosts加速」：同样能加速，但只作用于本程序的内置浏览器，'
+                               f'不改动系统 hosts、不需要管理员。'}
         except Exception as e:
             return {'success': False, 'message': f'写入 hosts 失败：{e}'}
 
@@ -2080,8 +2139,14 @@ class DxbBackend:
         try:
             self._write_hosts(self._drop_accel_block(self._read_hosts(), cat['begin'], cat['end']))
         except PermissionError:
-            return {'success': False, 'need_admin': True,
-                    'message': '修改 hosts 需要管理员权限 —— 请点「以管理员身份重启」后重试。'}
+            # v2.35：还原本来就不需要写 hosts 之外的权限，直接清掉免hosts映射兜底，
+            # 别把用户卡在「请提权」上（提权失败时这一步必须能执行成功）。
+            fb = self.accel_hostsfree_restore(category)
+            fb.pop('message', None)
+            return {'success': True, 'category': category, 'removed': n,
+                    'degraded': 'hostsfree', **fb,
+                    'message': 'hosts 不可写（已自动清理免hosts加速映射），'
+                               '系统级加速还原需要管理员，可忽略这一步。'}
         except Exception as e:
             return {'success': False, 'message': f'还原失败：{e}'}
 
@@ -2708,6 +2773,7 @@ class DxbBackend:
             if not challenge:
                 # 清掉上一轮的残留上下文，避免串号
                 _LOGIN_CTX.clear()
+                _LOGIN_RETRY['done'] = False
                 rj = None
                 last_err = ''
                 for mode in (_login_mode(), _login_other_mode()):
@@ -2864,6 +2930,24 @@ class DxbBackend:
 
             if not msg:
                 msg = '登录失败，请检查用户名密码。'
+
+            # ---- v2.35：通用「密码错误」先自愈一次，别急着甩锅给用户 ----
+            # Steam 的 rsatimestamp / rsakey_hash 是有寿命的（约 5 分钟，
+            # 且换 IP 会失效）。过期时它回的中文文案跟真密码错**一字不差**，
+            # 老代码直接把这句丢给用户 → 用户密码明明是对的，被说成密码错。
+            # 这里自动重新取一次 RSA 公钥再提交一次；还错才认。
+            if _is_generic_pwd_error(msg) and not _LOGIN_RETRY['done']:
+                _LOGIN_RETRY['done'] = True
+                _retry_user = str(ctx.get('username') or '')
+                _retry_pass = str(ctx.get('password') or '')
+                self.log.info('Steam 登录返回通用「密码错误」，重新取 RSA 公钥后自动重试一次…')
+                try:
+                    _LOGIN_CTX.clear()
+                    _reset_login_client()
+                    return self.steam_web_login(username=_retry_user, password=_retry_pass)
+                except Exception as e:
+                    self.log.warning('登录自动重试失败：%s', self.stack_error(e)[:200])
+
             _reset_login_client()
             return {"success": False, "need_email": False,
                     "message": (_with_proxy_hint(msg))[:400]}

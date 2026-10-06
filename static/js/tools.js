@@ -401,12 +401,20 @@ class ToolsApp {
             if (d && d.success) {
                 this.privilege = d;
                 if (verbose) {
-                    const msg = d.admin
+                    const w = d.hosts_writable;
+                    const msg = (d.admin && w)
                         ? `检测结果：管理员权限（PID ${d.pid}），写 hosts 可用。`
-                        : `检测结果：普通用户（PID ${d.pid}），写 hosts 会被拒绝，需以管理员身份重启。`;
-                    this.showSnackbar(msg, d.admin ? 'success' : 'warning');
-                    this.log(d.admin ? 'success' : 'warn', msg);
+                        : (!d.admin && !w)
+                            ? `检测结果：普通用户（PID ${d.pid}），写 hosts 会被拒（实测不可写）—— `
+                              + `可点「以管理员身份重启」，或直接用「免hosts加速」无需管理员。`
+                            : (d.admin && !w)
+                                ? `检测结果：已是管理员，但实测写 hosts 被拒（多半是 Windows 安全中心`
+                                  + `「受控文件夹访问」或安全软件锁了 hosts，提权无用）—— 请改用「免hosts加速」。`
+                                : `检测结果：普通用户（PID ${d.pid}），写 hosts 会被拒绝 —— 建议用「免hosts加速」。`;
+                    this.showSnackbar(msg, (d.admin && w) ? 'success' : 'warning');
+                    this.log((d.admin && w) ? 'success' : 'warn', msg);
                 }
+                this._privilegeCache = d;
             }
         } catch (e) {
             if (verbose) {
@@ -457,9 +465,14 @@ class ToolsApp {
         if (!pv) {
             ptx.textContent = '权限检测：检测中…';
         } else if (pv.admin) {
-            ptx.textContent = `权限检测：管理员（PID ${pv.pid}）—— 可直接写 hosts 做系统级加速。`;
+            ptx.textContent = pv.writable === false
+                ? `权限检测：已是管理员，但实测 hosts 写不进去（被安全软件/受控文件夹访问锁住，提权没用）`
+                  + `—— 建议直接用「免hosts加速」，效果一样且不需要管理员。`
+                : `权限检测：管理员（PID ${pv.pid}）—— 可直接写 hosts 做系统级加速。`;
         } else {
-            ptx.textContent = `权限检测：普通用户（PID ${pv.pid}）—— 写 hosts 会被系统拒绝，需管理员权限。`;
+            ptx.textContent = `权限检测：普通用户（PID ${pv.pid}）`
+                + (pv.writable === false ? '，实测 hosts 不可写' : '')
+                + `—— 可点右边「以管理员身份重启」，或直接用「免hosts加速」不用管理员。`;
         }
         const recheckBtn = document.createElement('button');
         recheckBtn.className = 'btn btn-secondary';

@@ -260,6 +260,7 @@ def register_app_restart(fn):
 
 
 _window_closer = None
+_gpu_cache_cleaner = None
 
 
 def register_window_closer(fn):
@@ -270,6 +271,31 @@ def register_window_closer(fn):
     """
     global _window_closer
     _window_closer = fn if callable(fn) else None
+
+
+def register_gpu_cache_cleaner(fn):
+    """由桌面壳注入：fn() 清掉 WebView2 的 GPU 缓存并重启应用。
+
+    v2.34 场景：界面「卡死」有时候真不是后端慢，而是 WebView2 的 GPU 磁盘缓存
+    写坏了（profile 是持久目录）—— GPU 进程挂住，页面里所有 fetch 一个都发不出，
+    标题变「(未响应)」，界面永远停在「正在加载清单源...」。
+    用户没控制台可看，所以要能在界面上一键自救。
+    """
+    global _gpu_cache_cleaner
+    _gpu_cache_cleaner = fn if callable(fn) else None
+
+
+@app.route('/api/gpu_cache/clear', methods=['POST'])
+def gpu_cache_clear():
+    """前端「卡死横幅」的自救按钮：清 GPU 缓存 + 重启（桌面壳注入，纯 Flask 环境为 no-op）。"""
+    fn = _gpu_cache_cleaner
+    if not callable(fn):
+        return jsonify({"success": False, "message": "当前环境不支持清理（请使用 exe 版）。"})
+    try:
+        fn()
+        return jsonify({"success": True, "message": "已清理缓存并重启。"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 def _is_steam_logged_in() -> bool:
@@ -2032,9 +2058,17 @@ def app_privilege():
         is_admin = bool(DxbBackend.is_admin())
     except Exception:
         is_admin = False
+    # v2.35：光看 IsUserAnAdmin 不够 —— 已提权但 hosts 被「受控文件夹访问」锁住时
+    # 它照样说「是管理员」，用户就会被卡在死循环里反复提权。这里再实测一次能否写。
+    hosts_writable = False
+    try:
+        hosts_writable = bool(DxbBackend._hosts_writable())
+    except Exception:
+        hosts_writable = False
     return jsonify({
         "success": True,
         "admin": is_admin,
+        "hosts_writable": hosts_writable,
         "level": "admin" if is_admin else "user",
         "pid": os.getpid(),
         "exe": sys.executable,

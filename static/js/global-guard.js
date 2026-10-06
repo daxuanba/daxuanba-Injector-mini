@@ -113,4 +113,72 @@
             if (ev && ev.message && /Failed to fetch|NetworkError|net::/i.test(String(ev.message))) { return; }
         } catch (e) { /* ignore */ }
     });
+
+    // ------------------------------------------------------------------
+    // 「界面卡住不看后端」自检（v2.34）
+    //
+    // 真实案例：WebView2 的 GPU 缓存写坏后，GPU 进程直接挂住 —— 页面渲染得出来，
+    // 但所有 fetch 一个都发不出去，界面永远停在「正在加载清单源...」，
+    // 标题还变「(未响应)」。这时候后端接口其实是秒回的（从外面 curl 0.1s），
+    // 日志也看不到任何请求 —— 光看后端 / 光看接口耗时完全查不出来。
+    //
+    // 所以这里做前端自检：8 秒后页面里还有「转圈 / 加载中」的占位没被替换掉，
+    // 就直接告诉用户「是渲染卡住，不是接口慢」，并给两个自救按钮：
+    //   1) 刷新界面（location.reload）
+    //   2) 清 GPU 缓存并重启（/api/gpu_cache/clear，桌面壳会清 profile 里的缓存再重启）
+    // ------------------------------------------------------------------
+    function hasStuckLoading() {
+        var nodes = document.querySelectorAll('.loading, .spinner-box, .loading-spinner');
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            var t = (el.textContent || '').trim();
+            // 只看「还在加载中」的占位：转圈文案 / loading 类
+            if (el.offsetParent !== null || t) { return true; }
+        }
+        return false;
+    }
+
+    function showStuckBanner() {
+        var box = document.createElement('div');
+        box.id = 'dxbStuckBanner';
+        box.style.cssText = [
+            'position:fixed', 'bottom:16px', 'left:50%', 'transform:translateX(-50%)',
+            'z-index:100000', 'max-width:min(720px,92vw)',
+            'padding:12px 14px', 'border-radius:10px',
+            'background:#5b1f1f', 'color:#fff', 'font-size:13px', 'line-height:1.6',
+            'box-shadow:0 6px 20px rgba(0,0,0,.5)', 'display:block'
+        ].join(';');
+        var txt = document.createElement('div');
+        txt.innerHTML = '<b>界面看着卡住了，但接口其实有在回。</b>'
+            + '多半是 WebView2 的显卡缓存坏了（GPU 进程挂住），不是网络慢。'
+            + '可以先刷新界面试试；还不行就点「清缓存重启」。';
+        box.appendChild(txt);
+        var row = document.createElement('div');
+        row.style.cssText = 'margin-top:8px;display:flex;gap:8px;flex-wrap:wrap';
+        function mk(label, fn) {
+            var b = document.createElement('button');
+            b.textContent = label;
+            b.style.cssText = 'padding:6px 12px;border:1px solid #fff;border-radius:6px;'
+                + 'background:transparent;color:#fff;cursor:pointer;font-size:12px';
+            b.onclick = fn;
+            row.appendChild(b);
+        }
+        mk('刷新界面', function () { try { location.reload(); } catch (e) { /* noop */ } });
+        mk('清缓存并重启', function () {
+            var b = row.querySelector('button:nth-child(2)');
+            if (b) { b.textContent = '清缓存中…'; b.disabled = true; }
+            fetch('/api/gpu_cache/clear', { method: 'POST' })
+                .catch(function () { location.reload(); });
+        });
+        box.appendChild(row);
+        document.body.appendChild(box);
+    }
+
+    setTimeout(function () {
+        try {
+            if (document.readyState === 'complete' || document.readyState === 'interactive') {
+                if (hasStuckLoading()) { showStuckBanner(); }
+            }
+        } catch (e) { /* 自检失败就算了 */ }
+    }, 8000);
 })();
