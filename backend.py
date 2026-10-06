@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.28"
+CURRENT_VERSION = "2.29"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'
@@ -211,6 +211,13 @@ STEAM_ACCEL_DOH = [
     'https://doh.360.cn/resolve',
     'https://223.5.5.5/resolve',
 ]
+
+# 测速选优三个网络阶段的总时限（秒）。整段 scan 最坏约 50 秒收尾，
+# 任何一段卡住（系统代理开着、DNS 被污染、境外 IP 直连超时）都到点就返回
+# 已经拿到的那部分，并标记 partial —— 绝不让界面一直转圈到像死了一样。
+ACCEL_DOH_TIMEOUT = 12.0
+ACCEL_SYSRESOLVE_TIMEOUT = 6.0
+ACCEL_PROBE_TIMEOUT = 28.0
 
 HOSTS_ACCEL_BEGIN = '# ==== 大轩巴 Steam 加速 BEGIN ===='
 HOSTS_ACCEL_END = '# ==== 大轩巴 Steam 加速 END ===='
@@ -1664,10 +1671,15 @@ class DxbBackend:
         except Exception:
             return False
 
-    def _doh_query(self, provider: str, domain: str, timeout: float = 4.0) -> List[str]:
-        """DoH（dns-json）查 A 记录，绕开被污染的系统 DNS。"""
+    def _doh_query(self, provider: str, domain: str, timeout: float = 3.0) -> List[str]:
+        """DoH（dns-json）查 A 记录，绕开被污染的系统 DNS。
+
+        **必须 trust_env=False（直连，不吃系统代理）**：DoH 是加速的“地基”，
+        一旦跟着系统代理走，代理没开/开着坏代理时每条查询都要等满超时，
+        几十条并发全部挂住，前端表现就是「点了测速选优转半天、像卡死」。
+        """
         try:
-            with httpx.Client(verify=False, timeout=timeout, trust_env=True) as c:
+            with httpx.Client(verify=False, timeout=timeout, trust_env=False) as c:
                 r = c.get(provider, params={'name': domain, 'type': 'A'},
                           headers={'accept': 'application/dns-json'})
                 if r.status_code != 200:
@@ -1817,33 +1829,54 @@ class DxbBackend:
     def accel_scan(self, category: str = 'steam',
                    domains: List[str] | None = None,
                    max_ip_per_domain: int = 8) -> Dict:
-        """并发 DoH 解析 + 真实测速，为每个域名挑最快 IP。"""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        """并发 DoH 解析 + 真实测速，为每个域名挑最快 IP。
+
+        三段网络操作（多源 DoH / 系统解析 / TCP-TLS-HTTP 实测）**各自带总时限**，
+        到点就收摊返回已拿到的部分并标记 partial —— 这是「点测速选优卡死」的根治：
+        以前只要有一段慢（最常见的就是系统代理开着导致 DoH 全超时、、
+        或系统 DNS 被污染导致 getaddrinfo 一次挂十几秒），整个接口能拖到几分钟。
+        """
+        from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 
         cat = ACCEL_CATEGORIES.get(category, ACCEL_CATEGORIES['steam'])
         want = set(domains or [])
         targets = [t for t in cat['domains'] if not want or t[0] in want] or list(cat['domains'])
 
+        started = time.perf_counter()
+        partial = False
+
+        def _merge(domain: str, ips) -> None:
+            bucket = pool.setdefault(domain, [])
+            for ip in (ips or []):
+                if ip not in bucket:
+                    bucket.append(ip)
+
         pool: Dict[str, List[str]] = {}
+
+        # ① 多源 DoH 解析
         with ThreadPoolExecutor(max_workers=16) as ex:
             futs = {ex.submit(self._doh_query, p, d): d
                     for d, _, _ in targets for p in STEAM_ACCEL_DOH}
-            for f in as_completed(futs):
-                d = futs[f]
+            done, _pending = wait(futs, timeout=ACCEL_DOH_TIMEOUT,
+                                  return_when=ALL_COMPLETED)
+            partial |= bool(_pending)
+            for f in done:
                 try:
-                    ips = f.result() or []
+                    _merge(futs[f], f.result())
                 except Exception:
-                    ips = []
-                bucket = pool.setdefault(d, [])
-                for ip in ips:
-                    if ip not in bucket:
-                        bucket.append(ip)
+                    pass
 
-        for d, _, _ in targets:
-            bucket = pool.setdefault(d, [])
-            for ip in self._system_resolve(d):
-                if ip not in bucket:
-                    bucket.append(ip)
+        # ② 系统解析兜底（以前是 22 次串行 getaddrinfo，DNS 慢时一次能挂十几秒）
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            sfuts = {ex.submit(self._system_resolve, d): d for d, _, _ in targets}
+            done, _pending = wait(sfuts, timeout=ACCEL_SYSRESOLVE_TIMEOUT,
+                                  return_when=ALL_COMPLETED)
+            partial |= bool(_pending)
+            for f in done:
+                try:
+                    _merge(sfuts[f], f.result())
+                except Exception:
+                    pass
 
         local_accel = self._detect_local_accel()
         for d in list(pool):
@@ -1855,7 +1888,10 @@ class DxbBackend:
             for d, _, _ in targets:
                 for ip in pool.get(d, [])[:max_ip_per_domain]:
                     job[ex.submit(self._probe_steam_ip, ip, d)] = d
-            for f in as_completed(job):
+            done, _pending = wait(job, timeout=ACCEL_PROBE_TIMEOUT,
+                                  return_when=ALL_COMPLETED)
+            partial |= bool(_pending)
+            for f in done:
                 d = job[f]
                 try:
                     r = f.result()
@@ -1888,7 +1924,9 @@ class DxbBackend:
         return {'success': True, 'category': category, 'label': cat['label'], 'domains': rows,
                 'admin': self.is_admin(), 'writable': self._hosts_writable(),
                 'local_accel': local_accel, 'applied': applied,
-                'hosts_path': str(self._hosts_file)}
+                'hosts_path': str(self._hosts_file),
+                'elapsed_ms': int((time.perf_counter() - started) * 1000),
+                'partial': partial}
 
     def steam_accel_apply(self, entries: List[Dict]) -> Dict:
         return self.accel_apply('steam', entries)

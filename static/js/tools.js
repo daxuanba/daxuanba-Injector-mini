@@ -1,3 +1,7 @@
+// 测速选优前端总超时（毫秒）。后端三段各带时限，最坏约 50 秒收尾，
+// 这里留到 75 秒：宁可慢一点也别在无网环境里把界面吊死（旧版是无限等）。
+const ACCEL_SCAN_TIMEOUT_MS = 75000;
+
 class ToolsApp {
     constructor() {
         this.elements = {
@@ -330,12 +334,29 @@ class ToolsApp {
         const btns = document.querySelectorAll('#accelMode .accel-mode');
         btns.forEach(b => b.addEventListener('click', () => {
             if (b.dataset.mode === this.accelMode) return;
-            this.accelMode = b.dataset.mode;
-            btns.forEach(x => x.classList.toggle('active', x === b));
-            this.updateAccelModeUI();
-            this.loadAccelStatus();
+            this._modeTouched = true;
+            this.switchAccelMode(b.dataset.mode);
         }));
         this.updateAccelModeUI();
+    }
+
+    switchAccelMode(mode) {
+        this.accelMode = mode;
+        document.querySelectorAll('#accelMode .accel-mode').forEach(
+            x => x.classList.toggle('active', x.dataset.mode === mode));
+        this.updateAccelModeUI();
+        this.loadAccelStatus();
+    }
+
+    /** 没权限 / hosts 不可写时自动落到「免hosts 代理」（不用管理员就能开加速）。
+        用户一旦手动点过模式（_modeTouched）就再也不插手。 */
+    autoSelectAccelMode() {
+        if (this._modeTouched || !this.privilege || !this.accelStatus) return;
+        const canHosts = !!(this.privilege.admin && this.accelStatus.writable);
+        if (this.accelMode === 'hosts' && !canHosts) {
+            this.switchAccelMode('free');
+            this.log('warn', '当前是普通用户、写 hosts 会被系统拒绝，已自动切到「免hosts 代理」方式。');
+        }
     }
 
     updateAccelModeUI() {
@@ -394,6 +415,7 @@ class ToolsApp {
             }
         }
         if (this.accelStatus) this.renderAccelSummary(this.accelStatus);
+        this.autoSelectAccelMode();
     }
 
     renderAccelSummary(s) {
@@ -485,15 +507,40 @@ class ToolsApp {
     }
 
     async accelScan() {
-        this.elements.accelScanBtn.disabled = true;
-        this.elements.accelList.innerHTML =
-            '<div class="empty-hint">正在并发解析 + 实测各域名候选 IP，大约 5~15 秒…</div>';
+        const btn = this.elements.accelScanBtn;
+        const list = this.elements.accelList;
+        if (btn.disabled) return;
+        btn.disabled = true;
+
+        const ctrl = new AbortController();
+        const killer = setTimeout(() => ctrl.abort(), ACCEL_SCAN_TIMEOUT_MS);
+        let stage = 0;
+        const hint = setInterval(() => {
+            stage += 1;
+            const txt = stage === 1
+                ? '正在直连 DoH 解析各域名（不吃系统代理，最多 12 秒）…'
+                : '正在实测候选 IP（TCP/TLS，最多 28 秒）…';
+            if (list) {
+                list.innerHTML = `<div class="empty-hint">${txt}` +
+                    ' <a href="#" id="accelCancelScan" style="color:#ffd76a">取消</a></div>';
+                const a = document.getElementById('accelCancelScan');
+                if (a) a.addEventListener('click', (ev) => {
+                    ev.preventDefault();
+                    ctrl.abort();
+                });
+            }
+        }, 5000);
+
+        const setHint = (html) => { if (list) list.innerHTML = html; };
+        setHint('正在解析域名…');
         this.log('info', '开始测速选优：多源 DoH 解析 + TCP/TLS/HTTP 三段实测…');
+
         try {
             const r = await fetch(`/api/accel/${this.accelCategory}/scan`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({}),
+                signal: ctrl.signal,
             });
             const d = await r.json();
             if (!d.success) throw new Error(d.message || '测速失败');
@@ -501,13 +548,21 @@ class ToolsApp {
             this.renderAccelScan(d);
             const total = (d.domains || []).length;
             const ok = (d.domains || []).filter(x => x.best).length;
-            this.log(ok ? 'success' : 'warn', `测速完成：${ok}/${total} 个域名找到可用 IP。`);
+            const secs = ((d.elapsed_ms || 0) / 1000).toFixed(1);
+            const tail = d.partial ? '（部分阶段超时已跳过，结果可能不全）' : '';
+            this.log(ok ? 'success' : 'warn',
+                `测速完成（${secs} 秒）：${ok}/${total} 个域名找到可用 IP。${tail}`);
         } catch (e) {
-            this.elements.accelList.innerHTML = `<div class="empty-hint">测速失败：${e.message}</div>`;
-            this.log('error', `测速失败：${e.message}`);
-            this.showSnackbar(`测速失败：${e.message}`, 'error');
+            const msg = (e && e.name === 'AbortError')
+                ? `测速超时（超过 ${Math.round(ACCEL_SCAN_TIMEOUT_MS / 1000)} 秒被取消）`
+                : (e && e.message) || '测速失败';
+            setHint(`<div class="empty-hint">${msg}</div>`);
+            this.log('error', msg);
+            this.showSnackbar(msg, 'error');
         } finally {
-            this.elements.accelScanBtn.disabled = false;
+            clearTimeout(killer);
+            clearInterval(hint);
+            if (btn) btn.disabled = false;
         }
     }
 
