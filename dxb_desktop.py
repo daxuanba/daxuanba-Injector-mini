@@ -310,7 +310,7 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _relaunch_via_broker(runas: bool) -> bool:
+def _relaunch_via_broker(runas: bool, reset_profile: bool = False) -> bool:
     """用「 Broker（中介进程）」方式重启自己 —— v2.35 修掉「提权启动就卡死」。
 
     **为什么不能像旧代码那样先起新进程、1.5 秒后再关旧进程**：
@@ -323,27 +323,73 @@ def _relaunch_via_broker(runas: bool) -> bool:
     Broker 的做法：**旧进程先真正退出（PID 消失），确认 profile 释放了，
     再拉起新进程**。中间那个等待者自己就是本 exe（加 `--dxb-broker=` 参数），
     一进来不画界面，只盯着旧 PID 等它死，然后 runas 拉起新的。
+
+    reset_profile=True 时（看门狗判卡死后的自愈），等旧进程释放后先整目录删掉
+    EBWebView 再拉新实例 —— 把任何 profile 级损坏一并抹掉。
     """
     try:
         exe, params = _exe_and_params()
-        payload = f"{os.getpid()}|{'1' if runas else '0'}|{exe}|{params}"
+        payload = f"{os.getpid()}|{'1' if runas else '0'}|{exe}|{params}|{'1' if reset_profile else '0'}"
         broker = sys.executable
         creation = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         subprocess.Popen([broker, BROKER_FLAG + payload], creationflags=creation,
                          close_fds=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
-        print(f'[大轩巴] 已派出重启中介（runas={runas}），等本进程退出后自动拉起新实例。')
+        print(f'[大轩巴] 已派出重启中介（runas={runas}, reset_profile={reset_profile}），'
+              f'等本进程退出后自动拉起新实例。')
         return True
     except Exception as e:
         print('[大轩巴] 启动重启中介失败:', e)
         return False
 
 
+# v2.36：启动看门狗的「自愈」计数文件 —— 防止卡死→重置→又卡死 无限循环。
+# 格式：USER_DIR/.dxb_recover.json -> {"attempts": N, "ts": epoch}
+def _recover_state_file():
+    try:
+        return USER_DIR / '.dxb_recover.json'
+    except Exception:
+        return None
+
+
+def _read_recover_state():
+    p = _recover_state_file()
+    if not p or not p.exists():
+        return {"attempts": 0, "ts": 0}
+    try:
+        import json as _json
+        return _json.loads(p.read_text(encoding='utf-8') or '{}')
+    except Exception:
+        return {"attempts": 0, "ts": 0}
+
+
+def _write_recover_state(state):
+    p = _recover_state_file()
+    if not p:
+        return
+    try:
+        import json as _json
+        p.write_text(_json.dumps(state), encoding='utf-8')
+    except Exception:
+        pass
+
+
+def _clear_recover_state():
+    p = _recover_state_file()
+    if p and p.exists():
+        try:
+            p.unlink()
+        except Exception:
+            pass
+
+
 def run_broker_mode(payload: str):
     """Broker 进程本体：等旧进程死透，再以（可选）管理员身份拉起新实例，然后退场。"""
     try:
-        pid_s, runas_s, exe, params = payload.split('|', 3)
+        parts = payload.split('|', 4)
+        pid_s, runas_s, exe, params = parts[0], parts[1], parts[2], parts[3]
+        reset_s = parts[4] if len(parts) > 4 else '0'
     except Exception:
         return
     print(f'[大轩巴] 重启中介：等 PID {pid_s} 退出…')
@@ -353,6 +399,13 @@ def run_broker_mode(payload: str):
     # 再留 1.5 秒给 WebView2 / 加速内核把 profile 与端口彻底放掉
     time.sleep(1.5)
     try:
+        if reset_s == '1':
+            try:
+                _prof = USER_DIR / 'steambrowser_profile'
+                if reset_webview_profile(_prof):
+                    print('[大轩巴] 重启中介：已重置 WebView2 profile（清掉坏缓存/损坏状态）。')
+            except Exception as e:
+                print('[大轩巴] 重置 profile 失败（不影响重启）：', e)
         if runas_s == '1':
             import ctypes
             rc = ctypes.windll.shell32.ShellExecuteW(
@@ -363,7 +416,7 @@ def run_broker_mode(payload: str):
         else:
             # 注意必须把 exe 一起拼进命令行，光传参数会被当成裸命令（cmd 找不到）。
             subprocess.Popen(f'"{exe}" {params}', shell=True)
-        print('[大轩巴] 重启中介：新实例已拉起（runas=%s）。' % runas_s)
+        print('[大轩巴] 重启中介：新实例已拉起（runas=%s, reset=%s）。' % (runas_s, reset_s))
     except Exception as e:
         print('[大轩巴] 新实例拉起失败:', e)
     time.sleep(0.5)
@@ -371,6 +424,53 @@ def run_broker_mode(payload: str):
         os._exit(0)
     except Exception:
         pass
+
+
+def _hang_watchdog(mod, profile_dir, timeout=30, max_attempts=2):
+    """启动看门狗（后台线程）：若页面在 timeout 秒内始终没成功加载（后端没收到
+    /api/sources 这个「页面真跑起来了」的信号），判定卡死 → 自动重置 WebView2
+    profile 并重启，无需用户点任何按钮。带 max_attempts 上限防止无限循环。
+
+    页面正常加载后调用方会清掉计数；本线程只负责「没加载就自愈」。
+    """
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if getattr(mod, 'DXB_PAGE_LOADED', False) or getattr(getattr(mod, 'app', None), 'dxb_page_loaded', False):
+                # 页面正常起来了：清掉历史自愈计数，安心退出看门狗
+                _clear_recover_state()
+                return
+            time.sleep(1)
+        # 超时：判定卡死，尝试自愈
+        st = _read_recover_state()
+        attempts = int(st.get('attempts', 0) or 0)
+        if attempts >= max_attempts:
+            print(f'[大轩巴] 看门狗：已自愈 {attempts} 次仍无法加载，放弃自动恢复。')
+            _message_box(
+                '界面连续多次都无法正常加载。\n\n'
+                '这通常是 WebView2 运行时有问题（不是网络）。\n'
+                '建议：\n'
+                '1) 到微软官网重装「Microsoft Edge WebView2 Runtime」；\n'
+                '2) 或临时关闭杀毒/防火墙对本程序的拦截后重试。\n\n'
+                '详情见 设置 → 关于 → 打开日志。',
+                '大轩巴入库器mini · 界面无法加载', 0x10 | 0x00)
+            try:
+                os._exit(1)
+            except Exception:
+                pass
+            return
+        attempts += 1
+        _write_recover_state({"attempts": attempts, "ts": int(time.time())})
+        print(f'[大轩巴] 看门狗：{timeout}s 内页面始终没加载成功（疑似卡死），'
+              f'第 {attempts} 次自动重置 WebView2 并重启…')
+        if _relaunch_via_broker(runas=False, reset_profile=True):
+            time.sleep(1)
+            try:
+                os._exit(0)
+            except Exception:
+                pass
+    except Exception as e:
+        print('[大轩巴] 看门狗异常（不影响正常使用）：', e)
 
 
 def _register_restart_launchers(mod, url):
@@ -509,7 +609,32 @@ def port_open(host: str, port: int, timeout: float = 0.4) -> bool:
 # profile 是持久目录，所以卡一次会**一直卡到用户手动清缓存**为止。
 # 这几类目录都是可再生的（总共几 MB），每次启动清掉代价极小。
 GPU_CACHE_DIRS = ('GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache',
-                  'GrShaderCache', 'ShaderCache', 'GPUPersistentCache')
+                  'GrShaderCache', 'ShaderCache', 'GPUPersistentCache',
+                  'Code Cache', 'Service Worker')
+
+
+def reset_webview_profile(profile_dir):
+    """【核弹级兜底】整目录删掉 WebView2 的 EBWebView 数据（GPU 缓存、登录态、所有持久状态）。
+
+    仅在「启动看门狗判定页面真的卡死」时调用：删掉整个 EBWebView，
+    下次启动 WebView2 会重建一份干净的，坏缓存 / 任何 profile 级损坏都一并抹掉。
+    代价是 Steam 登录态丢失（可用手动粘贴 / 已存的令牌兜底，不影响入库）。
+    返回是否真的删了东西。
+    """
+    if not profile_dir:
+        return False
+    removed = False
+    for cand in (Path(profile_dir) / 'EBWebView', Path(profile_dir) / 'Default'):
+        try:
+            if cand.is_dir():
+                shutil.rmtree(cand, ignore_errors=True)
+                removed = True
+            elif cand.exists():
+                cand.unlink()
+                removed = True
+        except Exception:
+            continue
+    return removed
 
 
 def purge_webview2_gpu_cache(profile_dir, quiet=True):
@@ -559,6 +684,9 @@ def apply_accel_to_webview2(rules, core_running=False):
     args.append('--proxy-bypass-list=127.0.0.1;localhost')
     args.append('--disable-gpu-shader-disk-cache')
     args.append('--disable-gpu-program-cache')
+    # 关掉 GPU 看门狗线程：偶尔的 GPU 抖动不会反过来把渲染进程卡死，
+    # 配合上面的缓存禁用 + 看门狗自愈，彻底掐掉「GPU 进程挂住→界面未响应」这一类。
+    args.append('--disable-gpu-watchdog')
     if core_running:
         args.append(f'--proxy-server=http://127.0.0.1:{ACCEL_HTTP_PORT}')
     else:
@@ -1219,6 +1347,12 @@ def main():
     threading.Thread(target=_warn_if_stuck, daemon=True).start()
 
     print('[大轩巴] 使用内嵌 WebView2 窗口打开界面。')
+    # v2.36：启动看门狗 —— 若 30 秒内页面始终没真正加载成功（后端收不到
+    # /api/sources 这个「页面跑起来了」的信号），自动重置 WebView2 profile 并重启，
+    # 不用用户点任何按钮。这是「又卡死」的最后一道兜底。
+    threading.Thread(
+        target=_hang_watchdog, args=(mod, profile_dir), daemon=True
+    ).start()
     webview.start(
         gui='edgechromium',
         private_mode=False,

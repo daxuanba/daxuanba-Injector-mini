@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Tuple, Any, List, Dict, Literal
 from urllib.parse import quote
 
-CURRENT_VERSION = "2.35"
+CURRENT_VERSION = "2.36"
 GITHUB_REPO = "daxuanba/daxuanba-Injector-mini"
 
 LOG_FORMAT = '%(log_color)s%(message)s'

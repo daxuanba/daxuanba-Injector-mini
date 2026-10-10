@@ -1039,6 +1039,13 @@ def ensure_source_probe_async():
 
 @app.route('/api/sources', methods=['GET'])
 def get_sources():
+    # v2.36：标记「页面前端真的跑起来了」。桌面壳的启动看门狗靠这个信号判断
+    # 界面有没有卡死 —— 只要收到 /api/sources，就说明前端 JS 已执行、能发请求，
+    # 反过来收不到（卡死时 fetch 一个都发不出去）就触发自动重置自愈。
+    try:
+        app.dxb_page_loaded = True
+    except Exception:
+        pass
     try:
         async def _get_sources():
             async with DxbBackend() as backend:
